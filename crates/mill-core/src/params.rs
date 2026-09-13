@@ -287,6 +287,10 @@ pub struct SimulationParams {
     pub substeps: u32,
     /// PBF density-constraint solver iterations per sub-step.
     pub pbf_iterations: u32,
+    /// XPBD non-penetration solver iterations per sub-step for the ball population (see
+    /// docs/PLAN.md ss3.2). Analogous to `pbf_iterations`; unlike an explicit DEM time step, this
+    /// trades contact-resolution accuracy for cost rather than stability.
+    pub dem_iterations: u32,
     /// Wall-clock-to-simulation-time multiplier requested by the user (achieved rate may be
     /// lower and is reported back to the UI, see docs/PLAN.md ss4.1).
     pub time_scale: f32,
@@ -308,6 +312,7 @@ impl Default for SimulationParams {
             resolution: 40,
             substeps: 4,
             pbf_iterations: 3,
+            dem_iterations: 4,
             time_scale: 1.0,
             frame_budget_ms: 12.0,
             max_balls: 2000,
@@ -326,6 +331,9 @@ impl SimulationParams {
         }
         if !(1..=20).contains(&self.pbf_iterations) {
             return Err("simulation.pbf_iterations must be in [1, 20]".into());
+        }
+        if !(1..=20).contains(&self.dem_iterations) {
+            return Err("simulation.dem_iterations must be in [1, 20]".into());
         }
         if !(self.time_scale > 0.0 && self.time_scale.is_finite()) {
             return Err("simulation.time_scale must be > 0".into());

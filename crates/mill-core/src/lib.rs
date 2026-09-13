@@ -6,8 +6,8 @@
 //! Module responsibilities (see docs/PLAN.md for the full design):
 //! - [`params`]: parameter groups, defaults, validation, coarse-graining derivation.
 //! - [`geometry`]: drum wall SDF (circle + optional lifters), normals, wall velocity.
-//! - [`grid`]: uniform-grid spatial hash shared by DEM and PBF neighbour search (M1/M3).
-//! - [`dem`]: soft-sphere DEM for grinding media (M1).
+//! - [`grid`]: uniform-grid spatial hash shared by the ball solver and PBF neighbour search (M3).
+//! - [`dem`]: position-based (XPBD-style) rigid discs for grinding media.
 //! - [`pbf`]: Position Based Fluids solver for the slurry (M3).
 //! - [`coupling`]: two-way ball<->fluid momentum exchange (M4).
 //! - [`surface`]: free-surface extraction (marching squares) for rendering (M3).
@@ -24,34 +24,38 @@ pub mod pbf;
 pub mod rng;
 pub mod surface;
 
+use dem::DemState;
+use geometry::Drum;
 pub use params::{EffectiveMedia, Params};
 
-/// Fixed simulation sub-step used by the PBF/DEM solvers once they land (M1+): 1/240 s. Both
-/// `dem` and `pbf` are designed around the same nominal sub-step rate (docs/PLAN.md ss3.2/3.3).
+/// Fixed simulation sub-step shared by the ball solver and (once it lands, M3) the PBF solver:
+/// 1/240 s. `simulation.substeps` sub-steps are taken per nominal 60 Hz rendered frame at 1x time
+/// scale (docs/PLAN.md ss3.2/3.3).
 pub const FIXED_DT: f32 = 1.0 / 240.0;
 
 /// The simulation instance. This is the single type the `mill-wasm` wrapper (and, indirectly, the
 /// web worker's fixed-step accumulator, docs/PLAN.md ss4.1) drives via [`Simulation::step`].
-///
-/// Through milestone M0 this only tracks drum kinematics (no media or slurry yet); DEM/PBF
-/// sub-stepping is added inside `step` in later milestones without changing this type's public
-/// API.
 pub struct Simulation {
     params: Params,
     /// Drum rotation angle (radians), kept wrapped into `[0, 2*pi)`.
     drum_angle: f32,
     /// Total simulated time (s).
     sim_time: f64,
+    dem: DemState,
 }
 
 impl Simulation {
-    /// Creates a new simulation, validating `params` first.
+    /// Creates a new simulation, validating `params` first and seeding the ball population from
+    /// its (possibly coarse-grained) effective media, see [`Params::effective_media`].
     pub fn new(params: Params) -> Result<Self, String> {
         params.validate()?;
+        let effective = params.effective_media();
+        let dem = DemState::new(&effective, params.mill.radius_m(), params.simulation.seed);
         Ok(Self {
             params,
             drum_angle: 0.0,
             sim_time: 0.0,
+            dem,
         })
     }
 
@@ -59,10 +63,13 @@ impl Simulation {
         &self.params
     }
 
-    /// Replaces the parameters in place, without resetting `drum_angle`/`sim_time`. Used for
-    /// "hot" parameter updates that should not restart the simulation (docs/PLAN.md ss4.1); the
-    /// worker is responsible for deciding whether a given change needs a full reset (i.e.
-    /// constructing a new [`Simulation`]) instead of calling this.
+    /// Replaces the parameters in place, without resetting `drum_angle`/`sim_time`/the ball
+    /// population. Used for "hot" parameter updates that should not restart the simulation
+    /// (docs/PLAN.md ss4.1); the worker is responsible for deciding whether a given change instead
+    /// needs a full reset (i.e. constructing a new [`Simulation`]) instead of calling this. In
+    /// particular, changes to `mill.diameter_m`/`media`/`simulation.seed`/`simulation.max_balls`
+    /// take effect in derived quantities (e.g. `omega`) immediately but do **not** reseed or
+    /// resize the already-created ball population -- callers must reset for those.
     pub fn set_params(&mut self, params: Params) -> Result<(), String> {
         params.validate()?;
         self.params = params;
@@ -77,14 +84,33 @@ impl Simulation {
         self.sim_time
     }
 
-    /// Advances the simulation by `dt` seconds of simulation time.
-    ///
-    /// Through M0 this only advances drum kinematics; DEM/PBF sub-stepping is added in later
-    /// milestones without changing this signature.
+    /// The current ball population (positions, velocities, orientation, uniform radius/mass).
+    pub fn balls(&self) -> &dem::Balls {
+        &self.dem.balls
+    }
+
+    /// Advances the simulation by `dt` seconds of simulation time, split into
+    /// `simulation.substeps` fixed sub-steps (docs/PLAN.md ss3.2/4.1).
     pub fn step(&mut self, dt: f32) {
         let omega = self.params.mill.omega();
-        self.drum_angle = (self.drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
-        self.sim_time += dt as f64;
+        let radius_m = self.params.mill.radius_m();
+        let lifters = self.params.lifters;
+        let n_substeps = self.params.simulation.substeps.max(1);
+        let dem_iterations = self.params.simulation.dem_iterations;
+        let sub_dt = dt / n_substeps as f32;
+
+        for _ in 0..n_substeps {
+            let drum = Drum::new(radius_m, omega, lifters);
+            self.dem.step(
+                &drum,
+                self.drum_angle,
+                &self.params.media,
+                dem_iterations,
+                sub_dt,
+            );
+            self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
+            self.sim_time += sub_dt as f64;
+        }
     }
 }
 
@@ -106,6 +132,7 @@ mod tests {
         params.mill.speed_mode = SpeedMode::Rpm;
         params.mill.speed_value = 60.0; // 1 rev/s => omega = 2*pi rad/s
         params.mill.direction = Direction::CounterClockwise;
+        params.media.fill_fraction = 0.0; // isolate drum kinematics from ball dynamics
         let mut sim = Simulation::new(params).unwrap();
         sim.step(0.25); // quarter turn
         assert!((sim.drum_angle() - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
@@ -116,6 +143,7 @@ mod tests {
         let mut params = Params::default();
         params.mill.speed_mode = SpeedMode::Rpm;
         params.mill.speed_value = 60.0;
+        params.media.fill_fraction = 0.0;
         let mut sim = Simulation::new(params).unwrap();
         sim.step(1.5); // 1.5 revolutions
         assert!(sim.drum_angle() >= 0.0 && sim.drum_angle() < std::f32::consts::TAU);
@@ -127,6 +155,7 @@ mod tests {
         params.mill.speed_mode = SpeedMode::Rpm;
         params.mill.speed_value = 60.0;
         params.mill.direction = Direction::Clockwise;
+        params.media.fill_fraction = 0.0;
         let mut sim = Simulation::new(params).unwrap();
         sim.step(0.25);
         // A quarter turn clockwise from 0 wraps to three-quarters of a turn in [0, tau).
@@ -138,6 +167,7 @@ mod tests {
     fn sim_time_accumulates_regardless_of_omega() {
         let mut params = Params::default();
         params.mill.speed_value = 0.0;
+        params.media.fill_fraction = 0.0;
         let mut sim = Simulation::new(params).unwrap();
         sim.step(0.4);
         sim.step(0.6);
@@ -155,5 +185,40 @@ mod tests {
         assert!(
             (sim.params().media.fill_fraction - Params::default().media.fill_fraction).abs() < 1e-9
         );
+    }
+
+    #[test]
+    fn new_seeds_the_expected_number_of_balls() {
+        let params = Params::default();
+        let expected = params.effective_media().ball_count as usize;
+        let sim = Simulation::new(params).unwrap();
+        assert_eq!(sim.balls().len(), expected);
+    }
+
+    #[test]
+    fn step_moves_balls_under_gravity_and_keeps_them_inside_the_drum() {
+        let mut params = Params::default();
+        params.mill.speed_value = 0.0; // isolate settling under gravity from wall-driven motion
+        params.simulation.max_balls = 100;
+        let mut sim = Simulation::new(params).unwrap();
+        let start: Vec<_> = sim.balls().x.clone();
+
+        for _ in 0..120 {
+            sim.step(1.0 / 60.0);
+        }
+
+        assert_ne!(
+            sim.balls().x,
+            start,
+            "balls should have moved under gravity"
+        );
+        let r = sim.balls().radius;
+        let radius_m = params.mill.radius_m();
+        for &p in &sim.balls().x {
+            assert!(
+                p.length() + r <= radius_m * 1.05,
+                "ball escaped the drum: {p:?}"
+            );
+        }
     }
 }
