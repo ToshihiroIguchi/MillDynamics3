@@ -26,9 +26,31 @@ Decisions already made with the user:
 | LBM free-surface | Grid-based, free-surface tracking and moving lifters are complex. Rejected. |
 | MPM | Great for non-Newtonian, but grid+particles transfer cost is too high for real time here. Rejected. |
 
-Balls stay in a genuine **soft-sphere DEM** (spring–dashpot + Coulomb friction + rolling resistance), sub-stepped
-inside each fluid substep, because ball charge behaviour (cascading/cataracting/centrifuging, toe/shoulder) is the
-primary output and DEM reproduces it faithfully.
+### Why position-based (XPBD) rigid discs instead of explicit soft-sphere DEM, for the media
+
+The original plan (this section, earlier revision) called for an explicit spring–dashpot soft-sphere
+DEM for the balls, matching common DEM practice. While deriving the M1 contact constants this was
+found to be **incompatible with real time even after coarse-graining**: an explicit spring–dashpot
+contact's stable time step scales as `t_c ~ pi * (allowed overlap) / (impact speed)`. Keeping the
+overlap within a realistic 1% of the ball radius at the drum's actual wall speed (~3 m/s at the
+defaults) gives `dt_dem` on the order of **microseconds** — tens of thousands of sub-steps per
+rendered frame — regardless of how much coarse-graining (ss3.2) enlarges the effective ball
+diameter, since bigger, lighter effective balls don't relax that overlap/speed ratio enough at
+achievable `max_balls` values. This is the same instability-vs-stiffness trade-off that ruled out
+WCSPH for the fluid above, so the same fix applies:
+
+| Method for grinding media | Verdict |
+|---|---|
+| Explicit soft-sphere DEM (linear spring–dashpot, Cundall–Strack) | Physically standard, but stable `dt` is set by contact stiffness/impact speed and lands in the microsecond range at real mill wall speeds — tens of thousands of sub-steps/frame, independent of coarse-graining. Rejected. |
+| **Position-based rigid discs (XPBD-style)** | Non-penetration solved as a rigid (zero-compliance) geometric constraint, projected iteratively — unconditionally stable at any sub-step size, including the same 1/240 s / `substeps`-per-frame rate already used for PBF. Friction, restitution, and rolling resistance are added as position/velocity corrections on top of the converged contact solve. **Chosen.** |
+
+Balls are therefore solved with the **same fixed sub-step as the fluid** (`crate::FIXED_DT` =
+1/240 s, `simulation.substeps` per rendered frame), removing the separate DEM time-step/stiffness
+concept entirely and simplifying the M4 coupling loop (ss3.4) to a single shared sub-step for both
+solvers. Ball charge behaviour (cascading/cataracting/centrifuging, toe/shoulder) is still the
+primary output and this method reproduces it: it is the same class of solver used for real-time
+rigid body contact in production physics engines (e.g. NVIDIA PhysX, Rapier), applied here to 2D
+discs.
 
 ---
 
@@ -144,16 +166,17 @@ Units SI. World frame: drum center at origin, gravity −y, drum rotates counter
   (central differences, ε = 1e-4 R) → normal; rotate back. Only evaluated for particles with `|p| > R − r − h_margin`
   or inside the lifter annulus `|p| > R − lifter_height − r − margin` to keep cost O(surface particles).
 
-### 3.2 Balls — soft-sphere DEM (`dem.rs`)
+### 3.2 Balls — position-based rigid discs (`dem.rs`)
 
 **Coarse-graining (particle scaling), implemented in `params.rs` (`Params::effective_media`).**
 At the current defaults (D = 1 m, d = 2 mm, J = 0.30) the true 2D media population is ~75,000
-balls, far above what single-threaded WASM DEM can step in real time. Rather than exposing this as
-a raw performance cliff, the solver is always seeded from an **effective** media population instead
-of the raw UI values: if the true ball count `N_real = J·(π R²) / (π r_true²)` exceeds
-`simulation.max_balls` (default 2000, chosen to meet the M6 "≥1.0x real time" target), it is
-replaced with `N_sim ≈ max_balls` larger, lighter balls using scale factor
-`k = sqrt(N_real / max_balls)`:
+balls, far above what a single-threaded WASM solver can step in real time even with the
+unconditionally-stable XPBD approach below (the cost is per-contact, not per-substep). Rather than
+exposing this as a raw performance cliff, the solver is always seeded from an **effective** media
+population instead of the raw UI values: if the true ball count
+`N_real = J·(π R²) / (π r_true²)` exceeds `simulation.max_balls` (default 2000, chosen to meet the
+M6 "≥1.0x real time" target), it is replaced with `N_sim ≈ max_balls` larger, lighter balls using
+scale factor `k = sqrt(N_real / max_balls)`:
 - `d_eff = d_true · k` — preserves total footprint area (`N_sim·π r_eff² ≈ N_real·π r_true²`), i.e.
   the fill fraction the user set.
 - `ρ_eff = ρ_true / k` — preserves total charge mass (a 3D-sphere mass `∝ r³` grows by `k³` while
@@ -164,21 +187,43 @@ et al. 2009): it reproduces bulk charge behaviour (cascading/cataracting/centrif
 angles) but not the true interstitial void structure or single-collision statistics at the real
 particle size. `d_eff`/`ρ_eff`/`N_sim`/`k` are always shown in the parameters modal's derived-values
 panel (ss4.3) so the approximation is never silent; `k = 1.0` (no coarse-graining) whenever
-`N_real <= max_balls`. `k_n`/`dt_dem` below are derived from the effective population automatically,
-since they are already functions of mass and radius.
+`N_real <= max_balls`. Mass/radius/inertia below are the *effective* (post coarse-graining) values.
 
-- State per ball: `x, v (Vec2), θ, ω_spin, r, m, I` (SoA `Vec<f32>` arrays). Mass uses 3D sphere `m = ρ_b·4/3·π·r³`,
-  `I = 2/5·m·r²` (standard practice for 2D slice mill DEM). Optional size distribution: list of (d, fraction).
-  Radius/density here are the *effective* (post coarse-graining) values, not necessarily the raw UI ones.
-- Contact (ball–ball, ball–wall/lifter): linear spring–dashpot (Cundall–Strack)
-  - `F_n = k_n·δ − γ_n·v_n` (no tensile), `γ_n = −2·ln(e)·√(k_n·m_eff)/√(π² + ln²e)` from restitution `e`.
-  - Tangential: incremental spring `ξ_t += v_t·dt`, `F_t = −min(|k_t·ξ_t + γ_t·v_t|, μ·|F_n|)·t̂`; slip clamps ξ_t.
-    `k_t = 2/7·k_n`, `γ_t = γ_n`. Contact history stored in a small hash map keyed by (i, j) / (i, wall-id); pruned when contact ends.
-  - Rolling resistance: constant-torque model `τ_r = −μ_r·|F_n|·r_eff·sign(Δω)`.
-- `k_n` chosen by target max overlap: `k_n = m_max·v_impact²/(2·(0.01·r_min)²)` with `v_impact = ω·R·2` (clamped); shown as derived value.
-- Time step: `t_c = π/√(k_n/m_eff − (γ_n/2m_eff)²)`, `dt_dem = t_c/20`. DEM substeps per fluid substep `n_dem = ceil(dt_fluid/dt_dem)`.
-- Integration: semi-implicit Euler (velocity Verlet is optional later); forces = gravity + contacts + fluid force (held constant over the fluid substep).
-- Neighbour search: `grid.rs` uniform grid, cell = `d_max`, dense array covering the drum bounding box; rebuilt every DEM substep for balls (cheap) — Verlet list optimisation only if profiling demands.
+**Solver.** No contact stiffness or DEM-specific time step exists in this design (see the rationale
+above): balls advance on the same fixed sub-step as the fluid (`FIXED_DT` = 1/240 s,
+`simulation.substeps` per rendered frame, `simulation.dem_iterations` constraint-solver iterations
+per sub-step, analogous to PBF's `pbf_iterations`). Per sub-step `dt`:
+
+1. **Predict**: `v += g·dt`; `x += v·dt`; `θ += ω·dt` (save `x0`, `θ0` for the velocity
+   reconstruction in step 4). State per ball: `x, v (Vec2), θ, ω (Vec<f32> SoA)`, plus the uniform
+   effective `r, m, I = 2/5·m·r²` from `effective_media` (size distributions are future work).
+2. **Broad-phase**: `grid.rs` uniform grid over predicted `x`, cell = `2·r_eff`; gather candidate
+   ball–ball pairs once (reused across iterations).
+3. **Solve non-penetration** (`dem_iterations` Gauss–Seidel passes, zero compliance = rigid):
+   - Ball–ball: `C = |x_i − x_j| − (r_i + r_j)`; if `C < 0`, `Δλ = −C / (w_i + w_j)` (`w = 1/m`),
+     apply `Δx_i = w_i·Δλ·n̂`, `Δx_j = −w_j·Δλ·n̂`, accumulate `λ_n` for this contact this sub-step.
+   - Ball–wall/lifter: `C = sdf(x_i) − r_i` against [`crate::geometry::Drum`]; same projection with
+     `w_wall = 0` (infinite wall mass), accumulating `λ_n` per ball.
+4. **Reconstruct velocities**: `v = (x − x0)/dt`, `ω = (θ − θ0)/dt`.
+5. **Friction** (one pass, Coulomb-clamped position correction, not a persistent tangential
+   spring): for each contact with `λ_n > 0`, `v_t = (v_i−v_j)·t̂ − r_iω_i − r_jω_j` (wall case: `v_j`
+   replaced by the wall's rigid velocity at the contact point, no `r_jω_j` term); the correction
+   that would fully cancel sliding this sub-step is clamped to `μ·λ_n` before being applied to
+   position (linear) and orientation (`∝ r·w_rot`), then velocities are reconstructed again from
+   the (now friction-corrected) positions. This is a simplified, non-anchored Coulomb model (no
+   cross-substep stiction memory); acceptable for the bulk charge-motion behaviour this project
+   targets, revisited if validation shows drift.
+6. **Restitution** (one pass): for contacts with `λ_n > 0` whose *pre-solve* normal velocity was
+   approaching faster than a small threshold (avoids resting-contact buzz), add back an extra
+   normal impulse so the *post-solve* separating velocity matches `e · v_n,pre` (per-contact `e`:
+   `restitution_ball_ball` or `restitution_ball_wall`).
+7. **Rolling resistance**: `Δω = −sign(ω)·min(μ_r·(λ_n,total/dt)·r/I·dt, |ω|)` per ball, where
+   `λ_n,total` sums this ball's accumulated normal impulses (ball–ball + wall) this sub-step —
+   capped so it cannot reverse the sign of `ω` in one sub-step.
+
+This is the same family of solver used for real-time rigid-body contact in production physics
+engines (XPBD / "small steps" style, e.g. Macklin, Müller & Chentanez 2016; Müller et al. 2020),
+applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and fixed sub-step.
 
 ### 3.3 Slurry — PBF (`pbf.rs`)
 - Particle spacing `dx` from `resolution` param (`dx = R / res`, default res = 40 → 80 particles across the drum);
@@ -198,16 +243,20 @@ since they are already functions of mass and radius.
   Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇`.
 - Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.
 
-### 3.4 Coupling (`coupling.rs`) — staggered, per fluid substep
+### 3.4 Coupling (`coupling.rs`) — one shared sub-step for both solvers
+Balls (ss3.2) and fluid (ss3.3) now run on the *same* fixed sub-step (`FIXED_DT`, `simulation.substeps`
+per frame) rather than a separate DEM/fluid time-step ratio, simplifying the staggered exchange to:
 1. Fluid predicts `x*`; during constraint iterations, fluid particles inside a ball (dist < r_b + 0.5·dx) are projected to
    the ball surface. Accumulate the corrections `ΔP_b = Σ m_f·Δp_i` per ball.
 2. Viscous no-slip at ball surface: fluid particles within `h` of a ball surface blend towards the ball's surface velocity
    `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; the momentum removed from fluid is added to the ball (force + torque).
-3. Fluid force on ball for the next `n_dem` DEM substeps: `F_b = ΔP_b/dt_fluid + F_visc`, `τ_b` similarly; clamped to
-   `|F_b| ≤ F_clamp = 20·m_b·g` for stability. (Buoyancy emerges from the density-constraint push; steel in slurry is a
-   minor effect so v1 does not add ball boundary particles to the density sum. v2 option: sample ball perimeter as
-   boundary particles contributing to `ρ_i` — Akinci-style — for correct buoyancy.)
-4. Balls advance `n_dem` DEM substeps; new positions/velocities become the moving boundaries for the next fluid substep.
+3. Fluid force/torque on each ball this sub-step: `F_b = ΔP_b/dt + F_visc` (and `τ_b` similarly), clamped to
+   `|F_b| ≤ F_clamp = 20·m_b·g` for stability, applied as an extra acceleration in the ball solver's predict step (ss3.2 step 1).
+   (Buoyancy emerges from the density-constraint push; steel in slurry is a minor effect so v1 does not add ball
+   boundary particles to the density sum. v2 option: sample ball perimeter as boundary particles contributing to
+   `ρ_i` — Akinci-style — for correct buoyancy.)
+4. Balls advance their one sub-step (ss3.2); new positions/velocities become the moving boundaries for the fluid's
+   next sub-step.
 
 ### 3.5 Free surface & metrics (`surface.rs`, `metrics.rs`)
 - Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of
@@ -248,8 +297,8 @@ default, hot, help }` with live validation (red outline + message, Apply disable
 `Cancel`, `Apply` (Apply asks "Restart simulation?" only if a non-hot param changed). Esc / backdrop click = Cancel.
 Derived read-only values shown in the modal: critical speed, %Nc, true vs. simulated ball count,
 coarse-graining factor `k` and effective media diameter (see ss3.2; `k = 1.0`/"no coarse-graining"
-when the true count is already <= `simulation.max_balls`), fluid particle count, DEM dt, k_n,
-estimated cost.
+when the true count is already <= `simulation.max_balls`), fluid particle count, shared sub-step
+rate (`FIXED_DT` x `substeps`), estimated cost.
 
 | Group | Parameters (defaults) |
 |---|---|
@@ -281,8 +330,8 @@ Model assignment per CLAUDE.md: **[F]** = Fable (main session), **[S]** = sonnet
    with worker + canvas drawing a rotating empty drum from wasm-provided `drumAngle`.
    Verify: `scripts/build-wasm` + `npm run dev` → rotating drum with rotation marker at correct rpm.
 
-### M1 — DEM balls in rotating drum (1–2 days) [F core, S tests/UI]
-1. [F] `grid.rs`, `geometry.rs` (circle-only SDF + wall velocity), `dem.rs` contact model, integration, ball init lattice.
+### M1 — Balls (position-based rigid discs) in rotating drum (1–2 days) [F core, S tests/UI]
+1. [F] `grid.rs`, `geometry.rs` (circle-only SDF + wall velocity), `dem.rs` XPBD contact solver, ball init lattice.
 2. [S] Unit tests: single ball drop restitution (bounce height ratio ≈ e²), two-ball head-on momentum/energy, ball resting on wall
    (overlap < 1 % r, no drift), rotating drum centrifuging test (at 120 % Nc all balls stay within 1.5 r of wall after 5 s),
    at 70 % Nc a cascading charge with toe ~ 200–230° and shoulder ~ 40–60° (measured from the vertical, loose tolerance).
@@ -349,7 +398,7 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 | Risk | Mitigation |
 |---|---|
 | PBF viscosity only qualitative | Calibrated mapping in v1 documented as such; implicit viscosity + Bingham in M7 |
-| Coupling instability (light fluid pushing heavy balls is fine, but many overlapping corrections) | Impulse clamp, dt_fluid/dt_dem ratio check, symmetric momentum test, per-substep overlap resolution |
+| Coupling instability (light fluid pushing heavy balls is fine, but many overlapping corrections) | Impulse clamp, shared fixed sub-step for both solvers (ss3.2/3.4, no separate DEM/fluid time-step ratio to get wrong), symmetric momentum test, per-substep overlap resolution |
 | WASM single-thread too slow at high resolution | Frame budget + achieved-time-scale HUD, auto resolution, SIMD; targets defined in M6 |
 | 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
 | Rust toolchain on Windows (MSVC linker) | Check in M0; fall back to GNU toolchain with rtools gcc; wasm target needs no linker |
