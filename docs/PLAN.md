@@ -145,8 +145,31 @@ Units SI. World frame: drum center at origin, gravity −y, drum rotates counter
   or inside the lifter annulus `|p| > R − lifter_height − r − margin` to keep cost O(surface particles).
 
 ### 3.2 Balls — soft-sphere DEM (`dem.rs`)
+
+**Coarse-graining (particle scaling), implemented in `params.rs` (`Params::effective_media`).**
+At the current defaults (D = 1 m, d = 2 mm, J = 0.30) the true 2D media population is ~75,000
+balls, far above what single-threaded WASM DEM can step in real time. Rather than exposing this as
+a raw performance cliff, the solver is always seeded from an **effective** media population instead
+of the raw UI values: if the true ball count `N_real = J·(π R²) / (π r_true²)` exceeds
+`simulation.max_balls` (default 2000, chosen to meet the M6 "≥1.0x real time" target), it is
+replaced with `N_sim ≈ max_balls` larger, lighter balls using scale factor
+`k = sqrt(N_real / max_balls)`:
+- `d_eff = d_true · k` — preserves total footprint area (`N_sim·π r_eff² ≈ N_real·π r_true²`), i.e.
+  the fill fraction the user set.
+- `ρ_eff = ρ_true / k` — preserves total charge mass (a 3D-sphere mass `∝ r³` grows by `k³` while
+  the count shrinks by `k²`, net `k`, canceled by dividing density by `k`).
+
+This is the standard coarse-grained DEM approximation (see e.g. Sakai & Koshizuka 2009; Bierwisch
+et al. 2009): it reproduces bulk charge behaviour (cascading/cataracting/centrifuging, toe/shoulder
+angles) but not the true interstitial void structure or single-collision statistics at the real
+particle size. `d_eff`/`ρ_eff`/`N_sim`/`k` are always shown in the parameters modal's derived-values
+panel (ss4.3) so the approximation is never silent; `k = 1.0` (no coarse-graining) whenever
+`N_real <= max_balls`. `k_n`/`dt_dem` below are derived from the effective population automatically,
+since they are already functions of mass and radius.
+
 - State per ball: `x, v (Vec2), θ, ω_spin, r, m, I` (SoA `Vec<f32>` arrays). Mass uses 3D sphere `m = ρ_b·4/3·π·r³`,
   `I = 2/5·m·r²` (standard practice for 2D slice mill DEM). Optional size distribution: list of (d, fraction).
+  Radius/density here are the *effective* (post coarse-graining) values, not necessarily the raw UI ones.
 - Contact (ball–ball, ball–wall/lifter): linear spring–dashpot (Cundall–Strack)
   - `F_n = k_n·δ − γ_n·v_n` (no tensile), `γ_n = −2·ln(e)·√(k_n·m_eff)/√(π² + ln²e)` from restitution `e`.
   - Tangential: incremental spring `ξ_t += v_t·dt`, `F_t = −min(|k_t·ξ_t + γ_t·v_t|, μ·|F_n|)·t̂`; slip clamps ξ_t.
@@ -223,7 +246,10 @@ Tabs (buttons toggling sections): **Mill**, **Media**, **Slurry**, **Lifters**, 
 Each field generated from `schema.ts` entries `{ id, group, label, unit, type: number|select|boolean, min, max, step,
 default, hot, help }` with live validation (red outline + message, Apply disabled). Footer: `Presets ▾`, `Reset to defaults`,
 `Cancel`, `Apply` (Apply asks "Restart simulation?" only if a non-hot param changed). Esc / backdrop click = Cancel.
-Derived read-only values shown in the modal: critical speed, %Nc, ball count, fluid particle count, DEM dt, k_n, estimated cost.
+Derived read-only values shown in the modal: critical speed, %Nc, true vs. simulated ball count,
+coarse-graining factor `k` and effective media diameter (see ss3.2; `k = 1.0`/"no coarse-graining"
+when the true count is already <= `simulation.max_balls`), fluid particle count, DEM dt, k_n,
+estimated cost.
 
 | Group | Parameters (defaults) |
 |---|---|
@@ -328,4 +354,4 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 | 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
 | Rust toolchain on Windows (MSVC linker) | Check in M0; fall back to GNU toolchain with rtools gcc; wasm target needs no linker |
 | Lifter SDF gradient numeric noise at corners | Round corners with small radius in SDF; test resting stability |
-| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | Decision pending with the user: either (a) a "coarse-graining" mode that substitutes fewer, larger effective balls for performance while preserving total media mass and fill fraction (documented scaling law, approximate bulk fidelity), surfaced explicitly in the derived-values panel, or (b) accept sub-real-time playback at the true particle count and rely on `time_scale`/frame-budget reporting. Do not implement either silently. |
+| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | **Resolved, implemented** (`Params::effective_media`, ss3.2): coarse-graining is applied automatically whenever the true ball count exceeds `simulation.max_balls` (default 2000), substituting fewer, larger, lighter balls that preserve total media mass and fill fraction. The effective diameter, coarse-graining factor, and simulated vs. true ball count are always shown explicitly in the parameters modal's derived-values panel (ss4.3) — never applied silently. |
