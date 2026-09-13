@@ -80,10 +80,7 @@ impl Drum {
 
 /// Rotates a 2D vector by a unit vector representing `(cos, sin)` of the rotation angle.
 fn rotate(v: Vec2, unit: Vec2) -> Vec2 {
-    Vec2::new(
-        v.x * unit.x - v.y * unit.y,
-        v.x * unit.y + v.y * unit.x,
-    )
+    Vec2::new(v.x * unit.x - v.y * unit.y, v.x * unit.y + v.y * unit.x)
 }
 
 #[cfg(test)]
@@ -92,7 +89,14 @@ mod tests {
     use std::f32::consts::PI;
 
     fn smooth_drum(radius_m: f32, omega: f32) -> Drum {
-        Drum::new(radius_m, omega, LiftersParams { count: 0, ..LiftersParams::default() })
+        Drum::new(
+            radius_m,
+            omega,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        )
     }
 
     #[test]

@@ -21,6 +21,10 @@ Thumbs.db
 *.log
 npm-debug.log*
 
+# Tooling-local state (Claude Code, Playwright MCP scratch output)
+.claude/
+.playwright-mcp/
+
 # Test artifacts
 web/test-results/
 web/playwright-report/
