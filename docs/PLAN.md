@@ -227,8 +227,8 @@ Derived read-only values shown in the modal: critical speed, %Nc, ball count, fl
 
 | Group | Parameters (defaults) |
 |---|---|
-| Mill | diameter D = 0.6 m; speed mode = %Nc; speed = 70 %Nc (or rpm); rotation direction CCW |
-| Media | ball diameter 20 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 7800; restitution 0.5 (ball–ball) / 0.3 (ball–wall); friction μ 0.4 / 0.5; rolling μ_r 0.01 |
+| Mill | diameter D = 1.0 m; speed mode = %Nc; speed = 70 %Nc (or rpm); rotation direction CCW |
+| Media | ball diameter 2 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 7800; restitution 0.5 (ball–ball) / 0.3 (ball–wall); friction μ 0.4 / 0.5; rolling μ_r 0.01 |
 | Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 0.5 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
 | Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
 | Simulation | resolution 40 (particles across R); substeps 4; PBF iterations 3; time scale 1.0; frame budget 12 ms; seed 1 |
@@ -328,3 +328,4 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 | 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
 | Rust toolchain on Windows (MSVC linker) | Check in M0; fall back to GNU toolchain with rtools gcc; wasm target needs no linker |
 | Lifter SDF gradient numeric noise at corners | Round corners with small radius in SDF; test resting stability |
+| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | Decision pending with the user: either (a) a "coarse-graining" mode that substitutes fewer, larger effective balls for performance while preserving total media mass and fill fraction (documented scaling law, approximate bulk fidelity), surfaced explicitly in the derived-values panel, or (b) accept sub-real-time playback at the true particle count and rely on `time_scale`/frame-budget reporting. Do not implement either silently. |

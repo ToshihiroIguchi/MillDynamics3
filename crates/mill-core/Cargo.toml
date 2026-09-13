@@ -1,0 +1,22 @@
+[package]
+name = "mill-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "2D ball-mill DEM + PBF slurry simulation core (no WASM dependencies)"
+
+[dependencies]
+glam = { version = "0.29", default-features = false, features = ["libm"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "step"
+harness = false
+
+[lib]
+name = "mill_core"
+path = "src/lib.rs"
