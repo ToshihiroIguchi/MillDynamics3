@@ -1,0 +1,330 @@
+# MillDynamics3 — Ball Mill Media/Slurry Simulator (Rust → WASM, real-time 2D)
+
+## Context
+
+Goal: an interactive browser app that simulates a tumbling ball mill cross-section — grinding media (balls) and a
+viscous slurry — and animates it in near real time. The two things the user must be able to see are
+(1) where the balls are and (2) where the slurry free surface is. Mixing of the slurry should also be visible.
+Optional lifters (wall protrusions) must be supported, but the default drum wall is perfectly smooth.
+Parameters are edited in a modal window. Everything runs client-side in WebAssembly.
+
+Decisions already made with the user:
+- **2D cross-section** (plane perpendicular to the mill axis), not 3D.
+- **Rust → WASM** core (Rust is not installed yet; Node 24 / npm 11 / git / MinGW gcc / VS present).
+- **Custom solver core** (no rapier/salva): DEM for balls + Position Based Fluids (PBF) for slurry.
+- **Vite + TypeScript, no framework**; Canvas 2D rendering; native `<dialog>` modal.
+- Conversation with the user in Japanese; *all* code, comments, docs, UI text, commits in English.
+- Fable/Opus only for planning and hard parts; Sonnet/Haiku subagents for the rest (recorded in CLAUDE.md).
+
+### Why DEM + PBF instead of pure coarse-grained DEM (or SPH / LBM / MPM)
+
+| Method for slurry | Verdict |
+|---|---|
+| Coarse-grained DEM "liquid" particles with damping/cohesion | Single solver, but no incompressibility → slurry compacts/sinks, viscosity is uncontrolled, free surface is ill-defined. Rejected. |
+| WCSPH (weakly compressible SPH) | Physically faithful viscosity, but dt ≈ 1e-4 s → ~170 substeps per 60 Hz frame → ~10× too slow for real time in single-thread WASM at useful resolution. Kept as a possible high-fidelity mode later. |
+| **PBF (Position Based Fluids)** | Unconditionally stable at dt = 1/240 s, 3–4 iterations; ~10–20× cheaper than WCSPH; clean free surface; well-proven for real-time (NVIDIA Flex). Viscosity is qualitative (XSPH) in v1, upgradeable to implicit viscosity. **Chosen.** |
+| LBM free-surface | Grid-based, free-surface tracking and moving lifters are complex. Rejected. |
+| MPM | Great for non-Newtonian, but grid+particles transfer cost is too high for real time here. Rejected. |
+
+Balls stay in a genuine **soft-sphere DEM** (spring–dashpot + Coulomb friction + rolling resistance), sub-stepped
+inside each fluid substep, because ball charge behaviour (cascading/cataracting/centrifuging, toe/shoulder) is the
+primary output and DEM reproduces it faithfully.
+
+---
+
+## 1. Repository layout
+
+```
+MillDynamics3/
+  CLAUDE.md                     # project rules (language + model-delegation policy) — see §2
+  README.md                     # how to build/run
+  .gitignore
+  docs/
+    PLAN.md                     # copy of this plan
+    PHYSICS.md                  # equations, units, parameter derivations (written with M1/M3)
+    PARAMETERS.md               # every UI parameter: symbol, unit, range, default, hot-swappable?
+  Cargo.toml                    # workspace
+  crates/
+    mill-core/                  # pure Rust simulation, no wasm deps; unit tests + benches
+      Cargo.toml
+      src/
+        lib.rs                  # pub API: Simulation::new(&Params), step(dt_wall), views
+        params.rs               # Params struct (serde), Default impl, validation, derived values
+        geometry.rs             # drum SDF (circle + optional lifters), wall velocity, rotating frame
+        grid.rs                 # uniform grid spatial hash (cell list) shared by DEM & PBF
+        dem.rs                  # balls: state, contact model, integration, wall/lifter contacts
+        pbf.rs                  # fluid: kernels, density constraint, XSPH viscosity, boundaries
+        coupling.rs             # two-way ball↔fluid exchange
+        surface.rs              # density grid splat + marching squares → free-surface polylines
+        metrics.rs              # toe/shoulder angles, slurry level, mixing index, energy, power
+        rng.rs                  # small xorshift RNG (deterministic seeds)
+      benches/step.rs           # criterion benchmark (500/1000/2000 balls × 2k/4k/8k fluid)
+    mill-wasm/                  # thin wasm-bindgen wrapper exposing mill-core
+      Cargo.toml
+      src/lib.rs
+  web/
+    package.json  vite.config.ts  tsconfig.json  index.html  styles.css
+    src/
+      main.ts                   # boot: load wasm worker, wire UI, rAF render loop
+      worker.ts                 # owns the wasm Simulation; fixed-step accumulator; posts frames
+      protocol.ts               # typed messages main↔worker (Init, SetParams, Pause, Frame, Stats)
+      params/schema.ts          # parameter definitions (id, label, unit, min/max/step, default, group, hot)
+      params/presets.ts         # named presets (Lab mill 0.3 m, Pilot 0.6 m, Lifters ×8, High viscosity…)
+      ui/paramsModal.ts         # builds <dialog> form from schema; validate; Apply/Reset/Cancel
+      ui/hud.ts                 # sim time, rpm, %Nc, fps, ms/step, achieved time scale, metrics
+      ui/toolbar.ts             # Play/Pause/Step/Reset/Parameters/Presets/Screenshot buttons
+      render/canvas.ts          # Canvas 2D renderer (drum, lifters, surface, fluid, balls, dye)
+      render/colors.ts
+      state.ts                  # app state (params, running, latest frame)
+    tests/
+      unit/*.test.ts            # vitest: schema validation, protocol, surface polygon helpers
+      e2e/*.spec.ts             # playwright: modal opens, edit rpm, apply, canvas updates, lifters
+  scripts/
+    build-wasm.ps1 / build-wasm.sh   # wasm-pack build --target web --release → web/src/wasm/
+```
+
+Rust workspace uses only: `glam` (Vec2 math), `serde`/`serde_json` (params), `wasm-bindgen`, `js-sys`,
+`criterion` (dev). No physics libraries.
+
+---
+
+## 2. CLAUDE.md (to be created verbatim in step M0)
+
+```markdown
+# MillDynamics3 — Project Rules
+
+## Language policy
+- Conversation with the user: **Japanese**.
+- Everything else — code, comments, identifiers, commit messages, docs, UI strings, file names,
+  plan files, subagent prompts, test names — **English only**.
+
+## Model / cost policy
+Fable and Opus are very expensive. Use them only for:
+- planning and architecture decisions,
+- the hard numerical core (DEM contact model, PBF solver, ball–fluid coupling, stability/perf bugs),
+- reviewing changes to `crates/mill-core/src/{dem,pbf,coupling}.rs`.
+
+Delegate everything else to subagents via the Agent tool with an explicit `model`:
+- `sonnet`: UI (web/), rendering, build/tooling config, tests, docs, benches, wasm bindings,
+  geometry/surface/metrics modules, refactors, moderate bug fixes.
+- `haiku`: boilerplate, file scaffolding, formatting, running commands, simple lookups, small edits,
+  writing/updating docs from existing content.
+When in doubt, start with `sonnet`; escalate to the main (Fable/Opus) session only if the subagent
+fails twice or the problem is numerical/physical.
+
+## Project summary
+2D cross-section tumbling ball mill simulator: DEM balls + PBF slurry, Rust → WASM, Vite + TS
+frontend, Canvas 2D, native <dialog> modal for parameters. Default drum wall has **no lifters**.
+See docs/PLAN.md, docs/PHYSICS.md, docs/PARAMETERS.md.
+
+## Repository
+- Remote: https://github.com/ToshihiroIguchi/MillDynamics3 (branch `main`). Commit per milestone; push only when the user asks.
+
+## Conventions
+- SI units everywhere in the core (m, kg, s, Pa·s). UI may show mm / rpm and convert in `schema.ts`.
+- Deterministic: every run is reproducible from `Params` + `seed`.
+- `cargo fmt`, `cargo clippy -D warnings`, `npm run lint` must pass before finishing a task.
+- Do not commit `web/src/wasm/` build output or `target/`.
+```
+
+---
+
+## 3. Physics specification (2D)
+
+Units SI. World frame: drum center at origin, gravity −y, drum rotates counter-clockwise at ω = 2π·rpm/60.
+
+### 3.1 Drum geometry (`geometry.rs`)
+- Radius `R` (from diameter `D`). Critical speed `N_c = 42.3/√D` rpm (D in m); UI accepts `rpm` or `% N_c`.
+- **Signed distance function in the drum's rotating frame**: `sdf(p_local) = min(R − |p|, sdf_lifters(p_local))`
+  where positive = inside free space. Lifters (default **count = 0** → circle only): `n` identical bars evenly
+  spaced, each a convex quad defined by `height`, `base_width`, `top_width` (trapezoid, face angle derived),
+  optional `phase` angle. `sdf_lifters` = −(max over lifter quads of convex-polygon SDF) (i.e., subtract lifters from free space).
+- `wall_velocity(p) = ω × p` (rigid rotation), used for friction/no-slip.
+- Contact query: transform particle into drum frame (rotate by −θ_drum), evaluate `sdf` and its numeric gradient
+  (central differences, ε = 1e-4 R) → normal; rotate back. Only evaluated for particles with `|p| > R − r − h_margin`
+  or inside the lifter annulus `|p| > R − lifter_height − r − margin` to keep cost O(surface particles).
+
+### 3.2 Balls — soft-sphere DEM (`dem.rs`)
+- State per ball: `x, v (Vec2), θ, ω_spin, r, m, I` (SoA `Vec<f32>` arrays). Mass uses 3D sphere `m = ρ_b·4/3·π·r³`,
+  `I = 2/5·m·r²` (standard practice for 2D slice mill DEM). Optional size distribution: list of (d, fraction).
+- Contact (ball–ball, ball–wall/lifter): linear spring–dashpot (Cundall–Strack)
+  - `F_n = k_n·δ − γ_n·v_n` (no tensile), `γ_n = −2·ln(e)·√(k_n·m_eff)/√(π² + ln²e)` from restitution `e`.
+  - Tangential: incremental spring `ξ_t += v_t·dt`, `F_t = −min(|k_t·ξ_t + γ_t·v_t|, μ·|F_n|)·t̂`; slip clamps ξ_t.
+    `k_t = 2/7·k_n`, `γ_t = γ_n`. Contact history stored in a small hash map keyed by (i, j) / (i, wall-id); pruned when contact ends.
+  - Rolling resistance: constant-torque model `τ_r = −μ_r·|F_n|·r_eff·sign(Δω)`.
+- `k_n` chosen by target max overlap: `k_n = m_max·v_impact²/(2·(0.01·r_min)²)` with `v_impact = ω·R·2` (clamped); shown as derived value.
+- Time step: `t_c = π/√(k_n/m_eff − (γ_n/2m_eff)²)`, `dt_dem = t_c/20`. DEM substeps per fluid substep `n_dem = ceil(dt_fluid/dt_dem)`.
+- Integration: semi-implicit Euler (velocity Verlet is optional later); forces = gravity + contacts + fluid force (held constant over the fluid substep).
+- Neighbour search: `grid.rs` uniform grid, cell = `d_max`, dense array covering the drum bounding box; rebuilt every DEM substep for balls (cheap) — Verlet list optimisation only if profiling demands.
+
+### 3.3 Slurry — PBF (`pbf.rs`)
+- Particle spacing `dx` from `resolution` param (`dx = R / res`, default res = 40 → 80 particles across the drum);
+  kernel radius `h = 2·dx`; rest density `ρ0 = ρ_slurry`; particle mass `m_f = ρ0·dx²` (2D, unit depth).
+- Fill: slurry volume given as **fraction of drum area** `U_s` (or "% of charge voids" as an alternative input) → initial
+  particles on a hexagonal lattice in the bottom of the drum (interstitial with balls; balls initialised first, fluid particles overlapping a ball are removed).
+- Kernels: 2D Poly6 (`4/(π h⁸)`) for density, 2D Spiky gradient (`−30/(π h⁵)`) for ∇W.
+- Substep (dt = 1/240 s, `substeps` param): predict `x* = x + dt·(v + dt·g)` → neighbour grid (cell = h) → `iters` (default 3) of
+  density constraint `C_i = ρ_i/ρ0 − 1`, `λ_i = −C_i/(Σ|∇C|² + ε)` (ε = 1e2…1e3 relaxation), `Δp_i = 1/ρ0·Σ(λ_i+λ_j+s_corr)∇W`,
+  artificial pressure `s_corr = −k·(W(r)/W(Δq))⁴`, k = 0.1, Δq = 0.2 h → boundary projection → update `v = (x*−x)/dt` → viscosity → `x = x*`.
+- Boundaries: SDF projection against drum/lifters with wall velocity blending
+  `v ← (1−β)·v + β·v_wall` for particles touching the wall (β = no-slip factor, default 1 → no-slip).
+- **Viscosity (v1)**: XSPH `v_i += c·Σ (m_j/ρ_j)(v_j − v_i) W_ij` with `c = clamp(μ/μ_ref, 0, 1)` per substep, plus an
+  explicit viscous-damping term for dt-independence: `c_eff = 1 − exp(−μ·dt/(ρ0·h²·κ))`. Calibrated once against a
+  rotating-drum steady-state slope so that UI viscosity in Pa·s is monotone and roughly quantitative (documented in PHYSICS.md).
+- **Viscosity (v2, phase M7)**: implicit viscosity (Weiler et al. 2018) with conjugate gradient; Bingham/Herschel–Bulkley via
+  Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇`.
+- Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.
+
+### 3.4 Coupling (`coupling.rs`) — staggered, per fluid substep
+1. Fluid predicts `x*`; during constraint iterations, fluid particles inside a ball (dist < r_b + 0.5·dx) are projected to
+   the ball surface. Accumulate the corrections `ΔP_b = Σ m_f·Δp_i` per ball.
+2. Viscous no-slip at ball surface: fluid particles within `h` of a ball surface blend towards the ball's surface velocity
+   `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; the momentum removed from fluid is added to the ball (force + torque).
+3. Fluid force on ball for the next `n_dem` DEM substeps: `F_b = ΔP_b/dt_fluid + F_visc`, `τ_b` similarly; clamped to
+   `|F_b| ≤ F_clamp = 20·m_b·g` for stability. (Buoyancy emerges from the density-constraint push; steel in slurry is a
+   minor effect so v1 does not add ball boundary particles to the density sum. v2 option: sample ball perimeter as
+   boundary particles contributing to `ρ_i` — Akinci-style — for correct buoyancy.)
+4. Balls advance `n_dem` DEM substeps; new positions/velocities become the moving boundaries for the next fluid substep.
+
+### 3.5 Free surface & metrics (`surface.rs`, `metrics.rs`)
+- Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of
+  radius 1.5 h; marching squares at `φ = 0.5·φ_full` (φ_full = value in the bulk) → closed polylines; Chaikin smoothing ×1.
+  Exported as `Vec<f32>` [n_polys, len_0, x,y,…]. Optional: the polygon is filled in the renderer, particles hidden.
+- Slurry-level metrics: pool angular extent along the wall (fluid particles within `1.5 h` of the wall → min/max angle),
+  free-surface mean line (fit to boundary particles not near the wall: angle and offset), pool depth at bottom.
+- Charge metrics: toe/shoulder angles from angular histogram of balls near the wall; charge center of mass;
+  power draw estimate `P = Σ (F_wall × v_wall)` (torque on drum × ω) — smoothed.
+- Mixing index (Lacey): dye variance over occupied grid cells normalised by initial variance, 0 → 1.
+- Energy checks (debug): total KE, DEM overlap max, fluid density error max.
+
+---
+
+## 4. Frontend specification
+
+### 4.1 Runtime architecture
+- `worker.ts` instantiates the wasm module and `Simulation`. Loop: on each `requestFrame` message (sent by main
+  thread rAF) the worker runs fixed 1/240 s substeps until `sim_time` catches up with wall time × `time_scale`, but
+  never more than `budget_ms` (default 12 ms) per frame. It then posts `Frame { ballsXYRT: Float32Array, fluidXYD: Float32Array,
+  surface: Float32Array, drumAngle, simTime, stats }` with **transferable** buffers (double-buffered). Achieved
+  time scale is reported so the HUD shows e.g. "0.6× real time" instead of freezing → "near real time" by construction.
+- SharedArrayBuffer + wasm threads are *not* required (Vite dev server would need COOP/COEP); listed as future work.
+- Params: `SetParams { params, reset: boolean }`. Hot-swappable (no reset): rpm, viscosity, time scale, substeps/iters,
+  no-slip factors, display options. Everything else (geometry, fill, ball sizes, resolution, seed, lifters) triggers `reset`.
+
+### 4.2 Rendering (`render/canvas.ts`, Canvas 2D, DPR-aware)
+Layers per frame: background → drum interior disc → lifters (rotated by drumAngle) → slurry surface polygon (fill, alpha 0.55)
+→ fluid particles (optional; colour = dye, blue→orange) → balls (fill grey, spin indicator line) → drum wall ring +
+rotation marker → overlays (toe/shoulder rays, free-surface line) → HUD text. 2000 balls + 8000 dots at 60 fps is fine on
+Canvas 2D (dots drawn as `fillRect`; balls as `arc`). WebGL2 instancing is a documented fallback if profiling shows
+render > 6 ms.
+
+### 4.3 Parameters modal (`ui/paramsModal.ts`) — native `<dialog showModal()>`
+Tabs (buttons toggling sections): **Mill**, **Media**, **Slurry**, **Lifters**, **Simulation**, **Display**.
+Each field generated from `schema.ts` entries `{ id, group, label, unit, type: number|select|boolean, min, max, step,
+default, hot, help }` with live validation (red outline + message, Apply disabled). Footer: `Presets ▾`, `Reset to defaults`,
+`Cancel`, `Apply` (Apply asks "Restart simulation?" only if a non-hot param changed). Esc / backdrop click = Cancel.
+Derived read-only values shown in the modal: critical speed, %Nc, ball count, fluid particle count, DEM dt, k_n, estimated cost.
+
+| Group | Parameters (defaults) |
+|---|---|
+| Mill | diameter D = 0.6 m; speed mode = %Nc; speed = 70 %Nc (or rpm); rotation direction CCW |
+| Media | ball diameter 20 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 7800; restitution 0.5 (ball–ball) / 0.3 (ball–wall); friction μ 0.4 / 0.5; rolling μ_r 0.01 |
+| Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 0.5 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
+| Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
+| Simulation | resolution 40 (particles across R); substeps 4; PBF iterations 3; time scale 1.0; frame budget 12 ms; seed 1 |
+| Display | show fluid particles / surface polygon / dye / toe-shoulder / free-surface line / spin marker / velocity vectors; ball colour by speed |
+
+### 4.4 Toolbar & HUD
+Play/Pause (Space), Step (one frame), Reset, Parameters (opens modal), Presets menu, Screenshot (PNG via `canvas.toBlob`).
+HUD: sim time, rpm and %Nc, balls/fluid counts, fps, sim ms/frame, achieved time scale, toe/shoulder, slurry pool angles, mixing index.
+
+---
+
+## 5. Milestones (each ends with a runnable, verified state)
+
+Model assignment per CLAUDE.md: **[F]** = Fable (main session), **[S]** = sonnet subagent, **[H]** = haiku subagent.
+
+### M0 — Bootstrap (½ day) [H/S]
+1. Write `CLAUDE.md` (§2), `.gitignore`, `README.md`; `git init -b main`, add remote
+   `https://github.com/ToshihiroIguchi/MillDynamics3` (repo exists, public, currently empty — verified with `gh`).
+   Commit at the end of every milestone; push to `main` (user confirms first push).
+2. Install Rust: `winget install Rustlang.Rustup` (or rustup-init.exe), `rustup target add wasm32-unknown-unknown`,
+   `cargo install wasm-pack` (or `wasm-bindgen-cli`). Verify host toolchain links (MSVC from the installed VS 18, fall back to
+   `stable-x86_64-pc-windows-gnu` with rtools gcc if MSVC C++ tools are absent). `cargo test` on a hello crate must pass.
+3. Scaffold workspace (§1), `mill-core` with `Params` + empty `Simulation`, `mill-wasm` exposing `new/step/ptrs`, Vite app
+   with worker + canvas drawing a rotating empty drum from wasm-provided `drumAngle`.
+   Verify: `scripts/build-wasm` + `npm run dev` → rotating drum with rotation marker at correct rpm.
+
+### M1 — DEM balls in rotating drum (1–2 days) [F core, S tests/UI]
+1. [F] `grid.rs`, `geometry.rs` (circle-only SDF + wall velocity), `dem.rs` contact model, integration, ball init lattice.
+2. [S] Unit tests: single ball drop restitution (bounce height ratio ≈ e²), two-ball head-on momentum/energy, ball resting on wall
+   (overlap < 1 % r, no drift), rotating drum centrifuging test (at 120 % Nc all balls stay within 1.5 r of wall after 5 s),
+   at 70 % Nc a cascading charge with toe ~ 200–230° and shoulder ~ 40–60° (measured from the vertical, loose tolerance).
+3. [S] Renderer for balls; params modal v1 (Mill + Media + Simulation groups, schema-driven); HUD basics; Play/Pause/Reset.
+4. [S] criterion bench: 500/1000/2000 balls step cost; record in docs.
+   Verify: visually cascading at 70 %, cataracting at 85–90 %, centrifuging > 100 %.
+
+### M2 — Lifters (½ day) [S, F review of SDF]
+1. Lifter quads in `geometry.rs` (drum frame), numeric gradient, restricted evaluation region; `Lifters` modal tab; render.
+2. Tests: SDF sign/gradient sanity at sampled points; ball resting on a lifter face is stable; default `count = 0` produces the
+   identical trajectory to M1 (regression: hash of positions after 2 s equals circle-only run).
+
+### M3 — Slurry PBF alone (2 days) [F core, S surface/metrics/UI]
+1. [F] `pbf.rs`: kernels, neighbour grid, density constraint, s_corr, boundary projection with wall velocity, XSPH viscosity, dye.
+2. [S] `surface.rs` marching squares + export; `metrics.rs` pool angles / free-surface line; renderer surface polygon + dye colouring;
+   Slurry + Display tabs.
+3. Tests: hydrostatic column at rest (max density error < 2 % after 1 s, no drift); volume conservation (particle count constant,
+   bulk area within 5 %); rotating drum with viscous fluid — steady-state free-surface tilt increases monotonically with viscosity
+   (3 viscosities); marching-squares unit test on a synthetic disc field (area within 3 %).
+4. [F] Calibrate `μ → c_eff` mapping; document in PHYSICS.md.
+
+### M4 — Two-way coupling (2 days) [F]
+1. `coupling.rs` as §3.4; substep orchestration in `lib.rs` (`step_frame(wall_dt)` with accumulator and budget).
+2. Tests: ball dropped into a pool decelerates (terminal velocity lower than dry drop); fluid particle count inside balls == 0 after
+   each substep; momentum exchange symmetric (Σ impulses fluid = −Σ impulses balls within 1e-3 relative); 30 s run at
+   1000 balls + 4000 fluid with no NaN, max overlap < 3 % r, density error < 5 %.
+3. Visual: slurry is dragged up by the charge, pool forms at the toe, dye mixes.
+
+### M5 — UI completion (1 day) [S/H]
+Presets, full validation UX, derived values panel, Step button, Screenshot, mixing-index sparkline, keyboard shortcuts,
+responsive layout (canvas fits viewport, modal scrolls on small screens), `docs/PARAMETERS.md` generated from `schema.ts` [H].
+Playwright e2e: open modal → change rpm → Apply → HUD rpm updates without reset; change lifter count → Apply → reset confirm
+→ lifters visible; invalid input blocks Apply.
+
+### M6 — Performance (1–2 days) [F profiling/SIMD, S tooling]
+Targets on a mid laptop, single thread: **≥ 1.0× real time at 500 balls + 2000 fluid; ≥ 0.5× at 1000 + 4000**.
+Actions in order until targets met: `-C target-feature=+simd128` + `opt-level=3` + `lto`; SoA layouts and f32; neighbour-list reuse
+across PBF iterations; DEM ball–ball broadphase only for balls (fluid grid separate, cell = h); avoid allocation per step;
+`wasm-opt -O3`. Add an "auto resolution" option that lowers `resolution` when achieved time scale < 0.5 for 3 s.
+Deliver a perf table in README.
+
+### M7 — Fidelity extensions (optional, after user review) [F]
+Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on balls (proper buoyancy); WCSPH "accurate" mode
+(non-real-time); size distribution for media; WebGL2 renderer; SharedArrayBuffer/wasm-threads; data export (CSV of metrics).
+
+---
+
+## 6. Verification (end-to-end)
+
+- `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -p mill-core` — all physics tests in §5.
+- `cargo bench -p mill-core` — step cost table (balls × fluid).
+- `scripts/build-wasm` → `web/src/wasm/` produced; `npm run build` succeeds; `npm run test` (vitest) and `npm run e2e` (playwright, Chromium)
+  pass.
+- Manual/visual acceptance (use the `run` skill / Playwright screenshots):
+  1. Default params (no lifters, 70 % Nc, 0.5 Pa·s): cascading charge, slurry pool at toe, free-surface polygon drawn, ≥ 0.8× real time.
+  2. Set lifters = 8: balls lifted higher, visible cataracting.
+  3. Viscosity 5 Pa·s vs 0.05 Pa·s: free surface tilts more with higher viscosity; dye mixes slower.
+  4. Speed 110 % Nc: centrifuging; slurry film on wall.
+  5. Modal: every field validated; hot params apply without reset; others prompt for reset.
+- Determinism: same params + seed → identical position hash after 5 s (test in `mill-core`).
+
+## 7. Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| PBF viscosity only qualitative | Calibrated mapping in v1 documented as such; implicit viscosity + Bingham in M7 |
+| Coupling instability (light fluid pushing heavy balls is fine, but many overlapping corrections) | Impulse clamp, dt_fluid/dt_dem ratio check, symmetric momentum test, per-substep overlap resolution |
+| WASM single-thread too slow at high resolution | Frame budget + achieved-time-scale HUD, auto resolution, SIMD; targets defined in M6 |
+| 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
+| Rust toolchain on Windows (MSVC linker) | Check in M0; fall back to GNU toolchain with rtools gcc; wasm target needs no linker |
+| Lifter SDF gradient numeric noise at corners | Round corners with small radius in SDF; test resting stability |
