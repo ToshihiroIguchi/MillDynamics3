@@ -7,6 +7,9 @@ export interface AppState {
   drumAngle: number;
   simTime: number;
   achievedTimeScale: number;
+  ballPositions: Float32Array;
+  ballOrientations: Float32Array;
+  ballRadiusM: number;
 }
 
 export function createInitialState(): AppState {
@@ -16,5 +19,8 @@ export function createInitialState(): AppState {
     drumAngle: 0,
     simTime: 0,
     achievedTimeScale: 1,
+    ballPositions: new Float32Array(0),
+    ballOrientations: new Float32Array(0),
+    ballRadiusM: 0,
   };
 }

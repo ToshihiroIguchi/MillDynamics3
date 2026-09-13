@@ -6,19 +6,40 @@
 // instead of relying on ambient `DedicatedWorkerGlobalScope` types.
 
 import init, { Simulation, setPanicHook } from "./wasm/mill_wasm.js";
-import type { MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
+import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<MainToWorkerMessage>) => void) | null;
-  postMessage: (message: WorkerToMainMessage) => void;
+  postMessage: (message: WorkerToMainMessage, transfer: Transferable[]) => void;
 }
 const scope = self as unknown as WorkerScope;
 
 let sim: Simulation | null = null;
 let running = true;
 
-function post(message: WorkerToMainMessage): void {
-  scope.postMessage(message);
+/** Largest wall-clock dt accepted from a single requestFrame (e.g. after a backgrounded tab
+ * resumes), so a long stall doesn't get integrated as one huge, potentially unstable sub-step. */
+const MAX_FRAME_DT = 1 / 15;
+
+function post(message: WorkerToMainMessage, transfer: Transferable[] = []): void {
+  scope.postMessage(message, transfer);
+}
+
+function ballFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
+  return {
+    type: "frame",
+    drumAngle: sim.drumAngle(),
+    simTime: sim.simTime(),
+    achievedTimeScale,
+    ballPositions: sim.ballPositions(),
+    ballOrientations: sim.ballOrientations(),
+    ballRadiusM: sim.ballRadiusM(),
+  };
+}
+
+function postFrame(sim: Simulation, achievedTimeScale: number): void {
+  const frame = ballFrame(sim, achievedTimeScale);
+  post(frame, [frame.ballPositions.buffer, frame.ballOrientations.buffer]);
 }
 
 async function boot(initialParams?: ParamsJson): Promise<void> {
@@ -57,28 +78,20 @@ scope.onmessage = (event) => {
       break;
     case "step":
       if (sim) {
-        // Through M0, one "step" advances by one nominal 60 Hz frame's worth of sim time; this
-        // becomes a fixed-substep (1/240 s) advance once DEM/PBF land (M1/M3).
+        // One "step" advances by one nominal 60 Hz frame's worth of sim time, split into
+        // simulation.substeps fixed sub-steps by mill-core (docs/PLAN.md ss3.2/4.1).
         sim.step(1 / 60);
-        post({
-          type: "frame",
-          drumAngle: sim.drumAngle(),
-          simTime: sim.simTime(),
-          achievedTimeScale: 1,
-        });
+        postFrame(sim, 1);
       }
       break;
     case "requestFrame": {
       if (!sim || !running) return;
-      // M0: advance simulation time directly by wall-clock time (no fixed-step accumulator or
-      // frame-budget throttling yet -- both land with DEM/PBF in M1/M3, see docs/PLAN.md ss4.1).
-      sim.step(msg.wallDt);
-      post({
-        type: "frame",
-        drumAngle: sim.drumAngle(),
-        simTime: sim.simTime(),
-        achievedTimeScale: 1,
-      });
+      // Clamp so a long stall (e.g. a backgrounded tab) isn't integrated as one huge sub-step.
+      // Frame-budget throttling for sustained slow-frame handling lands with PBF (M3/M4).
+      const dt = Math.min(msg.wallDt, MAX_FRAME_DT);
+      sim.step(dt);
+      const achievedTimeScale = msg.wallDt > 0 ? dt / msg.wallDt : 1;
+      postFrame(sim, achievedTimeScale);
       break;
     }
   }

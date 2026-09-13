@@ -58,6 +58,11 @@ export interface FrameMessage {
   simTime: number;
   /** Wall-clock-time-to-sim-time ratio actually achieved this frame (see docs/PLAN.md ss4.1). */
   achievedTimeScale: number;
+  /** Ball center positions, flattened as [x0, y0, x1, y1, ...] (m), transferred (not copied). */
+  ballPositions: Float32Array;
+  /** Ball orientations (radians), one per ball, same order as ballPositions. */
+  ballOrientations: Float32Array;
+  ballRadiusM: number;
 }
 
 export interface ErrorMessage {

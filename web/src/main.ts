@@ -32,6 +32,9 @@ function applyFrame(msg: FrameMessage): void {
   state.drumAngle = msg.drumAngle;
   state.simTime = msg.simTime;
   state.achievedTimeScale = msg.achievedTimeScale;
+  state.ballPositions = msg.ballPositions;
+  state.ballOrientations = msg.ballOrientations;
+  state.ballRadiusM = msg.ballRadiusM;
 }
 
 worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
@@ -60,7 +63,13 @@ function frameLoop(nowMs: number): void {
     }
   }
   lastTimeMs = nowMs;
-  renderer.render({ radiusM: radiusMFromParams(state.params), drumAngle: state.drumAngle });
+  renderer.render({
+    radiusM: radiusMFromParams(state.params),
+    drumAngle: state.drumAngle,
+    ballPositions: state.ballPositions,
+    ballOrientations: state.ballOrientations,
+    ballRadiusM: state.ballRadiusM,
+  });
   requestAnimationFrame(frameLoop);
 }
 requestAnimationFrame(frameLoop);

@@ -1,9 +1,14 @@
-// Minimal Canvas 2D renderer. Through M0 this draws only the drum wall and a rotation marker;
-// balls/lifters/surface/fluid/dye layers are added in M1/M2/M3 (see docs/PLAN.md ss4.2).
+// Canvas 2D renderer: drum wall, rotation marker, and the ball (grinding media) population.
+// Lifters/surface/fluid/dye layers are added in M2/M3 (see docs/PLAN.md ss4.2).
 
 export interface DrumRenderState {
   radiusM: number;
   drumAngle: number;
+  /** Ball centers, flattened as [x0, y0, x1, y1, ...] (m), in the same world frame as radiusM. */
+  ballPositions: Float32Array;
+  /** Ball orientations (radians), one per ball, same order as ballPositions. */
+  ballOrientations: Float32Array;
+  ballRadiusM: number;
 }
 
 export class CanvasRenderer {
@@ -48,6 +53,8 @@ export class CanvasRenderer {
     ctx.lineWidth = 3;
     ctx.stroke();
 
+    this.renderBalls(state, cx, cy, pxPerM);
+
     // Rotation marker: a radial line fixed to the wall at drumAngle, so its motion visually
     // confirms rotation direction and speed.
     // Math convention is +y up; canvas is +y down, hence the sign flip on the y component.
@@ -59,5 +66,42 @@ export class CanvasRenderer {
     ctx.strokeStyle = "#e8a33d";
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
+
+  private renderBalls(state: DrumRenderState, cx: number, cy: number, pxPerM: number): void {
+    const { ctx } = this;
+    const { ballPositions, ballOrientations, ballRadiusM } = state;
+    const n = Math.min(ballPositions.length / 2, ballOrientations.length);
+    if (n <= 0) return;
+
+    const ballRadiusPx = Math.max(ballRadiusM * pxPerM, 1);
+
+    ctx.fillStyle = "#9aa3b0";
+    ctx.strokeStyle = "#3a4048";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < n; i++) {
+      const worldX = ballPositions[i * 2] ?? 0;
+      const worldY = ballPositions[i * 2 + 1] ?? 0;
+      // Same +y-up (world) to +y-down (canvas) flip as the rotation marker above.
+      const px = cx + worldX * pxPerM;
+      const py = cy - worldY * pxPerM;
+
+      ctx.beginPath();
+      ctx.arc(px, py, ballRadiusPx, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Spin indicator: a short radial line from the ball's center, at its own orientation, so
+      // rolling due to friction is visually confirmable (per-ball theta, world +y-up flipped).
+      const theta = ballOrientations[i] ?? 0;
+      const spinX = px + Math.cos(theta) * ballRadiusPx;
+      const spinY = py - Math.sin(theta) * ballRadiusPx;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(spinX, spinY);
+      ctx.strokeStyle = "#e0522f";
+      ctx.stroke();
+      ctx.strokeStyle = "#3a4048";
+    }
   }
 }

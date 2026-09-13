@@ -60,6 +60,41 @@ impl Simulation {
         self.inner.sim_time()
     }
 
+    /// Number of ball (grinding media) particles currently simulated (post coarse-graining, if
+    /// any -- see `mill_core::Params::effective_media`).
+    #[wasm_bindgen(js_name = ballCount)]
+    pub fn ball_count(&self) -> u32 {
+        self.inner.balls().len() as u32
+    }
+
+    /// The uniform ball radius (m). All balls currently share one effective radius (a size
+    /// distribution is future work).
+    #[wasm_bindgen(js_name = ballRadiusM)]
+    pub fn ball_radius_m(&self) -> f32 {
+        self.inner.balls().radius
+    }
+
+    /// Ball center positions, flattened as `[x0, y0, x1, y1, ...]` (m). Copied into a fresh
+    /// `Float32Array` each call; zero-copy typed-array views are a possible M6 performance
+    /// follow-up once profiling calls for it.
+    #[wasm_bindgen(js_name = ballPositions)]
+    pub fn ball_positions(&self) -> Vec<f32> {
+        let balls = self.inner.balls();
+        let mut out = Vec::with_capacity(balls.len() * 2);
+        for p in &balls.x {
+            out.push(p.x);
+            out.push(p.y);
+        }
+        out
+    }
+
+    /// Ball orientations (radians), one per ball, in the same order as [`Simulation::ball_positions`].
+    /// Useful for rendering a spin indicator confirming rolling behaviour.
+    #[wasm_bindgen(js_name = ballOrientations)]
+    pub fn ball_orientations(&self) -> Vec<f32> {
+        self.inner.balls().theta.clone()
+    }
+
     /// Returns the current parameters, JSON-encoded (e.g. so the UI can read back derived values
     /// via `mill_core::Params::effective_media`).
     #[wasm_bindgen(js_name = paramsJson)]
