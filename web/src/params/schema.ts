@@ -1,6 +1,6 @@
 // Parameter field definitions driving the parameters modal (src/ui/paramsModal.ts). Mirrors
 // crates/mill-core/src/params.rs field-for-field for the groups implemented so far (Mill, Media,
-// Simulation); Slurry/Lifters/Display land with M2/M3/M5 (see docs/PLAN.md ss4.3).
+// Lifters, Simulation); Slurry/Display land with M3/M5 (see docs/PLAN.md ss4.3).
 //
 // v1 (M1) simplification: every field is treated as requiring a full simulation reset on Apply
 // (no "hot" live-apply distinction yet -- see docs/PLAN.md ss4.1's hot/reset split, completed in
@@ -20,7 +20,7 @@ export interface SelectOption {
 export interface FieldSchema {
   /** Dot path into the Params JSON tree, e.g. "mill.diameter_m". */
   path: string;
-  group: "Mill" | "Media" | "Simulation";
+  group: "Mill" | "Media" | "Lifters" | "Simulation";
   label: string;
   unit?: string;
   type: FieldType;
@@ -30,7 +30,7 @@ export interface FieldSchema {
   options?: SelectOption[];
 }
 
-export const GROUPS: FieldSchema["group"][] = ["Mill", "Media", "Simulation"];
+export const GROUPS: FieldSchema["group"][] = ["Mill", "Media", "Lifters", "Simulation"];
 
 export const SCHEMA: FieldSchema[] = [
   // Mill
@@ -65,6 +65,12 @@ export const SCHEMA: FieldSchema[] = [
   { path: "media.friction_ball_ball", group: "Media", label: "Friction (ball-ball)", type: "number", min: 0, max: 2, step: 0.01 },
   { path: "media.friction_ball_wall", group: "Media", label: "Friction (ball-wall)", type: "number", min: 0, max: 2, step: 0.01 },
   { path: "media.rolling_friction", group: "Media", label: "Rolling friction", type: "number", min: 0, max: 1, step: 0.001 },
+  // Lifters (count = 0 is the default: a perfectly smooth wall, see docs/PLAN.md ss3.1)
+  { path: "lifters.count", group: "Lifters", label: "Lifter count", type: "number", min: 0, max: 64, step: 1 },
+  { path: "lifters.height_m", group: "Lifters", label: "Height", unit: "m", type: "number", min: 0, max: 0.2, step: 0.005 },
+  { path: "lifters.base_width_m", group: "Lifters", label: "Base width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005 },
+  { path: "lifters.top_width_m", group: "Lifters", label: "Top width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005 },
+  { path: "lifters.phase_deg", group: "Lifters", label: "Phase offset", unit: "deg", type: "number", min: -180, max: 180, step: 1 },
   // Simulation
   { path: "simulation.substeps", group: "Simulation", label: "Sub-steps / frame", type: "number", min: 1, max: 16, step: 1 },
   { path: "simulation.dem_iterations", group: "Simulation", label: "Ball solver iterations", type: "number", min: 1, max: 20, step: 1 },

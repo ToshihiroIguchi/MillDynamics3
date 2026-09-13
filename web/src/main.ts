@@ -1,4 +1,4 @@
-import { CanvasRenderer } from "./render/canvas";
+import { CanvasRenderer, type LiftersRenderState } from "./render/canvas";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 import { createInitialState } from "./state";
 import { createHud } from "./ui/hud";
@@ -29,6 +29,23 @@ function send(message: MainToWorkerMessage): void {
 function radiusMFromParams(params: ParamsJson | null): number {
   const mill = params?.mill as { diameter_m?: number } | undefined;
   return (mill?.diameter_m ?? 1.0) / 2;
+}
+
+const NO_LIFTERS: LiftersRenderState = { count: 0, heightM: 0, baseWidthM: 0, topWidthM: 0, phaseDeg: 0 };
+
+/** Reads `lifters` out of the (currently opaque) params blob; see protocol.ts. */
+function liftersFromParams(params: ParamsJson | null): LiftersRenderState {
+  const lifters = params?.lifters as
+    | { count?: number; height_m?: number; base_width_m?: number; top_width_m?: number; phase_deg?: number }
+    | undefined;
+  if (!lifters) return NO_LIFTERS;
+  return {
+    count: lifters.count ?? 0,
+    heightM: lifters.height_m ?? 0,
+    baseWidthM: lifters.base_width_m ?? 0,
+    topWidthM: lifters.top_width_m ?? 0,
+    phaseDeg: lifters.phase_deg ?? 0,
+  };
 }
 
 function applyFrame(msg: FrameMessage): void {
@@ -101,6 +118,7 @@ function frameLoop(nowMs: number): void {
   renderer.render({
     radiusM: radiusMFromParams(state.params),
     drumAngle: state.drumAngle,
+    lifters: liftersFromParams(state.params),
     ballPositions: state.ballPositions,
     ballOrientations: state.ballOrientations,
     ballRadiusM: state.ballRadiusM,

@@ -441,6 +441,56 @@ mod tests {
     }
 
     #[test]
+    fn ball_rests_stably_on_a_lifter_tip_face() {
+        // Same idea as `ball_at_rest_on_flat_wall_stays_put_with_small_overlap`, but the ball
+        // settles on a lifter's flat tip face (docs/PLAN.md ss3.1) instead of the bare wall. One
+        // lifter is centred at the bottom of a large "drum" (phase -90 degrees, i.e. -y, where
+        // gravity carries the ball); the ball is small relative to the tip width so it rests
+        // centred rather than balanced on an edge.
+        let radius_drum = 10.0;
+        let lifters = LiftersParams {
+            count: 1,
+            height_m: 0.05,
+            base_width_m: 0.1,
+            top_width_m: 0.06,
+            phase_deg: -90.0,
+        };
+        let drum = Drum::new(radius_drum, 0.0, lifters);
+        let tip_radius = radius_drum - lifters.height_m;
+
+        let r = 0.01; // small vs. the 60 mm tip width
+        let mass = ball_mass(2.0 * r, 7800.0);
+        let balls = single_ball(Vec2::new(0.0, -(tip_radius - r)), Vec2::ZERO, r, mass);
+        let mut state = DemState { balls };
+        let media = media_defaults();
+
+        for _ in 0..240 {
+            state.step(&drum, 0.0, &media, 4, 1.0 / 240.0);
+        }
+
+        let x = state.balls.x[0];
+        let dist_to_tip = tip_radius - x.length();
+        assert!(
+            dist_to_tip <= r * 1.02,
+            "ball should rest ~touching the lifter's tip, got dist={dist_to_tip}, r={r}"
+        );
+        assert!(
+            dist_to_tip >= r * 0.9,
+            "ball should not sink far into the lifter, got dist={dist_to_tip}, r={r}"
+        );
+        assert!(
+            x.x.abs() < 0.005,
+            "ball should not drift off the lifter, got x={}",
+            x.x
+        );
+        assert!(
+            state.balls.v[0].length() < 0.05,
+            "ball should be nearly at rest, got v={:?}",
+            state.balls.v[0]
+        );
+    }
+
+    #[test]
     fn ball_bounces_with_restitution_e_squared_height_ratio() {
         // A ball dropped from height h0 above a flat floor should rebound to approximately e^2 * h0
         // (classical restitution result), for a *single* bounce.
