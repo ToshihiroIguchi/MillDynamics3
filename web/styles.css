@@ -15,3 +15,117 @@ body {
 #scene {
   display: block;
 }
+
+.toolbar {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  gap: 8px;
+  z-index: 10;
+}
+
+.toolbar button {
+  background: #1c2129;
+  color: #e6e9ef;
+  border: 1px solid #3a4048;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toolbar button:hover {
+  background: #262d38;
+}
+
+.hud {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  z-index: 10;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #b7bfcc;
+  background: rgba(18, 22, 28, 0.7);
+  padding: 6px 10px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+dialog.params-modal {
+  background: #1c2129;
+  color: #e6e9ef;
+  border: 1px solid #3a4048;
+  border-radius: 8px;
+  padding: 0;
+  max-width: min(480px, 92vw);
+  max-height: 85vh;
+}
+
+dialog.params-modal::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+dialog.params-modal form {
+  padding: 16px 20px;
+  overflow-y: auto;
+  max-height: 85vh;
+}
+
+dialog.params-modal h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+dialog.params-modal fieldset {
+  border: 1px solid #3a4048;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+dialog.params-modal legend {
+  padding: 0 6px;
+  font-size: 12px;
+  color: #9aa3b0;
+}
+
+.params-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.params-row input,
+.params-row select {
+  background: #12161c;
+  color: #e6e9ef;
+  border: 1px solid #3a4048;
+  border-radius: 4px;
+  padding: 3px 6px;
+  width: 140px;
+}
+
+.params-derived {
+  font-size: 12px;
+  color: #9aa3b0;
+}
+
+.params-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.params-footer button {
+  background: #1c2129;
+  color: #e6e9ef;
+  border: 1px solid #3a4048;
+  border-radius: 4px;
+  padding: 6px 12px;
+  cursor: pointer;
+}

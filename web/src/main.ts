@@ -1,6 +1,9 @@
 import { CanvasRenderer } from "./render/canvas";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 import { createInitialState } from "./state";
+import { createHud } from "./ui/hud";
+import { createParamsModal } from "./ui/paramsModal";
+import { createToolbar } from "./ui/toolbar";
 
 const state = createInitialState();
 
@@ -52,12 +55,44 @@ worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
   }
 };
 
+function togglePlay(): boolean {
+  state.running = !state.running;
+  send({ type: state.running ? "play" : "pause" });
+  return state.running;
+}
+
+// v1 simplification (see params/schema.ts): both "Apply" and "Reset" fully reconstruct the
+// simulation via an "init" message; there is no partial "hot" apply yet (M5).
+const paramsModal = createParamsModal((params) => {
+  send({ type: "init", params });
+});
+
+createToolbar({
+  onTogglePlay: togglePlay,
+  onStep: () => send({ type: "step" }),
+  onReset: () => send({ type: "init", params: state.params ?? undefined }),
+  onOpenParams: () => paramsModal.open(state.params ?? {}),
+});
+
+const hud = createHud();
+
+window.addEventListener("keydown", (event) => {
+  if (event.code === "Space" && !(event.target instanceof HTMLElement && event.target.closest("dialog"))) {
+    event.preventDefault();
+    togglePlay();
+  }
+});
+
 send({ type: "init" });
 
 let lastTimeMs: number | null = null;
+let smoothedFps = 60;
 function frameLoop(nowMs: number): void {
   if (lastTimeMs !== null) {
     const wallDt = (nowMs - lastTimeMs) / 1000;
+    if (wallDt > 0) {
+      smoothedFps = smoothedFps * 0.9 + (1 / wallDt) * 0.1;
+    }
     if (state.running) {
       send({ type: "requestFrame", wallDt });
     }
@@ -70,6 +105,7 @@ function frameLoop(nowMs: number): void {
     ballOrientations: state.ballOrientations,
     ballRadiusM: state.ballRadiusM,
   });
+  hud.update(state, smoothedFps);
   requestAnimationFrame(frameLoop);
 }
 requestAnimationFrame(frameLoop);
