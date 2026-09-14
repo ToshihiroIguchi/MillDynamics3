@@ -1,6 +1,9 @@
 // Parameter field definitions driving the parameters modal (src/ui/paramsModal.ts). Mirrors
 // crates/mill-core/src/params.rs field-for-field for the groups implemented so far (Mill, Media,
-// Lifters, Simulation); Slurry/Display land with M3/M5 (see docs/PLAN.md ss4.3).
+// Lifters, Slurry, Simulation); a Display tab lands with M5 (see docs/PLAN.md ss4.3).
+// `slurry.rheology`/`yield_stress_pa` are intentionally not exposed: pbf.rs's v1 solver always
+// runs Newtonian XSPH viscosity regardless of `rheology` (Bingham is unimplemented, M7), so
+// surfacing those fields would imply behaviour that doesn't exist yet.
 //
 // v1 (M1) simplification: every field is treated as requiring a full simulation reset on Apply
 // (no "hot" live-apply distinction yet -- see docs/PLAN.md ss4.1's hot/reset split, completed in
@@ -10,7 +13,7 @@
 
 import type { ParamsJson } from "../protocol";
 
-export type FieldType = "number" | "select";
+export type FieldType = "number" | "select" | "boolean";
 
 export interface SelectOption {
   value: string;
@@ -20,7 +23,7 @@ export interface SelectOption {
 export interface FieldSchema {
   /** Dot path into the Params JSON tree, e.g. "mill.diameter_m". */
   path: string;
-  group: "Mill" | "Media" | "Lifters" | "Simulation";
+  group: "Mill" | "Media" | "Lifters" | "Slurry" | "Simulation";
   label: string;
   unit?: string;
   type: FieldType;
@@ -30,7 +33,7 @@ export interface FieldSchema {
   options?: SelectOption[];
 }
 
-export const GROUPS: FieldSchema["group"][] = ["Mill", "Media", "Lifters", "Simulation"];
+export const GROUPS: FieldSchema["group"][] = ["Mill", "Media", "Lifters", "Slurry", "Simulation"];
 
 export const SCHEMA: FieldSchema[] = [
   // Mill
@@ -71,6 +74,23 @@ export const SCHEMA: FieldSchema[] = [
   { path: "lifters.base_width_m", group: "Lifters", label: "Base width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005 },
   { path: "lifters.top_width_m", group: "Lifters", label: "Top width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005 },
   { path: "lifters.phase_deg", group: "Lifters", label: "Phase offset", unit: "deg", type: "number", min: -180, max: 180, step: 1 },
+  // Slurry
+  { path: "slurry.enabled", group: "Slurry", label: "Enabled", type: "boolean" },
+  { path: "slurry.fill_fraction", group: "Slurry", label: "Fill fraction", type: "number", min: 0, max: 0.9, step: 0.01 },
+  { path: "slurry.density_kg_m3", group: "Slurry", label: "Slurry density", unit: "kg/m3", type: "number", min: 100, max: 5000, step: 50 },
+  { path: "slurry.viscosity_pa_s", group: "Slurry", label: "Viscosity", unit: "Pa·s", type: "number", min: 0, max: 10, step: 0.05 },
+  { path: "slurry.wall_no_slip", group: "Slurry", label: "Wall no-slip (β)", type: "number", min: 0, max: 1, step: 0.05 },
+  {
+    path: "slurry.dye_pattern",
+    group: "Slurry",
+    label: "Dye pattern",
+    type: "select",
+    options: [
+      { value: "left_right", label: "Left / right" },
+      { value: "top_bottom", label: "Top / bottom" },
+      { value: "none", label: "None" },
+    ],
+  },
   // Simulation
   { path: "simulation.substeps", group: "Simulation", label: "Sub-steps / frame", type: "number", min: 1, max: 16, step: 1 },
   { path: "simulation.dem_iterations", group: "Simulation", label: "Ball solver iterations", type: "number", min: 1, max: 20, step: 1 },

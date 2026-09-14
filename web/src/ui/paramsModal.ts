@@ -1,7 +1,7 @@
-// Native <dialog>-based parameters modal (v1: Mill / Media / Simulation groups, schema-driven from
-// src/params/schema.ts). See docs/PLAN.md ss4.3. Slurry/Lifters/Display tabs and full validation
-// UX/presets land in M2/M3/M5; for now Apply always resets the simulation (see schema.ts's v1
-// simplification note).
+// Native <dialog>-based parameters modal (v1: Mill / Media / Lifters / Slurry / Simulation
+// groups, schema-driven from src/params/schema.ts). See docs/PLAN.md ss4.3. A Display tab and
+// full validation UX/presets land in M5; for now Apply always resets the simulation (see
+// schema.ts's v1 simplification note).
 
 import type { ParamsJson } from "../protocol";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
@@ -51,6 +51,10 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
           select.appendChild(optionEl);
         }
         input = select;
+      } else if (field.type === "boolean") {
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        input = checkbox;
       } else {
         const numberInput = document.createElement("input");
         numberInput.type = "number";
@@ -104,7 +108,10 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
     let next = currentParams;
     for (const [path, input] of inputs) {
       const field = SCHEMA.find((f) => f.path === path);
-      const value = field?.type === "number" ? Number(input.value) : input.value;
+      let value: unknown;
+      if (field?.type === "number") value = Number(input.value);
+      else if (field?.type === "boolean") value = (input as HTMLInputElement).checked;
+      else value = input.value;
       next = withPath(next, path, value);
     }
     onApply(next);
@@ -117,8 +124,12 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
     open(params: ParamsJson) {
       currentParams = params;
       for (const [path, input] of inputs) {
+        const field = SCHEMA.find((f) => f.path === path);
         const value = getPath(params, path);
-        if (value !== undefined) {
+        if (value === undefined) continue;
+        if (field?.type === "boolean") {
+          (input as HTMLInputElement).checked = Boolean(value);
+        } else {
           input.value = String(value);
         }
       }
