@@ -1,8 +1,11 @@
 # Build and deploy the web frontend to GitHub Pages on every push to `main`.
 #
 # Three jobs, gated in sequence:
-#   test   -- the project's quality gate (fmt/clippy/cargo test + tsc), from CLAUDE.md.
-#   build  -- only runs if `test` passes; builds the wasm core and the Vite bundle.
+#   test   -- the Rust half of the project's quality gate (fmt/clippy/cargo test), from CLAUDE.md.
+#   build  -- only runs if `test` passes; builds the wasm core, then the TS half of the gate
+#             (`npm run lint`, i.e. tsc) followed by the Vite bundle. `tsc` needs the generated
+#             `web/src/wasm/` bindings to resolve `worker.ts`'s import, so it must run after the
+#             wasm build -- that's why it lives here and not in `test`.
 #   deploy -- only runs if `build` passes; publishes the built bundle to Pages.
 # Splitting them (rather than one job) means a broken gate never reaches deploy, and Pages
 # credentials (`pages: write` / `id-token: write`) stay scoped to the one job that needs them.
@@ -39,18 +42,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - run: npm ci
-        working-directory: web
-      - run: npm run lint
-        working-directory: web
-
-  # Build the wasm core and the static site that `deploy` will publish.
+  # Build the wasm core, typecheck the frontend against it, then build the static site that
+  # `deploy` will publish.
   build:
     needs: test
     runs-on: ubuntu-latest
@@ -76,6 +69,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - run: npm ci
+        working-directory: web
+      - run: npm run lint
         working-directory: web
       - run: npm run build
         working-directory: web
