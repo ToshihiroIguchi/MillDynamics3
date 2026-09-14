@@ -46,6 +46,20 @@ pub struct Balls {
 }
 
 impl Balls {
+    /// An empty ball population (e.g. for [`crate::pbf::FluidParticles::step`], the ball-free
+    /// special case of [`crate::pbf::FluidParticles::step_coupled`]).
+    pub fn empty() -> Self {
+        Self {
+            x: Vec::new(),
+            v: Vec::new(),
+            theta: Vec::new(),
+            omega: Vec::new(),
+            radius: 0.0,
+            mass: 0.0,
+            inertia: 0.0,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.x.len()
     }
@@ -155,6 +169,7 @@ impl DemState {
 
     /// Advances the ball population by one fixed sub-step `dt`, against the given (already
     /// positioned at `drum_angle`) drum. See docs/PLAN.md ss3.2 for the full per-step algorithm.
+    /// Equivalent to [`DemState::step_with_external_forces`] with `external = None`.
     pub fn step(
         &mut self,
         drum: &Drum,
@@ -162,6 +177,22 @@ impl DemState {
         media: &MediaParams,
         iterations: u32,
         dt: f32,
+    ) {
+        self.step_with_external_forces(drum, drum_angle, media, iterations, dt, None);
+    }
+
+    /// As [`DemState::step`], but additionally applies `external` (fluid coupling forces/torques
+    /// per ball, docs/PLAN.md ss3.4, [`crate::coupling`]) as an extra acceleration in the predict
+    /// step. `external.forces`/`external.torques` must have one entry per ball, same order as
+    /// `self.balls.x`, when provided.
+    pub fn step_with_external_forces(
+        &mut self,
+        drum: &Drum,
+        drum_angle: f32,
+        media: &MediaParams,
+        iterations: u32,
+        dt: f32,
+        external: Option<&crate::coupling::CouplingForces>,
     ) {
         let balls = &mut self.balls;
         if balls.is_empty() || dt <= 0.0 {
@@ -178,6 +209,10 @@ impl DemState {
         let v_pre: Vec<Vec2> = balls.v.clone();
         for i in 0..n {
             balls.v[i].y += GRAVITY * dt;
+            if let Some(ext) = external {
+                balls.v[i] += ext.forces[i] * w * dt;
+                balls.omega[i] += ext.torques[i] * w_rot * dt;
+            }
             balls.x[i] += balls.v[i] * dt;
             balls.theta[i] += balls.omega[i] * dt;
         }

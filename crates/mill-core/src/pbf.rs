@@ -5,9 +5,10 @@
 //! blending (no-slip), and XSPH viscosity. See docs/PLAN.md ss3.3 for the full per-substep
 //! algorithm and the rationale for choosing PBF over WCSPH/LBM/MPM.
 //!
-//! **M3 scope ("slurry alone", per docs/PLAN.md ss5): no ball<->fluid interaction yet** -- fluid
-//! particles only collide with the drum wall/lifters, not with balls. Two-way coupling is M4
-//! ([`crate::coupling`]).
+//! Two-way ball<->fluid coupling ([`FluidParticles::step_coupled`], docs/PLAN.md ss3.4) projects
+//! fluid particles out of overlapping balls and exchanges viscous momentum near a ball's surface,
+//! accumulating the reaction as a [`crate::coupling::CouplingForces`] for [`crate::dem`] to apply.
+//! [`FluidParticles::step`] is the ball-free special case (equivalent to an empty ball list).
 //!
 //! **Viscosity, v1 simplification.** The plan's original two formulas for the XSPH mixing
 //! coefficient (a simple `clamp(mu/mu_ref)` and a separate dt-normalized exponential) were
@@ -19,6 +20,8 @@
 
 use glam::Vec2;
 
+use crate::coupling::CouplingForces;
+use crate::dem::Balls;
 use crate::geometry::Drum;
 use crate::grid::UniformGrid;
 use crate::params::{DyePattern, SlurryParams};
@@ -62,6 +65,18 @@ fn spiky_grad(delta: Vec2, r: f32, h: f32) -> Vec2 {
     }
     let coeff = -30.0 / (std::f32::consts::PI * h.powi(5)) * (h - r) * (h - r);
     (delta / r) * coeff
+}
+
+/// 2D cross product (the z-component of the 3D cross product of `(a, 0)` and `(b, 0)`), used for
+/// torque = lever_arm x force.
+fn cross2(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+/// Clamp magnitude for coupling forces/torques applied to a ball this sub-step (docs/PLAN.md
+/// ss3.4: `F_clamp = 20 * m_b * g`), for stability against transient large overlaps.
+fn force_clamp(ball_mass: f32) -> f32 {
+    20.0 * ball_mass * 9.81
 }
 
 /// Slurry (fluid) particle population. All particles share one kernel radius/mass/rest density
@@ -179,8 +194,9 @@ impl FluidParticles {
     }
 
     /// Advances the fluid by one fixed sub-step `dt`, against the given (already positioned at
-    /// `drum_angle`) drum. See docs/PLAN.md ss3.3 for the full per-substep algorithm; M3 does not
-    /// yet couple against balls (docs/PLAN.md ss3.4, M4).
+    /// `drum_angle`) drum, with no ball interaction. Equivalent to
+    /// [`FluidParticles::step_coupled`] with an empty ball list. See docs/PLAN.md ss3.3 for the
+    /// full per-substep algorithm.
     pub fn step(
         &mut self,
         drum: &Drum,
@@ -189,13 +205,37 @@ impl FluidParticles {
         iterations: u32,
         dt: f32,
     ) {
+        let _ = self.step_coupled(drum, drum_angle, slurry, iterations, dt, &Balls::empty());
+    }
+
+    /// As [`FluidParticles::step`], but also two-way couples against `balls` (docs/PLAN.md ss3.4,
+    /// [`crate::coupling`]): fluid particles overlapping a ball are projected to its surface and
+    /// fluid near a ball's surface exchanges viscous momentum with it, both accumulated into the
+    /// returned [`CouplingForces`] (clamped, docs/PLAN.md ss3.4's `F_clamp`) for
+    /// [`crate::dem::DemState::step_with_external_forces`] to apply. `balls` is treated as a fixed
+    /// boundary for this call -- it advances separately, afterwards, using the returned forces.
+    pub fn step_coupled(
+        &mut self,
+        drum: &Drum,
+        drum_angle: f32,
+        slurry: &SlurryParams,
+        iterations: u32,
+        dt: f32,
+        balls: &Balls,
+    ) -> CouplingForces {
         let n = self.len();
+        let mut coupling = CouplingForces::zeros(balls.len());
         if n == 0 || dt <= 0.0 {
-            return;
+            return coupling;
         }
         let h = self.h;
         let rest_density = self.rest_density;
         let mass = self.particle_mass;
+        let ball_grid = if balls.is_empty() {
+            None
+        } else {
+            Some(UniformGrid::build(&balls.x, (2.0 * balls.radius).max(1e-6)))
+        };
 
         // --- 1. Predict --------------------------------------------------------------------
         let x0: Vec<Vec2> = self.x.clone();
@@ -267,6 +307,38 @@ impl FluidParticles {
             }
         }
 
+        // --- 3.5 Ball overlap projection (docs/PLAN.md ss3.4 step 1): push fluid particles out
+        // of any ball they've penetrated, accumulating the Newton's-third-law reaction on that
+        // ball. `balls` is a fixed boundary for this call (see this method's doc comment).
+        if let Some(ball_grid) = &ball_grid {
+            let contact_radius = balls.radius + 0.25 * h; // balls.radius + 0.5*dx (dx = h/2)
+            for i in 0..n {
+                let mut nearby: Vec<u32> = Vec::new();
+                ball_grid.for_each_near(self.x[i], |b| nearby.push(b));
+                for b in nearby {
+                    let b = b as usize;
+                    let delta = self.x[i] - balls.x[b];
+                    let dist = delta.length();
+                    if dist >= contact_radius {
+                        continue;
+                    }
+                    let n_hat = if dist > 1e-9 { delta / dist } else { Vec2::X };
+                    let push = (contact_radius - dist) * n_hat;
+                    self.x[i] += push;
+                    // `push` is a position correction; the fluid particle's resulting momentum
+                    // change is `mass * (push / dt)` (velocity is reconstructed as displacement
+                    // over dt, see step 5 below). Newton's third law gives the ball the opposite
+                    // momentum change; expressed as a force (impulse / dt, to match how
+                    // `step_with_external_forces` integrates it: `v += force * inv_mass * dt`),
+                    // that's an extra `/ dt`, i.e. `mass * push / dt^2` overall.
+                    let reaction = -(mass * push) / (dt * dt);
+                    coupling.forces[b] += reaction;
+                    let lever = n_hat * balls.radius; // approximate contact point on the ball's surface
+                    coupling.torques[b] += cross2(lever, reaction);
+                }
+            }
+        }
+
         // --- 4. Boundary projection (position only; velocity is reconciled below) ----------
         let mut touched_wall = vec![false; n];
         for (x, touched) in self.x.iter_mut().zip(&mut touched_wall) {
@@ -293,8 +365,36 @@ impl FluidParticles {
             }
         }
 
-        // --- 7. XSPH viscosity (see module doc comment's v1 simplification note) -----------
+        // --- 6.5 Ball viscous no-slip (docs/PLAN.md ss3.4 step 2): fluid within `h` of a ball's
+        // surface blends toward the ball's surface velocity; the momentum removed from the fluid
+        // is added to that ball (force + torque), same reaction convention as ss3.5 above.
         let c = (slurry.viscosity_pa_s / MU_REF).clamp(0.0, 1.0);
+        if let Some(ball_grid) = &ball_grid {
+            let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
+            let factor = beta_b * c;
+            if factor > 0.0 {
+                for i in 0..n {
+                    let mut nearby: Vec<u32> = Vec::new();
+                    ball_grid.for_each_near(self.x[i], |b| nearby.push(b));
+                    for b in nearby {
+                        let b = b as usize;
+                        let r_vec = self.x[i] - balls.x[b];
+                        let dist = r_vec.length();
+                        if dist >= balls.radius + h {
+                            continue;
+                        }
+                        let v_surf = balls.v[b] + balls.omega[b] * Vec2::new(-r_vec.y, r_vec.x);
+                        let dv = factor * (v_surf - self.v[i]);
+                        self.v[i] += dv;
+                        let reaction = -(mass * dv) / dt;
+                        coupling.forces[b] += reaction;
+                        coupling.torques[b] += cross2(r_vec, reaction);
+                    }
+                }
+            }
+        }
+
+        // --- 7. XSPH viscosity (see module doc comment's v1 simplification note) -----------
         if c > 0.0 {
             // Recompute density once more at the final (post-boundary-projection) positions so
             // viscosity uses up-to-date neighbour densities.
@@ -322,6 +422,20 @@ impl FluidParticles {
                 *v += *dv;
             }
         }
+
+        // --- 8. Clamp accumulated coupling forces/torques for stability (docs/PLAN.md ss3.4) --
+        if !balls.is_empty() {
+            let f_clamp = force_clamp(balls.mass);
+            let tau_clamp = f_clamp * balls.radius;
+            for (force, torque) in coupling.forces.iter_mut().zip(&mut coupling.torques) {
+                let mag = force.length();
+                if mag > f_clamp && mag > 1e-9 {
+                    *force *= f_clamp / mag;
+                }
+                *torque = torque.clamp(-tau_clamp, tau_clamp);
+            }
+        }
+        coupling
     }
 }
 

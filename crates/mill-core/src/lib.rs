@@ -9,7 +9,7 @@
 //! - [`grid`]: uniform-grid spatial hash shared by the ball solver and PBF neighbour search (M3).
 //! - [`dem`]: position-based (XPBD-style) rigid discs for grinding media.
 //! - [`pbf`]: Position Based Fluids solver for the slurry (M3).
-//! - [`coupling`]: two-way ball<->fluid momentum exchange (M4).
+//! - [`coupling`]: two-way ball<->fluid momentum exchange.
 //! - [`surface`]: free-surface extraction (marching squares) for rendering (M3).
 //! - [`metrics`]: toe/shoulder angles, slurry level, mixing index, power draw (M3+).
 //! - [`rng`]: small deterministic PRNG for reproducible particle-lattice jitter.
@@ -50,7 +50,7 @@ impl Simulation {
     /// Creates a new simulation, validating `params` first, seeding the ball population from its
     /// (possibly coarse-grained) effective media (see [`Params::effective_media`]), and -- if
     /// `params.slurry.enabled` -- seeding the fluid (sites overlapping a ball are skipped, docs/
-    /// PLAN.md ss3.3). M3 scope: balls and fluid do not yet interact (M4, [`coupling`]).
+    /// PLAN.md ss3.3). Balls and fluid interact two-way every sub-step, see [`coupling`].
     pub fn new(params: Params) -> Result<Self, String> {
         params.validate()?;
         let radius_m = params.mill.radius_m();
@@ -142,17 +142,14 @@ impl Simulation {
 
         for _ in 0..n_substeps {
             let drum = Drum::new(radius_m, omega, lifters);
-            self.dem.step(
+            coupling::step(
+                &mut self.dem,
+                &mut self.fluid,
                 &drum,
                 self.drum_angle,
                 &self.params.media,
-                dem_iterations,
-                sub_dt,
-            );
-            self.fluid.step(
-                &drum,
-                self.drum_angle,
                 &self.params.slurry,
+                dem_iterations,
                 pbf_iterations,
                 sub_dt,
             );

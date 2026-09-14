@@ -252,20 +252,30 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
   Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇`.
 - Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.
 
-### 3.4 Coupling (`coupling.rs`) — one shared sub-step for both solvers
-Balls (ss3.2) and fluid (ss3.3) now run on the *same* fixed sub-step (`FIXED_DT`, `simulation.substeps`
-per frame) rather than a separate DEM/fluid time-step ratio, simplifying the staggered exchange to:
-1. Fluid predicts `x*`; during constraint iterations, fluid particles inside a ball (dist < r_b + 0.5·dx) are projected to
-   the ball surface. Accumulate the corrections `ΔP_b = Σ m_f·Δp_i` per ball.
+### 3.4 Coupling (`coupling.rs`) — one shared sub-step for both solvers, implemented
+Balls (ss3.2) and fluid (ss3.3) run on the *same* fixed sub-step (`FIXED_DT`, `simulation.substeps`
+per frame) rather than a separate DEM/fluid time-step ratio; `coupling::step` orchestrates the
+staggered exchange each sub-step (fluid solves first, using last sub-step's ball positions/
+velocities as a fixed boundary; balls then advance using the resulting forces, so their new state
+becomes the fluid's boundary for the *next* sub-step):
+1. During `FluidParticles::step_coupled`, after its density-constraint solve, fluid particles inside a ball
+   (dist < r_b + 0.5·dx) are projected to the ball surface by a position correction `push`. Since a
+   position correction becomes a velocity via `Δv = push/dt` (ss3.3 step 5's reconstruction), and a
+   velocity change becomes a force via `F = m·Δv/dt`, the ball's Newton's-third-law reaction force is
+   `F_b += -(m_f · push) / dt²` (**not** `/dt` — an earlier draft of this formula was missing a factor
+   of `dt`, caught by a unit test isolating a single overlapping particle from every other effect).
 2. Viscous no-slip at ball surface: fluid particles within `h` of a ball surface blend towards the ball's surface velocity
-   `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; the momentum removed from fluid is added to the ball (force + torque).
-3. Fluid force/torque on each ball this sub-step: `F_b = ΔP_b/dt + F_visc` (and `τ_b` similarly), clamped to
-   `|F_b| ≤ F_clamp = 20·m_b·g` for stability, applied as an extra acceleration in the ball solver's predict step (ss3.2 step 1).
+   `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; the removed momentum, as a force,
+   is `F_b += -(m_f · Δv) / dt` (here `Δv` is already a velocity, so only one `/dt` is needed to
+   express it as a force — unlike step 1's position-based `push`).
+3. Both contributions' torques use the lever arm from the ball's centre to the contact point/fluid particle.
+   The accumulated per-ball force/torque is clamped to `|F_b| ≤ F_clamp = 20·m_b·g` (torque clamped
+   to `F_clamp · r_ball`) for stability, then applied as an extra acceleration in the ball solver's
+   predict step (`DemState::step_with_external_forces`, ss3.2 step 1).
    (Buoyancy emerges from the density-constraint push; steel in slurry is a minor effect so v1 does not add ball
    boundary particles to the density sum. v2 option: sample ball perimeter as boundary particles contributing to
    `ρ_i` — Akinci-style — for correct buoyancy.)
-4. Balls advance their one sub-step (ss3.2); new positions/velocities become the moving boundaries for the fluid's
-   next sub-step.
+4. Balls advance their one sub-step; new positions/velocities become the moving boundary for the fluid's next sub-step.
 
 ### 3.5 Free surface & metrics (`surface.rs`, `metrics.rs`)
 - Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of
