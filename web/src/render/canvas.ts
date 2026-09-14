@@ -1,5 +1,5 @@
-// Canvas 2D renderer: drum wall, lifters, rotation marker, and the ball (grinding media)
-// population. Surface/fluid/dye layers are added in M3 (see docs/PLAN.md ss4.2).
+// Canvas 2D renderer: drum wall, lifters, the slurry free surface and fluid particles (coloured
+// by dye), the ball (grinding media) population, and a rotation marker. See docs/PLAN.md ss4.2.
 
 export interface LiftersRenderState {
   count: number;
@@ -19,6 +19,12 @@ export interface DrumRenderState {
   /** Ball orientations (radians), one per ball, same order as ballPositions. */
   ballOrientations: Float32Array;
   ballRadiusM: number;
+  /** Fluid particle positions, flattened as [x0, y0, x1, y1, ...] (m). */
+  fluidPositions: Float32Array;
+  /** Fluid dye tracer values ([0, 1]), one per particle, same order as fluidPositions. */
+  fluidDye: Float32Array;
+  /** Free-surface contour(s), flattened as [n_polys, len_0, x, y, ..., len_1, ...] (docs/PLAN.md ss3.5). */
+  fluidSurface: Float32Array;
 }
 
 export class CanvasRenderer {
@@ -64,6 +70,8 @@ export class CanvasRenderer {
     ctx.stroke();
 
     this.renderLifters(state, cx, cy, pxPerM);
+    this.renderSurface(state, cx, cy, pxPerM);
+    this.renderFluidParticles(state, cx, cy, pxPerM);
     this.renderBalls(state, cx, cy, pxPerM);
 
     // Rotation marker: a radial line fixed to the wall at drumAngle, so its motion visually
@@ -121,6 +129,66 @@ export class CanvasRenderer {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
+    }
+  }
+
+  /** Fills each free-surface contour from the flat [n_polys, len_0, x, y, ...] encoding
+   * (docs/PLAN.md ss3.5) as a translucent pool. */
+  private renderSurface(state: DrumRenderState, cx: number, cy: number, pxPerM: number): void {
+    const flat = state.fluidSurface;
+    if (flat.length < 1) return;
+    const { ctx } = this;
+    const nPolys = flat[0] ?? 0;
+
+    ctx.fillStyle = "rgba(58, 130, 168, 0.55)";
+    let offset = 1;
+    for (let p = 0; p < nPolys; p++) {
+      const len = flat[offset] ?? 0;
+      offset += 1;
+      if (len < 3) {
+        offset += len * 2;
+        continue;
+      }
+      ctx.beginPath();
+      for (let i = 0; i < len; i++) {
+        const wx = flat[offset + i * 2] ?? 0;
+        const wy = flat[offset + i * 2 + 1] ?? 0;
+        const px = cx + wx * pxPerM;
+        const py = cy - wy * pxPerM; // +y-up world to +y-down canvas, as elsewhere in this file.
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+      offset += len * 2;
+    }
+  }
+
+  /** Colour for a dye value in [0, 1]: blue (0) to orange (1), per docs/PLAN.md ss4.2. */
+  private static dyeColor(dye: number): string {
+    const t = Math.min(Math.max(dye, 0), 1);
+    const r = Math.round(59 + t * (224 - 59));
+    const g = Math.round(111 + t * (131 - 111));
+    const b = Math.round(209 + t * (63 - 209));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  private renderFluidParticles(state: DrumRenderState, cx: number, cy: number, pxPerM: number): void {
+    const { ctx } = this;
+    const { fluidPositions, fluidDye, ballRadiusM } = state;
+    const n = Math.min(fluidPositions.length / 2, fluidDye.length);
+    if (n <= 0) return;
+
+    const dotRadiusPx = Math.max(ballRadiusM * pxPerM * 0.25, 1);
+    for (let i = 0; i < n; i++) {
+      const worldX = fluidPositions[i * 2] ?? 0;
+      const worldY = fluidPositions[i * 2 + 1] ?? 0;
+      const px = cx + worldX * pxPerM;
+      const py = cy - worldY * pxPerM;
+      ctx.fillStyle = CanvasRenderer.dyeColor(fluidDye[i] ?? 0);
+      ctx.beginPath();
+      ctx.arc(px, py, dotRadiusPx, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 

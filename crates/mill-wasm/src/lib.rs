@@ -4,9 +4,9 @@
 //! `mill-core` itself stays a plain, natively-testable/benchmarkable Rust crate (see
 //! docs/PLAN.md ss1 for the crate split rationale).
 //!
-//! Through M0 the exposed surface is just `new`/`step`/angle-and-time getters, matching
-//! [`mill_core::Simulation`] at this milestone. Zero-copy typed-array views ("ptrs") for ball and
-//! fluid particle data are added in M1/M3 once there is per-particle data to expose.
+//! Exposes drum kinematics, the ball (media) population, the fluid (slurry) population, and its
+//! free-surface contour. `Vec<f32>` returns marshal to a fresh `Float32Array` per call (copied,
+//! not zero-copy); true zero-copy typed-array views are a possible M6 performance follow-up.
 
 use mill_core::{Params, Simulation as CoreSimulation};
 use wasm_bindgen::prelude::*;
@@ -93,6 +93,39 @@ impl Simulation {
     #[wasm_bindgen(js_name = ballOrientations)]
     pub fn ball_orientations(&self) -> Vec<f32> {
         self.inner.balls().theta.clone()
+    }
+
+    /// Number of fluid (slurry) particles currently simulated. Zero if `slurry.enabled` was
+    /// `false` when the simulation was (re)created.
+    #[wasm_bindgen(js_name = fluidCount)]
+    pub fn fluid_count(&self) -> u32 {
+        self.inner.fluid().len() as u32
+    }
+
+    /// Fluid particle positions, flattened as `[x0, y0, x1, y1, ...]` (m).
+    #[wasm_bindgen(js_name = fluidPositions)]
+    pub fn fluid_positions(&self) -> Vec<f32> {
+        let fluid = self.inner.fluid();
+        let mut out = Vec::with_capacity(fluid.len() * 2);
+        for p in &fluid.x {
+            out.push(p.x);
+            out.push(p.y);
+        }
+        out
+    }
+
+    /// Fluid dye tracer values (`[0, 1]`), one per particle, same order as
+    /// [`Simulation::fluid_positions`]. Used to colour-code mixing.
+    #[wasm_bindgen(js_name = fluidDye)]
+    pub fn fluid_dye(&self) -> Vec<f32> {
+        self.inner.fluid().dye.clone()
+    }
+
+    /// Free-surface contour(s) at the current fluid state, flattened as
+    /// `[n_polys, len_0, x, y, ..., len_1, ...]` (docs/PLAN.md ss3.5). Recomputed on demand.
+    #[wasm_bindgen(js_name = fluidSurface)]
+    pub fn fluid_surface(&self) -> Vec<f32> {
+        mill_core::surface::flatten_polygons(&self.inner.fluid_surface())
     }
 
     /// Returns the current parameters, JSON-encoded (e.g. so the UI can read back derived values

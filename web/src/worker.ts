@@ -25,7 +25,7 @@ function post(message: WorkerToMainMessage, transfer: Transferable[] = []): void
   scope.postMessage(message, transfer);
 }
 
-function ballFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
+function buildFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
   return {
     type: "frame",
     drumAngle: sim.drumAngle(),
@@ -34,12 +34,21 @@ function ballFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
     ballPositions: sim.ballPositions(),
     ballOrientations: sim.ballOrientations(),
     ballRadiusM: sim.ballRadiusM(),
+    fluidPositions: sim.fluidPositions(),
+    fluidDye: sim.fluidDye(),
+    fluidSurface: sim.fluidSurface(),
   };
 }
 
 function postFrame(sim: Simulation, achievedTimeScale: number): void {
-  const frame = ballFrame(sim, achievedTimeScale);
-  post(frame, [frame.ballPositions.buffer, frame.ballOrientations.buffer]);
+  const frame = buildFrame(sim, achievedTimeScale);
+  post(frame, [
+    frame.ballPositions.buffer,
+    frame.ballOrientations.buffer,
+    frame.fluidPositions.buffer,
+    frame.fluidDye.buffer,
+    frame.fluidSurface.buffer,
+  ]);
 }
 
 async function boot(initialParams?: ParamsJson): Promise<void> {

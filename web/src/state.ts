@@ -10,6 +10,9 @@ export interface AppState {
   ballPositions: Float32Array;
   ballOrientations: Float32Array;
   ballRadiusM: number;
+  fluidPositions: Float32Array;
+  fluidDye: Float32Array;
+  fluidSurface: Float32Array;
 }
 
 export function createInitialState(): AppState {
@@ -22,5 +25,8 @@ export function createInitialState(): AppState {
     ballPositions: new Float32Array(0),
     ballOrientations: new Float32Array(0),
     ballRadiusM: 0,
+    fluidPositions: new Float32Array(0),
+    fluidDye: new Float32Array(0),
+    fluidSurface: new Float32Array(0),
   };
 }

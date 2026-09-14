@@ -63,6 +63,12 @@ export interface FrameMessage {
   /** Ball orientations (radians), one per ball, same order as ballPositions. */
   ballOrientations: Float32Array;
   ballRadiusM: number;
+  /** Fluid (slurry) particle positions, flattened as [x0, y0, x1, y1, ...] (m). */
+  fluidPositions: Float32Array;
+  /** Fluid dye tracer values ([0, 1]), one per particle, same order as fluidPositions. */
+  fluidDye: Float32Array;
+  /** Free-surface contour(s), flattened as [n_polys, len_0, x, y, ..., len_1, ...] (docs/PLAN.md ss3.5). */
+  fluidSurface: Float32Array;
 }
 
 export interface ErrorMessage {

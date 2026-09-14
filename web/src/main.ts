@@ -55,6 +55,9 @@ function applyFrame(msg: FrameMessage): void {
   state.ballPositions = msg.ballPositions;
   state.ballOrientations = msg.ballOrientations;
   state.ballRadiusM = msg.ballRadiusM;
+  state.fluidPositions = msg.fluidPositions;
+  state.fluidDye = msg.fluidDye;
+  state.fluidSurface = msg.fluidSurface;
 }
 
 worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
@@ -122,6 +125,9 @@ function frameLoop(nowMs: number): void {
     ballPositions: state.ballPositions,
     ballOrientations: state.ballOrientations,
     ballRadiusM: state.ballRadiusM,
+    fluidPositions: state.fluidPositions,
+    fluidDye: state.fluidDye,
+    fluidSurface: state.fluidSurface,
   });
   hud.update(state, smoothedFps);
   requestAnimationFrame(frameLoop);
