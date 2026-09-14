@@ -27,6 +27,7 @@ pub mod surface;
 use dem::DemState;
 use geometry::Drum;
 pub use params::{EffectiveMedia, Params};
+use pbf::FluidParticles;
 
 /// Fixed simulation sub-step shared by the ball solver and (once it lands, M3) the PBF solver:
 /// 1/240 s. `simulation.substeps` sub-steps are taken per nominal 60 Hz rendered frame at 1x time
@@ -42,20 +43,45 @@ pub struct Simulation {
     /// Total simulated time (s).
     sim_time: f64,
     dem: DemState,
+    fluid: FluidParticles,
 }
 
 impl Simulation {
-    /// Creates a new simulation, validating `params` first and seeding the ball population from
-    /// its (possibly coarse-grained) effective media, see [`Params::effective_media`].
+    /// Creates a new simulation, validating `params` first, seeding the ball population from its
+    /// (possibly coarse-grained) effective media (see [`Params::effective_media`]), and -- if
+    /// `params.slurry.enabled` -- seeding the fluid (sites overlapping a ball are skipped, docs/
+    /// PLAN.md ss3.3). M3 scope: balls and fluid do not yet interact (M4, [`coupling`]).
     pub fn new(params: Params) -> Result<Self, String> {
         params.validate()?;
+        let radius_m = params.mill.radius_m();
         let effective = params.effective_media();
-        let dem = DemState::new(&effective, params.mill.radius_m(), params.simulation.seed);
+        let dem = DemState::new(&effective, radius_m, params.simulation.seed);
+        let fluid = if params.slurry.enabled {
+            FluidParticles::seed_lattice(
+                &params.slurry,
+                radius_m,
+                params.simulation.resolution,
+                &dem.balls.x,
+                dem.balls.radius,
+            )
+        } else {
+            FluidParticles::seed_lattice(
+                &params::SlurryParams {
+                    fill_fraction: 0.0,
+                    ..params.slurry
+                },
+                radius_m,
+                params.simulation.resolution,
+                &[],
+                0.0,
+            )
+        };
         Ok(Self {
             params,
             drum_angle: 0.0,
             sim_time: 0.0,
             dem,
+            fluid,
         })
     }
 
@@ -89,6 +115,19 @@ impl Simulation {
         &self.dem.balls
     }
 
+    /// The current fluid (slurry) particle population. Empty when `params.slurry.enabled` was
+    /// `false` at construction time.
+    pub fn fluid(&self) -> &FluidParticles {
+        &self.fluid
+    }
+
+    /// Extracts the fluid's free-surface contour(s) at the current state (docs/PLAN.md ss3.5).
+    /// Recomputed on demand each call -- callers should not call this more often than needed for
+    /// rendering.
+    pub fn fluid_surface(&self) -> Vec<surface::Polygon> {
+        surface::extract_surface(&self.fluid, self.params.mill.radius_m())
+    }
+
     /// Advances the simulation by `dt` seconds of simulation time, split into
     /// `simulation.substeps` fixed sub-steps (docs/PLAN.md ss3.2/4.1).
     pub fn step(&mut self, dt: f32) {
@@ -99,6 +138,8 @@ impl Simulation {
         let dem_iterations = self.params.simulation.dem_iterations;
         let sub_dt = dt / n_substeps as f32;
 
+        let pbf_iterations = self.params.simulation.pbf_iterations;
+
         for _ in 0..n_substeps {
             let drum = Drum::new(radius_m, omega, lifters);
             self.dem.step(
@@ -106,6 +147,13 @@ impl Simulation {
                 self.drum_angle,
                 &self.params.media,
                 dem_iterations,
+                sub_dt,
+            );
+            self.fluid.step(
+                &drum,
+                self.drum_angle,
+                &self.params.slurry,
+                pbf_iterations,
                 sub_dt,
             );
             self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
@@ -220,5 +268,33 @@ mod tests {
                 "ball escaped the drum: {p:?}"
             );
         }
+    }
+
+    #[test]
+    fn default_simulation_seeds_fluid_and_extracts_a_surface_after_stepping() {
+        let mut params = Params::default();
+        // Keep it small so this integration test runs quickly.
+        params.simulation.max_balls = 100;
+        let mut sim = Simulation::new(params).unwrap();
+        assert!(
+            !sim.fluid().x.is_empty(),
+            "default params have slurry.enabled = true"
+        );
+
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0);
+        }
+
+        for &p in &sim.fluid().x {
+            assert!(
+                p.x.is_finite() && p.y.is_finite(),
+                "non-finite fluid position: {p:?}"
+            );
+        }
+        let surface = sim.fluid_surface();
+        assert!(
+            !surface.is_empty(),
+            "expected at least one free-surface contour"
+        );
     }
 }
