@@ -58,6 +58,7 @@ function applyFrame(msg: FrameMessage): void {
   state.fluidPositions = msg.fluidPositions;
   state.fluidDye = msg.fluidDye;
   state.fluidSurface = msg.fluidSurface;
+  state.metricsJson = msg.metricsJson;
 }
 
 worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {

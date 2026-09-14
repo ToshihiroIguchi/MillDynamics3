@@ -69,6 +69,13 @@ export interface FrameMessage {
   fluidDye: Float32Array;
   /** Free-surface contour(s), flattened as [n_polys, len_0, x, y, ..., len_1, ...] (docs/PLAN.md ss3.5). */
   fluidSurface: Float32Array;
+  /**
+   * Derived metrics (toe/shoulder, slurry pool extent, mixing index, debug checks, docs/PLAN.md
+   * ss3.5), JSON-encoded (matching mill-core's `metrics::Metrics`, crates/mill-core/src/metrics.rs).
+   * Kept as an opaque JSON string through M3+ -- typed field access is M5 polish, same treatment
+   * as `ParamsJson` elsewhere in this file.
+   */
+  metricsJson: string;
 }
 
 export interface ErrorMessage {

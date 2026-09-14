@@ -13,6 +13,8 @@ export interface AppState {
   fluidPositions: Float32Array;
   fluidDye: Float32Array;
   fluidSurface: Float32Array;
+  /** Derived metrics, JSON-encoded (docs/PLAN.md ss3.5); see protocol.ts's `FrameMessage.metricsJson`. */
+  metricsJson: string;
 }
 
 export function createInitialState(): AppState {
@@ -28,5 +30,6 @@ export function createInitialState(): AppState {
     fluidPositions: new Float32Array(0),
     fluidDye: new Float32Array(0),
     fluidSurface: new Float32Array(0),
+    metricsJson: "",
   };
 }

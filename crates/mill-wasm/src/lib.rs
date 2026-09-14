@@ -134,6 +134,13 @@ impl Simulation {
     pub fn params_json(&self) -> Result<String, JsValue> {
         serde_json::to_string(self.inner.params()).map_err(|e| JsValue::from_str(&e.to_string()))
     }
+
+    /// Derived metrics (toe/shoulder, slurry pool extent, mixing index, debug checks, docs/
+    /// PLAN.md ss3.5) at the current state, JSON-encoded. Recomputed on demand.
+    #[wasm_bindgen(js_name = metricsJson)]
+    pub fn metrics_json(&self) -> Result<String, JsValue> {
+        serde_json::to_string(&self.inner.metrics()).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
 }
 
 /// Returns mill-core's default parameters, JSON-encoded, so the UI can seed the parameters modal

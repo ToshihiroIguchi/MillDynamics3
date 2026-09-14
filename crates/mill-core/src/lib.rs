@@ -133,6 +133,18 @@ impl Simulation {
         surface::extract_surface(&self.fluid, &drum, self.drum_angle)
     }
 
+    /// Computes derived metrics (toe/shoulder, pool extent, mixing index, debug checks, docs/
+    /// PLAN.md ss3.5) at the current state. Recomputed on demand each call -- callers should not
+    /// call this more often than needed (e.g. once per rendered HUD update).
+    pub fn metrics(&self) -> metrics::Metrics {
+        let drum = Drum::new(
+            self.params.mill.radius_m(),
+            self.params.mill.omega(),
+            self.params.lifters,
+        );
+        metrics::compute(&self.dem.balls, &self.fluid, &drum, self.drum_angle)
+    }
+
     /// Advances the simulation by `dt` seconds of simulation time, split into
     /// `simulation.substeps` fixed sub-steps (docs/PLAN.md ss3.2/4.1).
     pub fn step(&mut self, dt: f32) {

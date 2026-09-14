@@ -37,6 +37,7 @@ function buildFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
     fluidPositions: sim.fluidPositions(),
     fluidDye: sim.fluidDye(),
     fluidSurface: sim.fluidSurface(),
+    metricsJson: sim.metricsJson(),
   };
 }
 
