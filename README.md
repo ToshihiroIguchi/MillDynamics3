@@ -12,6 +12,13 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full design and milestone plan, and
 
 Early development (see `docs/PLAN.md` milestones M0–M7). Not yet runnable.
 
+## Live demo
+
+https://toshihiroiguchi.github.io/MillDynamics3/
+
+`main` auto-deploys to GitHub Pages via GitHub Actions (`.github/workflows/deploy.yml`) on every
+push, gated on the same checks as `## Development` below.
+
 ## Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) (stable) with the `wasm32-unknown-unknown` target
