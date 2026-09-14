@@ -125,7 +125,12 @@ impl Simulation {
     /// Recomputed on demand each call -- callers should not call this more often than needed for
     /// rendering.
     pub fn fluid_surface(&self) -> Vec<surface::Polygon> {
-        surface::extract_surface(&self.fluid, self.params.mill.radius_m())
+        let drum = Drum::new(
+            self.params.mill.radius_m(),
+            self.params.mill.omega(),
+            self.params.lifters,
+        );
+        surface::extract_surface(&self.fluid, &drum, self.drum_angle)
     }
 
     /// Advances the simulation by `dt` seconds of simulation time, split into

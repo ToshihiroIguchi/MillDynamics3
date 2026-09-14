@@ -290,6 +290,9 @@ how the rest of the solver already applies position/velocity corrections directl
 - Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of
   radius 1.5 h; marching squares at `φ = 0.5·φ_full` (φ_full = value in the bulk) → closed polylines; Chaikin smoothing ×1.
   Exported as `Vec<f32>` [n_polys, len_0, x,y,…]. Optional: the polygon is filled in the renderer, particles hidden.
+  The field is masked by the drum wall SDF before marching squares (no bulk value survives outside the wall or inside a
+  lifter bar), and after smoothing every contour point is projected back onto the wall/lifter surface along its normal
+  if it still landed outside -- together these prevent the rendered surface from bulging through the wall or lifters.
 - Slurry-level metrics: pool angular extent along the wall (fluid particles within `1.5 h` of the wall → min/max angle),
   free-surface mean line (fit to boundary particles not near the wall: angle and offset), pool depth at bottom.
 - Charge metrics: toe/shoulder angles from angular histogram of balls near the wall; charge center of mass;

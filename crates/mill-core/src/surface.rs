@@ -1,14 +1,18 @@
 //! Free-surface extraction for rendering.
 //!
 //! Splats fluid particles onto a scalar occupancy field on a `G x G` grid spanning the drum's
-//! bounding box, then runs marching squares at half the field's peak (bulk-interior) value to
-//! produce closed polylines approximating the slurry free surface, lightly smoothed (one pass of
-//! Chaikin corner-cutting) for a less blocky outline. See docs/PLAN.md ss3.5.
+//! bounding box, masks that field with the drum's wall SDF so no bulk-interior value survives
+//! outside the wall (or inside a lifter bar), then runs marching squares at half the field's peak
+//! (bulk-interior) value to produce closed polylines approximating the slurry free surface,
+//! lightly smoothed (one pass of Chaikin corner-cutting) for a less blocky outline, and finally
+//! projects any resulting contour point that still landed outside the wall back onto it along the
+//! wall normal. See docs/PLAN.md ss3.5.
 
 use std::collections::HashMap;
 
 use glam::Vec2;
 
+use crate::geometry::Drum;
 use crate::pbf::FluidParticles;
 
 /// Grid points per axis (docs/PLAN.md ss3.5: "G = 128"); the grid spans `[-R, R]` on each axis
@@ -35,9 +39,14 @@ fn splat_kernel(r2: f32, radius: f32) -> f32 {
 }
 
 /// Builds the scalar occupancy field on a `GRID_SIZE x GRID_SIZE` grid of points spanning
-/// `[-drum_radius_m, drum_radius_m]` on each axis, by splatting every fluid particle with
-/// [`splat_kernel`] of radius `SPLAT_RADIUS_FACTOR * fluid.h`.
-fn build_field(fluid: &FluidParticles, drum_radius_m: f32) -> Vec<f32> {
+/// `[-drum.radius_m, drum.radius_m]` on each axis, by splatting every fluid particle with
+/// [`splat_kernel`] of radius `SPLAT_RADIUS_FACTOR * fluid.h`, then masking out (zeroing) every
+/// grid point that falls outside the wall (or inside a lifter bar) per `drum`'s SDF, evaluated in
+/// the drum-local frame via `drum_angle` -- this is what keeps the marching-squares contour from
+/// bulging through the wall in the first place; see [`extract_surface`] for the second
+/// (contour-point) pass that mops up the remaining sub-cell overshoot.
+fn build_field(fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> Vec<f32> {
+    let drum_radius_m = drum.radius_m;
     let mut field = vec![0.0f32; GRID_SIZE * GRID_SIZE];
     if fluid.is_empty() || drum_radius_m <= 0.0 {
         return field;
@@ -59,7 +68,32 @@ fn build_field(fluid: &FluidParticles, drum_radius_m: f32) -> Vec<f32> {
             }
         }
     }
+
+    // Mask with the drum SDF: any grid point outside the wall (or inside a lifter bar) cannot be
+    // fluid, however much splat weight landed on it. Skip points already at zero (the bulk of the
+    // grid) to keep this cheap.
+    let to_local = Vec2::from_angle(-drum_angle);
+    for gj in 0..GRID_SIZE {
+        for gi in 0..GRID_SIZE {
+            let idx = gj * GRID_SIZE + gi;
+            if field[idx] == 0.0 {
+                continue;
+            }
+            let p_world = grid_point(gi, gj, drum_radius_m, cell_size);
+            let p_local = rotate(p_world, to_local);
+            if drum.sdf(p_local) < 0.0 {
+                field[idx] = 0.0;
+            }
+        }
+    }
+
     field
+}
+
+/// Rotates a 2D vector by a unit vector representing `(cos, sin)` of the rotation angle (same
+/// convention as the private helper of the same name in [`crate::geometry`]).
+fn rotate(v: Vec2, unit: Vec2) -> Vec2 {
+    Vec2::new(v.x * unit.x - v.y * unit.y, v.x * unit.y + v.y * unit.x)
 }
 
 /// Clamps a world coordinate to the nearest in-bounds grid index along one axis.
@@ -144,12 +178,16 @@ fn cell_edge_id(cell_i: usize, cell_j: usize, edge_side: u8) -> EdgeId {
 }
 
 /// Extracts the free-surface contour(s) of `fluid` as closed (or, rarely, open) polylines, in the
-/// same world frame as `fluid.x`. See the module doc comment for the algorithm.
-pub fn extract_surface(fluid: &FluidParticles, drum_radius_m: f32) -> Vec<Polygon> {
+/// same world frame as `fluid.x`, against `drum` at its current `drum_angle`. See the module doc
+/// comment for the algorithm, including the wall-SDF field mask and the final contour-point
+/// projection that together keep every returned point on or inside the wall (and outside any
+/// lifter bar).
+pub fn extract_surface(fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> Vec<Polygon> {
+    let drum_radius_m = drum.radius_m;
     if fluid.is_empty() || drum_radius_m <= 0.0 {
         return Vec::new();
     }
-    let field = build_field(fluid, drum_radius_m);
+    let field = build_field(fluid, drum, drum_angle);
     let peak = field.iter().cloned().fold(0.0f32, f32::max);
     if peak <= 0.0 {
         return Vec::new();
@@ -214,9 +252,28 @@ pub fn extract_surface(fluid: &FluidParticles, drum_radius_m: f32) -> Vec<Polygo
                 .iter()
                 .map(|&e| interp_edge(e, &field, threshold, drum_radius_m, cell_size))
                 .collect();
-            chaikin_smooth_closed(&pts)
+            let smoothed = chaikin_smooth_closed(&pts);
+            smoothed
+                .into_iter()
+                .map(|p| project_inside_wall(p, drum, drum_angle))
+                .collect()
         })
         .collect()
+}
+
+/// Projects `p` back onto the wall (moving it along the outward normal) if it lies outside the
+/// wall or inside a lifter bar, per `drum.sdf_world`. This mops up the sub-cell overshoot that
+/// linear interpolation across a threshold-straddling cell (and Chaikin's lerp of such points) can
+/// still leave outside the field mask applied in [`build_field`] -- up to one grid cell, since the
+/// mask only guarantees grid *points* are correctly classified, not the cell interior between
+/// them.
+fn project_inside_wall(p: Vec2, drum: &Drum, drum_angle: f32) -> Vec2 {
+    let (d, normal) = drum.sdf_world(p, drum_angle);
+    if d < 0.0 {
+        p - d * normal
+    } else {
+        p
+    }
 }
 
 /// Follows unvisited segments sharing an endpoint with the current end (`forward`) or start
@@ -308,7 +365,8 @@ mod tests {
             &[],
             0.0,
         );
-        assert!(extract_surface(&fluid, 0.5).is_empty());
+        let drum = crate::geometry::Drum::new(0.5, 0.0, crate::params::LiftersParams::default());
+        assert!(extract_surface(&fluid, &drum, 0.0).is_empty());
     }
 
     #[test]
@@ -333,7 +391,7 @@ mod tests {
             fluid.step(&drum, 0.0, &slurry, 3, 1.0 / 240.0);
         }
 
-        let polys = extract_surface(&fluid, radius_m);
+        let polys = extract_surface(&fluid, &drum, 0.0);
         assert_eq!(
             polys.len(),
             1,
@@ -358,12 +416,85 @@ mod tests {
             "contour area {area} far from expected {expected_area} (rel_err={rel_err})"
         );
 
-        // Every contour point should lie within (or acceptably close to) the drum.
+        // Every contour point should lie within the drum (wall-SDF mask + contour-point
+        // projection should keep this tight, not just "close").
         for &p in poly {
             assert!(
-                p.length() <= radius_m * 1.1,
+                p.length() <= radius_m + 1e-4,
                 "contour point outside the drum: {p:?}"
             );
+        }
+    }
+
+    #[test]
+    fn spinning_drum_keeps_flung_fluid_contour_inside_the_wall() {
+        let slurry = SlurryParams {
+            fill_fraction: 0.2,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 24, &[], 0.0);
+
+        // Fast-spinning smooth drum: fling the puddle against the wall for ~1s of sim time.
+        let omega = 6.0;
+        let drum = crate::geometry::Drum::new(
+            radius_m,
+            omega,
+            crate::params::LiftersParams {
+                count: 0,
+                ..crate::params::LiftersParams::default()
+            },
+        );
+        let dt = 1.0 / 240.0;
+        let n_steps = (1.0 / dt) as usize;
+        let mut drum_angle = 0.0f32;
+        for _ in 0..n_steps {
+            fluid.step(&drum, drum_angle, &slurry, 3, dt);
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+        }
+
+        let polys = extract_surface(&fluid, &drum, drum_angle);
+        assert!(!polys.is_empty(), "expected at least one contour");
+        for poly in &polys {
+            for &p in poly {
+                assert!(
+                    p.length() <= radius_m + 1e-4,
+                    "contour point outside the drum after spin-up: {p:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifters_never_appear_inside_the_extracted_contour() {
+        let slurry = SlurryParams {
+            fill_fraction: 0.2,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 24, &[], 0.0);
+
+        let drum = crate::geometry::Drum::new(
+            radius_m,
+            0.0,
+            crate::params::LiftersParams {
+                count: 4,
+                ..crate::params::LiftersParams::default()
+            },
+        );
+        for _ in 0..120 {
+            fluid.step(&drum, 0.0, &slurry, 3, 1.0 / 240.0);
+        }
+
+        let polys = extract_surface(&fluid, &drum, 0.0);
+        for poly in &polys {
+            for &p in poly {
+                let (d, _) = drum.sdf_world(p, 0.0);
+                assert!(
+                    d >= -1e-4,
+                    "contour point inside a lifter bar or outside the wall: {p:?} (d={d})"
+                );
+            }
         }
     }
 
