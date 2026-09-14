@@ -7,8 +7,8 @@
 //!
 //! Two-way ball<->fluid coupling ([`FluidParticles::step_coupled`], docs/PLAN.md ss3.4) projects
 //! fluid particles out of overlapping balls and exchanges viscous momentum near a ball's surface,
-//! accumulating the reaction as a [`crate::coupling::CouplingForces`] for [`crate::dem`] to apply.
-//! [`FluidParticles::step`] is the ball-free special case (equivalent to an empty ball list).
+//! accumulating the reaction as a [`crate::coupling::CouplingImpulses`] for [`crate::dem`] to
+//! apply. [`FluidParticles::step`] is the ball-free special case (equivalent to an empty ball list).
 //!
 //! **Viscosity, v1 simplification.** The plan's original two formulas for the XSPH mixing
 //! coefficient (a simple `clamp(mu/mu_ref)` and a separate dt-normalized exponential) were
@@ -20,7 +20,7 @@
 
 use glam::Vec2;
 
-use crate::coupling::CouplingForces;
+use crate::coupling::CouplingImpulses;
 use crate::dem::Balls;
 use crate::geometry::Drum;
 use crate::grid::UniformGrid;
@@ -68,15 +68,27 @@ fn spiky_grad(delta: Vec2, r: f32, h: f32) -> Vec2 {
 }
 
 /// 2D cross product (the z-component of the 3D cross product of `(a, 0)` and `(b, 0)`), used for
-/// torque = lever_arm x force.
+/// angular impulse = lever_arm x linear impulse.
 fn cross2(a: Vec2, b: Vec2) -> f32 {
     a.x * b.y - a.y * b.x
 }
 
-/// Clamp magnitude for coupling forces/torques applied to a ball this sub-step (docs/PLAN.md
-/// ss3.4: `F_clamp = 20 * m_b * g`), for stability against transient large overlaps.
-fn force_clamp(ball_mass: f32) -> f32 {
-    20.0 * ball_mass * 9.81
+/// Clamp magnitude for the coupling impulse applied to a ball over one sub-step (docs/PLAN.md
+/// ss3.4: equivalent to a force of `F_CLAMP_G_MULTIPLE * m_b * g` sustained for one sub-step,
+/// `F_clamp * dt`), for stability against transient large overlaps.
+///
+/// The plan's original `20x` g-multiple (tuned for an explicit force-based scheme, before the
+/// impulse-based fix described in [`crate::coupling::CouplingImpulses`]'s doc comment) was still
+/// too permissive when combined with real per-sub-step contact impulses at this project's default
+/// scale, where the coarse-grained ball radius can end up *smaller* than the fluid's own particle
+/// spacing (e.g. defaults: ~6 mm balls vs. ~12.5 mm fluid spacing at `resolution = 40`) --
+/// visibly ejecting balls from the charge over several seconds of simulated time. `3x` was
+/// empirically the largest multiple that stayed visually stable in that scenario while still
+/// allowing a meaningful buoyancy/drag effect (several times the ball's own weight).
+const F_CLAMP_G_MULTIPLE: f32 = 3.0;
+
+fn impulse_clamp(ball_mass: f32, dt: f32) -> f32 {
+    F_CLAMP_G_MULTIPLE * ball_mass * 9.81 * dt
 }
 
 /// Slurry (fluid) particle population. All particles share one kernel radius/mass/rest density
@@ -211,9 +223,9 @@ impl FluidParticles {
     /// As [`FluidParticles::step`], but also two-way couples against `balls` (docs/PLAN.md ss3.4,
     /// [`crate::coupling`]): fluid particles overlapping a ball are projected to its surface and
     /// fluid near a ball's surface exchanges viscous momentum with it, both accumulated into the
-    /// returned [`CouplingForces`] (clamped, docs/PLAN.md ss3.4's `F_clamp`) for
+    /// returned [`CouplingImpulses`] (clamped) for
     /// [`crate::dem::DemState::step_with_external_forces`] to apply. `balls` is treated as a fixed
-    /// boundary for this call -- it advances separately, afterwards, using the returned forces.
+    /// boundary for this call -- it advances separately, afterwards, using the returned impulses.
     pub fn step_coupled(
         &mut self,
         drum: &Drum,
@@ -222,9 +234,9 @@ impl FluidParticles {
         iterations: u32,
         dt: f32,
         balls: &Balls,
-    ) -> CouplingForces {
+    ) -> CouplingImpulses {
         let n = self.len();
-        let mut coupling = CouplingForces::zeros(balls.len());
+        let mut coupling = CouplingImpulses::zeros(balls.len());
         if n == 0 || dt <= 0.0 {
             return coupling;
         }
@@ -323,18 +335,24 @@ impl FluidParticles {
                         continue;
                     }
                     let n_hat = if dist > 1e-9 { delta / dist } else { Vec2::X };
-                    let push = (contact_radius - dist) * n_hat;
+                    // Cap the correction at half the ball's radius: when a fluid particle starts
+                    // (or, at coarse fluid resolution relative to ball size, persistently ends up)
+                    // deep inside `contact_radius`, projecting it out in a single sub-step would
+                    // otherwise produce an outsized reaction impulse, standard practice for
+                    // contact solvers (bounding the per-step correction, not just its downstream
+                    // force/impulse).
+                    let push_mag = (contact_radius - dist).min(0.5 * balls.radius);
+                    let push = push_mag * n_hat;
                     self.x[i] += push;
                     // `push` is a position correction; the fluid particle's resulting momentum
-                    // change is `mass * (push / dt)` (velocity is reconstructed as displacement
-                    // over dt, see step 5 below). Newton's third law gives the ball the opposite
-                    // momentum change; expressed as a force (impulse / dt, to match how
-                    // `step_with_external_forces` integrates it: `v += force * inv_mass * dt`),
-                    // that's an extra `/ dt`, i.e. `mass * push / dt^2` overall.
-                    let reaction = -(mass * push) / (dt * dt);
-                    coupling.forces[b] += reaction;
+                    // change (impulse) is `mass * (push / dt)` (velocity is reconstructed as
+                    // displacement over dt, see step 5 below). Newton's third law gives the ball
+                    // the exact opposite impulse -- see CouplingImpulses's doc comment for why
+                    // this is expressed as an impulse, not a force (no extra `/ dt`).
+                    let reaction_impulse = -(mass * push) / dt;
+                    coupling.impulses[b] += reaction_impulse;
                     let lever = n_hat * balls.radius; // approximate contact point on the ball's surface
-                    coupling.torques[b] += cross2(lever, reaction);
+                    coupling.angular_impulses[b] += cross2(lever, reaction_impulse);
                 }
             }
         }
@@ -367,7 +385,7 @@ impl FluidParticles {
 
         // --- 6.5 Ball viscous no-slip (docs/PLAN.md ss3.4 step 2): fluid within `h` of a ball's
         // surface blends toward the ball's surface velocity; the momentum removed from the fluid
-        // is added to that ball (force + torque), same reaction convention as ss3.5 above.
+        // is added to that ball as an impulse (see CouplingImpulses's doc comment).
         let c = (slurry.viscosity_pa_s / MU_REF).clamp(0.0, 1.0);
         if let Some(ball_grid) = &ball_grid {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
@@ -386,9 +404,12 @@ impl FluidParticles {
                         let v_surf = balls.v[b] + balls.omega[b] * Vec2::new(-r_vec.y, r_vec.x);
                         let dv = factor * (v_surf - self.v[i]);
                         self.v[i] += dv;
-                        let reaction = -(mass * dv) / dt;
-                        coupling.forces[b] += reaction;
-                        coupling.torques[b] += cross2(r_vec, reaction);
+                        // `dv` is already a velocity change, so the fluid's momentum change
+                        // (impulse) is `mass * dv` directly -- no `/ dt` (unlike the
+                        // position-derived overlap-projection impulse above).
+                        let reaction_impulse = -(mass * dv);
+                        coupling.impulses[b] += reaction_impulse;
+                        coupling.angular_impulses[b] += cross2(r_vec, reaction_impulse);
                     }
                 }
             }
@@ -423,16 +444,20 @@ impl FluidParticles {
             }
         }
 
-        // --- 8. Clamp accumulated coupling forces/torques for stability (docs/PLAN.md ss3.4) --
+        // --- 8. Clamp accumulated coupling impulses for stability (docs/PLAN.md ss3.4) --------
         if !balls.is_empty() {
-            let f_clamp = force_clamp(balls.mass);
-            let tau_clamp = f_clamp * balls.radius;
-            for (force, torque) in coupling.forces.iter_mut().zip(&mut coupling.torques) {
-                let mag = force.length();
-                if mag > f_clamp && mag > 1e-9 {
-                    *force *= f_clamp / mag;
+            let clamp = impulse_clamp(balls.mass, dt);
+            let angular_clamp = clamp * balls.radius;
+            for (impulse, angular) in coupling
+                .impulses
+                .iter_mut()
+                .zip(&mut coupling.angular_impulses)
+            {
+                let mag = impulse.length();
+                if mag > clamp && mag > 1e-9 {
+                    *impulse *= clamp / mag;
                 }
-                *torque = torque.clamp(-tau_clamp, tau_clamp);
+                *angular = angular.clamp(-angular_clamp, angular_clamp);
             }
         }
         coupling

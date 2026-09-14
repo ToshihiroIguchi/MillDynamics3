@@ -2,10 +2,11 @@
 //!
 //! Per fixed sub-step (docs/PLAN.md ss3.4): the fluid solves its own density constraint and, in
 //! the same pass, projects any fluid particle overlapping a ball back to the ball's surface,
-//! accumulating the (Newton's-third-law) reaction on that ball; fluid particles near a ball's
-//! surface also exchange viscous momentum with it (no-slip). The accumulated per-ball force/
-//! torque is then applied as an extra acceleration in the ball solver's predict step, and finally
-//! the balls advance -- their new positions/velocities become the moving boundary for the fluid's
+//! accumulating the (Newton's-third-law) reaction on that ball as a linear/angular **impulse**
+//! (not a force -- see [`CouplingImpulses`]'s doc comment for why); fluid particles near a ball's
+//! surface also exchange viscous momentum with it (no-slip). The accumulated per-ball impulse is
+//! then applied directly as a velocity change in the ball solver's predict step, and finally the
+//! balls advance -- their new positions/velocities become the moving boundary for the fluid's
 //! next sub-step. See [`crate::pbf::FluidParticles::step_coupled`] and
 //! [`crate::dem::DemState::step_with_external_forces`] for the two halves of this exchange.
 
@@ -16,19 +17,33 @@ use crate::geometry::Drum;
 use crate::params::{MediaParams, SlurryParams};
 use crate::pbf::FluidParticles;
 
-/// Per-ball force (N) and torque (N*m) accumulated from fluid interaction this sub-step, indexed
-/// the same as the ball population (`forces[i]`/`torques[i]` correspond to ball `i`).
+/// Per-ball linear impulse (kg*m/s) and angular impulse (kg*m^2/s) accumulated from fluid
+/// interaction this sub-step, indexed the same as the ball population (`impulses[i]`/
+/// `angular_impulses[i]` correspond to ball `i`).
+///
+/// **Impulse, not force.** [`crate::pbf::FluidParticles::step_coupled`] derives this from
+/// *position* corrections (pushing fluid particles off a ball) and *velocity* deltas (viscous
+/// no-slip blending); both convert directly to momentum changes (`mass * (push / dt)` and
+/// `mass * dv` respectively) without an extra division by `dt`. Expressing the ball's reaction as
+/// a force (impulse / dt again) and then re-integrating it with another `* dt` in
+/// [`crate::dem::DemState::step_with_external_forces`] round-trips through `dt` twice, making the
+/// result unnecessarily sensitive to the sub-step size -- an earlier version of this code did
+/// exactly that and was visibly unstable (balls flung out of the charge) at the project's default
+/// sub-step rate. Working in impulses throughout and applying them as `Δv = impulse * inv_mass`
+/// (no extra `* dt`) avoids that sensitivity, consistent with the rest of the solver's
+/// position-based/impulse-style corrections (docs/PLAN.md ss3.2/3.3) rather than mixing in a
+/// force-based integration step.
 #[derive(Debug, Clone)]
-pub struct CouplingForces {
-    pub forces: Vec<Vec2>,
-    pub torques: Vec<f32>,
+pub struct CouplingImpulses {
+    pub impulses: Vec<Vec2>,
+    pub angular_impulses: Vec<f32>,
 }
 
-impl CouplingForces {
+impl CouplingImpulses {
     pub fn zeros(n_balls: usize) -> Self {
         Self {
-            forces: vec![Vec2::ZERO; n_balls],
-            torques: vec![0.0; n_balls],
+            impulses: vec![Vec2::ZERO; n_balls],
+            angular_impulses: vec![0.0; n_balls],
         }
     }
 }
@@ -50,8 +65,8 @@ pub fn step(
     pbf_iterations: u32,
     dt: f32,
 ) {
-    let forces = fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
-    dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&forces));
+    let impulses = fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
+    dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&impulses));
 }
 
 #[cfg(test)]
@@ -72,11 +87,11 @@ mod tests {
 
     #[test]
     fn zeros_has_matching_lengths_and_no_effect() {
-        let cf = CouplingForces::zeros(5);
-        assert_eq!(cf.forces.len(), 5);
-        assert_eq!(cf.torques.len(), 5);
-        assert!(cf.forces.iter().all(|f| *f == Vec2::ZERO));
-        assert!(cf.torques.iter().all(|&t| t == 0.0));
+        let cf = CouplingImpulses::zeros(5);
+        assert_eq!(cf.impulses.len(), 5);
+        assert_eq!(cf.angular_impulses.len(), 5);
+        assert!(cf.impulses.iter().all(|f| *f == Vec2::ZERO));
+        assert!(cf.angular_impulses.iter().all(|&t| t == 0.0));
     }
 
     #[test]
@@ -233,13 +248,13 @@ mod tests {
         dem.balls.v[0] = Vec2::ZERO;
         dem.balls.omega[0] = 0.0;
 
-        let forces = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
+        let impulses = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
 
         let fluid_momentum_gained = fluid.particle_mass * fluid.v[0];
-        let ball_impulse = forces.forces[0] * dt;
-        // Only the x-component is meaningful here: the push is purely horizontal (particle
-        // offset from the ball along x only), while gravity contributes only to the fluid
-        // particle's y-velocity and is not part of what this test checks.
+        let ball_impulse = impulses.impulses[0]; // already an impulse, see CouplingImpulses's doc comment
+                                                 // Only the x-component is meaningful here: the push is purely horizontal (particle
+                                                 // offset from the ball along x only), while gravity contributes only to the fluid
+                                                 // particle's y-velocity and is not part of what this test checks.
         let sum_x = fluid_momentum_gained.x + ball_impulse.x;
         assert!(
             sum_x.abs() < 1e-6,

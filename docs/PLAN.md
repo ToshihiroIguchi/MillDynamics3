@@ -256,22 +256,31 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
 Balls (ss3.2) and fluid (ss3.3) run on the *same* fixed sub-step (`FIXED_DT`, `simulation.substeps`
 per frame) rather than a separate DEM/fluid time-step ratio; `coupling::step` orchestrates the
 staggered exchange each sub-step (fluid solves first, using last sub-step's ball positions/
-velocities as a fixed boundary; balls then advance using the resulting forces, so their new state
-becomes the fluid's boundary for the *next* sub-step):
+velocities as a fixed boundary; balls then advance using the resulting impulses, so their new state
+becomes the fluid's boundary for the *next* sub-step). The exchange is expressed as **impulses**,
+not forces (`CouplingImpulses`, applied as `Δv_ball = impulse * inv_mass` directly, no extra
+`* dt`) -- a force-based version (impulse/dt, re-integrated with another `* dt` on the ball side)
+was tried first and is more `dt`-sensitive than necessary; working in impulses throughout matches
+how the rest of the solver already applies position/velocity corrections directly (ss3.2/3.3).
 1. During `FluidParticles::step_coupled`, after its density-constraint solve, fluid particles inside a ball
-   (dist < r_b + 0.5·dx) are projected to the ball surface by a position correction `push`. Since a
-   position correction becomes a velocity via `Δv = push/dt` (ss3.3 step 5's reconstruction), and a
-   velocity change becomes a force via `F = m·Δv/dt`, the ball's Newton's-third-law reaction force is
-   `F_b += -(m_f · push) / dt²` (**not** `/dt` — an earlier draft of this formula was missing a factor
-   of `dt`, caught by a unit test isolating a single overlapping particle from every other effect).
+   (dist < r_b + 0.5·dx) are projected to the ball surface by a position correction `push`, **capped at
+   half the ball's radius** per sub-step (bounds the correction itself, not just its downstream impulse,
+   for particles that start or persistently end up deep inside the contact zone). Since a position
+   correction becomes a velocity via `Δv = push/dt` (ss3.3 step 5's reconstruction), the fluid's own
+   momentum change (impulse) is `m_f · push / dt`; the ball's Newton's-third-law reaction impulse is the
+   exact opposite, `-(m_f · push) / dt`.
 2. Viscous no-slip at ball surface: fluid particles within `h` of a ball surface blend towards the ball's surface velocity
-   `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; the removed momentum, as a force,
-   is `F_b += -(m_f · Δv) / dt` (here `Δv` is already a velocity, so only one `/dt` is needed to
-   express it as a force — unlike step 1's position-based `push`).
-3. Both contributions' torques use the lever arm from the ball's centre to the contact point/fluid particle.
-   The accumulated per-ball force/torque is clamped to `|F_b| ≤ F_clamp = 20·m_b·g` (torque clamped
-   to `F_clamp · r_ball`) for stability, then applied as an extra acceleration in the ball solver's
-   predict step (`DemState::step_with_external_forces`, ss3.2 step 1).
+   `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; here `Δv` is already a velocity, so the
+   ball's reaction impulse is simply `-(m_f · Δv)` (no `/dt` at all, unlike step 1's position-based `push`).
+3. Both contributions' angular impulses use the lever arm from the ball's centre to the contact point/fluid
+   particle. The accumulated per-ball impulse is clamped to `|impulse| ≤ 3·m_b·g·dt` (angular impulse
+   clamped to that times `r_ball`) for stability, then applied as a direct velocity change in the ball
+   solver's predict step (`DemState::step_with_external_forces`, ss3.2 step 1). The `3x`-gravity multiple
+   (down from an initially-planned `20x`) was reached empirically: at this project's default scale, where
+   the coarse-grained ball radius can end up *smaller* than the fluid's own particle spacing (e.g.
+   defaults: ~6 mm balls vs. ~12.5 mm fluid spacing at `resolution = 40`), `20x` was still visibly ejecting
+   balls from the charge over several seconds of simulated time; `3x`, combined with the push cap in step 1,
+   stayed visually stable over 30+ seconds while still giving a meaningful buoyancy/drag effect.
    (Buoyancy emerges from the density-constraint push; steel in slurry is a minor effect so v1 does not add ball
    boundary particles to the density sum. v2 option: sample ball perimeter as boundary particles contributing to
    `ρ_i` — Akinci-style — for correct buoyancy.)

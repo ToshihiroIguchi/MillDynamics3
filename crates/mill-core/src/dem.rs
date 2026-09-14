@@ -181,10 +181,12 @@ impl DemState {
         self.step_with_external_forces(drum, drum_angle, media, iterations, dt, None);
     }
 
-    /// As [`DemState::step`], but additionally applies `external` (fluid coupling forces/torques
-    /// per ball, docs/PLAN.md ss3.4, [`crate::coupling`]) as an extra acceleration in the predict
-    /// step. `external.forces`/`external.torques` must have one entry per ball, same order as
-    /// `self.balls.x`, when provided.
+    /// As [`DemState::step`], but additionally applies `external` (fluid coupling impulses per
+    /// ball, docs/PLAN.md ss3.4, [`crate::coupling`]) as a direct velocity change in the predict
+    /// step (`Δv = impulse * inv_mass`, no extra `* dt` -- see
+    /// [`crate::coupling::CouplingImpulses`]'s doc comment for why). `external.impulses`/
+    /// `external.angular_impulses` must have one entry per ball, same order as `self.balls.x`,
+    /// when provided.
     pub fn step_with_external_forces(
         &mut self,
         drum: &Drum,
@@ -192,7 +194,7 @@ impl DemState {
         media: &MediaParams,
         iterations: u32,
         dt: f32,
-        external: Option<&crate::coupling::CouplingForces>,
+        external: Option<&crate::coupling::CouplingImpulses>,
     ) {
         let balls = &mut self.balls;
         if balls.is_empty() || dt <= 0.0 {
@@ -210,8 +212,8 @@ impl DemState {
         for i in 0..n {
             balls.v[i].y += GRAVITY * dt;
             if let Some(ext) = external {
-                balls.v[i] += ext.forces[i] * w * dt;
-                balls.omega[i] += ext.torques[i] * w_rot * dt;
+                balls.v[i] += ext.impulses[i] * w;
+                balls.omega[i] += ext.angular_impulses[i] * w_rot;
             }
             balls.x[i] += balls.v[i] * dt;
             balls.theta[i] += balls.omega[i] * dt;
