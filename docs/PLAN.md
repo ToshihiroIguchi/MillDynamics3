@@ -231,14 +231,23 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
 - Fill: slurry volume given as **fraction of drum area** `U_s` (or "% of charge voids" as an alternative input) → initial
   particles on a hexagonal lattice in the bottom of the drum (interstitial with balls; balls initialised first, fluid particles overlapping a ball are removed).
 - Kernels: 2D Poly6 (`4/(π h⁸)`) for density, 2D Spiky gradient (`−30/(π h⁵)`) for ∇W.
-- Substep (dt = 1/240 s, `substeps` param): predict `x* = x + dt·(v + dt·g)` → neighbour grid (cell = h) → `iters` (default 3) of
-  density constraint `C_i = ρ_i/ρ0 − 1`, `λ_i = −C_i/(Σ|∇C|² + ε)` (ε = 1e2…1e3 relaxation), `Δp_i = 1/ρ0·Σ(λ_i+λ_j+s_corr)∇W`,
-  artificial pressure `s_corr = −k·(W(r)/W(Δq))⁴`, k = 0.1, Δq = 0.2 h → boundary projection → update `v = (x*−x)/dt` → viscosity → `x = x*`.
+- Substep (dt = 1/240 s, `substeps` param): predict `x* = x + dt·(v + dt·g)` → neighbour grid (cell = h) → `iters` (default 3,
+  Jacobi-style: all λ/Δp computed from the current positions, then applied together) of density constraint
+  `C_i = ρ_i/ρ0 − 1`, `λ_i = −C_i/(Σ|∇C|² + ε)` (ε = 200; plan default), `Δp_i = 1/ρ0·Σ(λ_i+λ_j+s_corr)∇W` → boundary
+  projection → update `v = (x*−x)/dt` → no-slip blending → viscosity → `x = x*`.
+- **Artificial pressure `s_corr`, disabled in v1.** The literature-default `s_corr = −k·(W(r)/W(Δq))⁴` (k = 0.1, Δq =
+  0.2h) is implemented but set to `k = 0`: at this project's real-SI-unit scale (ρ0 ~1000-2000 kg/m³, small h), k = 0.1
+  produced a correction 10-30x larger than the density-constraint terms it's meant to supplement, causing runaway
+  dispersal instead of preventing clustering. Disabling it gives a stable settled puddle (~1% mean density error over
+  2s simulated); several smaller `k` values tried did not find a working point in the time available. Revisit only if
+  visual clustering artifacts appear in practice.
 - Boundaries: SDF projection against drum/lifters with wall velocity blending
-  `v ← (1−β)·v + β·v_wall` for particles touching the wall (β = no-slip factor, default 1 → no-slip).
-- **Viscosity (v1)**: XSPH `v_i += c·Σ (m_j/ρ_j)(v_j − v_i) W_ij` with `c = clamp(μ/μ_ref, 0, 1)` per substep, plus an
-  explicit viscous-damping term for dt-independence: `c_eff = 1 − exp(−μ·dt/(ρ0·h²·κ))`. Calibrated once against a
-  rotating-drum steady-state slope so that UI viscosity in Pa·s is monotone and roughly quantitative (documented in PHYSICS.md).
+  `v ← (1−β)·v + β·v_wall` for particles that were projected (touching the wall) this substep (β = no-slip factor,
+  default 1 → no-slip).
+- **Viscosity (v1, implemented)**: XSPH `v_i += c·Σ (m_j/ρ_j)(v_j − v_i) W_ij` with `c = clamp(μ/μ_ref, 0, 1)`,
+  `μ_ref = 2 Pa·s` (a single formula; the plan's earlier draft listed two redundant candidate formulas, resolved to
+  this simpler one during implementation). Qualitative (monotone in μ, not quantitatively calibrated to real Pa·s) —
+  consistent with this project's project-wide 2D/qualitative caveat.
 - **Viscosity (v2, phase M7)**: implicit viscosity (Weiler et al. 2018) with conjugate gradient; Bingham/Herschel–Bulkley via
   Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇`.
 - Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.
