@@ -292,8 +292,16 @@ how the rest of the solver already applies position/velocity corrections directl
 
 ### 3.5 Free surface & metrics (`surface.rs`, `metrics.rs`)
 - Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of
-  radius 1.5 h; marching squares at `φ = 0.5·φ_full` (φ_full = value in the bulk) → closed polylines; Chaikin smoothing ×1.
-  Exported as `Vec<f32>` [n_polys, len_0, x,y,…]. Optional: the polygon is filled in the renderer, particles hidden.
+  radius 1.5 h; marching squares at `φ = 0.5·φ_full` → closed polylines; Chaikin smoothing ×1. `φ_full` is computed
+  *analytically*, not read off the grid's measured maximum: `φ_full = n·∫K dA`, with number density `n = rest_density /
+  particle_mass` (exact, since `particle_mass = rest_density·dx²` at seeding) and `∫K dA = π·radius²/4` in closed form
+  for the cubic-falloff splat kernel. Reading `φ_full` off the grid instead is unsafe -- at high rotation speed the
+  slurry can centrifuge into a thin wall-hugging film whose field values are depressed everywhere, while a transient
+  PBF-solver over-compacted pocket elsewhere can inflate the measured maximum well past the true bulk value, starving
+  the film's threshold and making the free surface disappear. As a graceful fallback for degenerate cases where the
+  analytic threshold yields no contour at all, extraction retries once with the grid's measured-peak-based threshold
+  (the original approach) instead. Exported as `Vec<f32>` [n_polys, len_0, x,y,…]. Optional: the polygon is filled in
+  the renderer, particles hidden.
   The field is masked by the drum wall SDF before marching squares (no bulk value survives outside the wall or inside a
   lifter bar), and after smoothing every contour point is projected back onto the wall/lifter surface along its normal
   if it still landed outside -- together these prevent the rendered surface from bulging through the wall or lifters.

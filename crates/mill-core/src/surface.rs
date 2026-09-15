@@ -2,11 +2,18 @@
 //!
 //! Splats fluid particles onto a scalar occupancy field on a `G x G` grid spanning the drum's
 //! bounding box, masks that field with the drum's wall SDF so no bulk-interior value survives
-//! outside the wall (or inside a lifter bar), then runs marching squares at half the field's peak
-//! (bulk-interior) value to produce closed polylines approximating the slurry free surface,
-//! lightly smoothed (one pass of Chaikin corner-cutting) for a less blocky outline, and finally
-//! projects any resulting contour point that still landed outside the wall back onto it along the
-//! wall normal. See docs/PLAN.md ss3.5.
+//! outside the wall (or inside a lifter bar), then runs marching squares at half of `phi_full` --
+//! the *analytically computed* deep-bulk value of a uniform-density fluid's splatted field (not
+//! the grid's measured maximum: at high rotation speed the slurry can centrifuge into a thin
+//! wall-hugging film whose own field values are depressed everywhere, while a transient,
+//! locally over-compacted pocket elsewhere in the field can inflate the measured maximum well
+//! above the legitimate bulk value, so using the measured maximum as the threshold reference can
+//! make the real free surface invisible to marching squares) -- to produce closed polylines
+//! approximating the slurry free surface, lightly smoothed (one pass of Chaikin corner-cutting)
+//! for a less blocky outline, and finally projects any resulting contour point that still landed
+//! outside the wall back onto it along the wall normal. If the analytic threshold yields no
+//! contour at all (a degenerate case), extraction retries once with the grid's measured peak as
+//! the threshold reference instead, as a graceful fallback. See docs/PLAN.md ss3.5.
 
 use std::collections::HashMap;
 
@@ -38,21 +45,52 @@ fn splat_kernel(r2: f32, radius: f32) -> f32 {
     t * t * t
 }
 
+/// Splat kernel radius used to build the occupancy field for `fluid`: `SPLAT_RADIUS_FACTOR *
+/// fluid.h`.
+fn splat_radius_of(fluid: &FluidParticles) -> f32 {
+    SPLAT_RADIUS_FACTOR * fluid.h
+}
+
+/// Analytically computes `phi_full`, the continuum-average occupancy-field value deep in a
+/// uniform-density bulk of `fluid`, without reading it off the (possibly unrepresentative) grid.
+///
+/// For a uniform number density `n` of particles each splatted with [`splat_kernel`] of radius
+/// `splat_radius`, the field value far from any edge is `n * integral(K dA)`. `n = rest_density /
+/// particle_mass` is exact here because `particle_mass = rest_density * dx * dx` at seeding
+/// ([`FluidParticles::seed_lattice`]), so `n = 1 / dx^2` at the relaxed equilibrium the PBF
+/// density constraint targets -- deriving `n` from mass/density directly (rather than
+/// re-deriving `dx` from `splat_radius`) keeps this correct even if the `h = 2*dx` relationship
+/// baked into `seed_lattice` ever changes.
+///
+/// The kernel's integral over its support has the closed form `pi * splat_radius^2 / 4`:
+/// substituting `u = r^2 / splat_radius^2` into `integral_0^splat_radius (1 - r^2 /
+/// splat_radius^2)^3 * 2*pi*r dr` gives `pi * splat_radius^2 * integral_0^1 (1 - u)^3 du = pi *
+/// splat_radius^2 / 4`.
+fn analytic_phi_full(fluid: &FluidParticles, splat_radius: f32) -> f32 {
+    let number_density = fluid.rest_density / fluid.particle_mass.max(1e-12);
+    number_density * (std::f32::consts::PI * splat_radius * splat_radius / 4.0)
+}
+
 /// Builds the scalar occupancy field on a `GRID_SIZE x GRID_SIZE` grid of points spanning
 /// `[-drum.radius_m, drum.radius_m]` on each axis, by splatting every fluid particle with
-/// [`splat_kernel`] of radius `SPLAT_RADIUS_FACTOR * fluid.h`, then masking out (zeroing) every
-/// grid point that falls outside the wall (or inside a lifter bar) per `drum`'s SDF, evaluated in
-/// the drum-local frame via `drum_angle` -- this is what keeps the marching-squares contour from
-/// bulging through the wall in the first place; see [`extract_surface`] for the second
-/// (contour-point) pass that mops up the remaining sub-cell overshoot.
-fn build_field(fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> Vec<f32> {
+/// [`splat_kernel`] of radius `splat_radius` (see [`splat_radius_of`]), then masking out
+/// (zeroing) every grid point that falls outside the wall (or inside a lifter bar) per `drum`'s
+/// SDF, evaluated in the drum-local frame via `drum_angle` -- this is what keeps the
+/// marching-squares contour from bulging through the wall in the first place; see
+/// [`extract_surface`] for the second (contour-point) pass that mops up the remaining sub-cell
+/// overshoot.
+fn build_field(
+    fluid: &FluidParticles,
+    drum: &Drum,
+    drum_angle: f32,
+    splat_radius: f32,
+) -> Vec<f32> {
     let drum_radius_m = drum.radius_m;
     let mut field = vec![0.0f32; GRID_SIZE * GRID_SIZE];
     if fluid.is_empty() || drum_radius_m <= 0.0 {
         return field;
     }
     let cell_size = 2.0 * drum_radius_m / (GRID_SIZE as f32 - 1.0);
-    let splat_radius = SPLAT_RADIUS_FACTOR * fluid.h;
 
     for &p in &fluid.x {
         // Grid-index bounding box of this particle's splat footprint.
@@ -182,19 +220,68 @@ fn cell_edge_id(cell_i: usize, cell_j: usize, edge_side: u8) -> EdgeId {
 /// comment for the algorithm, including the wall-SDF field mask and the final contour-point
 /// projection that together keep every returned point on or inside the wall (and outside any
 /// lifter bar).
+///
+/// The marching-squares threshold is `THRESHOLD_FRACTION * phi_full`, where `phi_full` is
+/// [`analytic_phi_full`]'s closed-form deep-bulk field value (by symmetry, the kernel-sum field
+/// value exactly at a flat bulk/free-surface boundary is exactly half of the deep-bulk value, so
+/// the 0.5 contour lands precisely on the physical surface). If that threshold happens to yield
+/// no contour at all -- a degenerate case, e.g. a field the analytic reference doesn't describe
+/// well -- extraction retries once using the grid's measured peak value as the threshold
+/// reference instead (today's original behaviour), as a graceful fallback.
 pub fn extract_surface(fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> Vec<Polygon> {
     let drum_radius_m = drum.radius_m;
     if fluid.is_empty() || drum_radius_m <= 0.0 {
         return Vec::new();
     }
-    let field = build_field(fluid, drum, drum_angle);
-    let peak = field.iter().cloned().fold(0.0f32, f32::max);
-    if peak <= 0.0 {
-        return Vec::new();
-    }
-    let threshold = THRESHOLD_FRACTION * peak;
+    let splat_radius = splat_radius_of(fluid);
+    let field = build_field(fluid, drum, drum_angle, splat_radius);
     let cell_size = 2.0 * drum_radius_m / (GRID_SIZE as f32 - 1.0);
 
+    let phi_full = analytic_phi_full(fluid, splat_radius);
+    let analytic_threshold = THRESHOLD_FRACTION * phi_full;
+    let polys = polygons_at_threshold(
+        &field,
+        analytic_threshold,
+        drum_radius_m,
+        cell_size,
+        drum,
+        drum_angle,
+    );
+    if !polys.is_empty() {
+        return polys;
+    }
+
+    // Fallback: the analytic reference didn't describe this field well enough to find any
+    // contour at all. Retry with the grid's own measured peak (today's original approach) rather
+    // than returning nothing.
+    let measured_peak = field.iter().cloned().fold(0.0f32, f32::max);
+    if measured_peak <= 0.0 {
+        return Vec::new();
+    }
+    let fallback_threshold = THRESHOLD_FRACTION * measured_peak;
+    polygons_at_threshold(
+        &field,
+        fallback_threshold,
+        drum_radius_m,
+        cell_size,
+        drum,
+        drum_angle,
+    )
+}
+
+/// Runs marching squares over `field` at `threshold`, chains the resulting segments into
+/// polylines, lightly smooths each with one pass of Chaikin corner-cutting, and projects any
+/// point that still landed outside the wall back onto it. Returns an empty `Vec` if no cell
+/// straddles `threshold`. Factored out of [`extract_surface`] so it can be tried at two different
+/// threshold references without duplicating the segment-collection/chaining/smoothing logic.
+fn polygons_at_threshold(
+    field: &[f32],
+    threshold: f32,
+    drum_radius_m: f32,
+    cell_size: f32,
+    drum: &Drum,
+    drum_angle: f32,
+) -> Vec<Polygon> {
     // Pass 1: collect every segment (as a pair of EdgeIds) from every marching-squares cell.
     let mut segments: Vec<(EdgeId, EdgeId)> = Vec::new();
     for cj in 0..GRID_SIZE - 1 {
@@ -250,7 +337,7 @@ pub fn extract_surface(fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> 
         .map(|chain| {
             let pts: Vec<Vec2> = chain
                 .iter()
-                .map(|&e| interp_edge(e, &field, threshold, drum_radius_m, cell_size))
+                .map(|&e| interp_edge(e, field, threshold, drum_radius_m, cell_size))
                 .collect();
             let smoothed = chaikin_smooth_closed(&pts);
             smoothed
@@ -351,6 +438,59 @@ mod tests {
         assert!(splat_kernel(0.5, 1.0) > 0.0);
         assert_eq!(splat_kernel(1.0, 1.0), 0.0);
         assert_eq!(splat_kernel(2.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn build_field_interior_value_matches_analytic_phi_full() {
+        // Isolates the phi_full formula from PBF solver dynamics: manually lay out a uniform
+        // square lattice at exactly the equilibrium number density (1 / dx^2) implied by
+        // `particle_mass = rest_density * dx * dx`, far from any boundary, and confirm
+        // build_field's interior samples match analytic_phi_full for that lattice.
+        let radius_m = 2.0;
+        let resolution = 40;
+        let dx = radius_m / resolution as f32;
+        let slurry = SlurryParams {
+            fill_fraction: 0.0, // we build the particle lattice manually, below
+            ..SlurryParams::default()
+        };
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, resolution, &[], 0.0);
+        assert!(fluid.is_empty());
+
+        // A big block (half-extent 1.0 m) centred at the drum's centre: comfortably far from the
+        // drum wall (radius 2.0 m) and, since we sample near the block's own centre, far from the
+        // block's own edges too.
+        let n_side: i32 = 41;
+        for j in -(n_side / 2)..=(n_side / 2) {
+            for i in -(n_side / 2)..=(n_side / 2) {
+                fluid.x.push(Vec2::new(i as f32 * dx, j as f32 * dx));
+                fluid.v.push(Vec2::ZERO);
+                fluid.dye.push(0.0);
+            }
+        }
+
+        let drum =
+            crate::geometry::Drum::new(radius_m, 0.0, crate::params::LiftersParams::default());
+        let splat_radius = splat_radius_of(&fluid);
+        let field = build_field(&fluid, &drum, 0.0, splat_radius);
+        let phi_full = analytic_phi_full(&fluid, splat_radius);
+        assert!(phi_full > 0.0);
+
+        // Sample a small block of grid points near the drum's centre (deep in the bulk of the
+        // lattice, generically offset from the lattice's own periodicity).
+        let center_idx = GRID_SIZE / 2;
+        for dj in -1i32..=1 {
+            for di in -1i32..=1 {
+                let gi = (center_idx as i32 + di) as usize;
+                let gj = (center_idx as i32 + dj) as usize;
+                let v = field[gj * GRID_SIZE + gi];
+                let rel_err = (v - phi_full).abs() / phi_full;
+                assert!(
+                    rel_err < 0.1,
+                    "interior field value {v} far from analytic phi_full {phi_full} \
+                     (rel_err={rel_err})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -460,6 +600,107 @@ mod tests {
                 assert!(
                     p.length() <= radius_m + 1e-4,
                     "contour point outside the drum after spin-up: {p:?}"
+                );
+            }
+        }
+
+        // Sanity-check the enclosed area is a plausible, non-tiny fraction of the fluid's own
+        // footprint (number of particles times their notional per-particle area `dx^2`) -- a
+        // generous lower bound since this is a coarse marching-squares contour of a thin,
+        // flung-out film, not the particle area itself. This is what would have caught the
+        // "analytic phi_full vs. measured-peak threshold" regression at the field-value level,
+        // were it not also caught by the dedicated compacted-clump test below.
+        let total_area: f32 = polys.iter().map(|p| shoelace_area(p)).sum();
+        let dx = fluid.h / 2.0;
+        let footprint_area = fluid.len() as f32 * dx * dx;
+        assert!(
+            total_area > 0.1 * footprint_area,
+            "contour area {total_area} implausibly small relative to fluid footprint \
+             {footprint_area}"
+        );
+    }
+
+    #[test]
+    fn compacted_clump_does_not_hide_the_thin_film_contour() {
+        // Regression test for the bug this change fixes: a transient, artificially dense clump
+        // of particles elsewhere in the field (simulating an over-compacted PBF pocket) must not
+        // starve out the thin wall-hugging film's own contour by inflating the grid's measured
+        // peak far above the film's legitimate field values.
+        let slurry = SlurryParams {
+            fill_fraction: 0.2,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 24, &[], 0.0);
+
+        // Fast-spinning smooth drum: fling the puddle into a thin wall-hugging film, exactly as
+        // in `spinning_drum_keeps_flung_fluid_contour_inside_the_wall`.
+        let omega = 6.0;
+        let drum = crate::geometry::Drum::new(
+            radius_m,
+            omega,
+            crate::params::LiftersParams {
+                count: 0,
+                ..crate::params::LiftersParams::default()
+            },
+        );
+        let dt = 1.0 / 240.0;
+        let n_steps = (1.0 / dt) as usize;
+        let mut drum_angle = 0.0f32;
+        for _ in 0..n_steps {
+            fluid.step(&drum, drum_angle, &slurry, 3, dt);
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+        }
+
+        // Baseline: the thin film alone should already produce a contour (this mirrors the
+        // existing spinning-drum test); if it didn't, the clump-injection check below wouldn't
+        // be testing anything meaningful.
+        let baseline = extract_surface(&fluid, &drum, drum_angle);
+        assert!(
+            !baseline.is_empty(),
+            "thin film alone produced no contour (test setup is broken)"
+        );
+        let baseline_area: f32 = baseline.iter().map(|p| shoelace_area(p)).sum();
+
+        // Inject a hand-placed, artificially tight clump of extra particles at the drum's
+        // centre -- far closer together than the fluid's own equilibrium spacing -- simulating a
+        // transient PBF over-compacted pocket. Its splatted field value locally overshoots the
+        // true bulk value (phi_full) by a wide margin: exactly what would previously have become
+        // the grid's new (unrepresentative) global maximum.
+        let clump_spacing = fluid.h * 0.05;
+        let n_clump_side = 6;
+        for j in 0..n_clump_side {
+            for i in 0..n_clump_side {
+                let offset = Vec2::new(
+                    (i as f32 - n_clump_side as f32 / 2.0) * clump_spacing,
+                    (j as f32 - n_clump_side as f32 / 2.0) * clump_spacing,
+                );
+                fluid.x.push(offset); // clump centred on the drum's own centre
+                fluid.v.push(Vec2::ZERO);
+                fluid.dye.push(0.0);
+            }
+        }
+
+        let polys = extract_surface(&fluid, &drum, drum_angle);
+        assert!(
+            !polys.is_empty(),
+            "expected a contour even with a compacted clump present"
+        );
+
+        // The extracted contour(s) must still enclose (approximately) the thin film, not just
+        // collapse down to the tiny clump's own footprint.
+        let area: f32 = polys.iter().map(|p| shoelace_area(p)).sum();
+        assert!(
+            area > 0.5 * baseline_area,
+            "contour area {area} collapsed relative to the thin-film baseline {baseline_area} \
+             -- the compacted clump likely starved the threshold again"
+        );
+
+        for poly in &polys {
+            for &p in poly {
+                assert!(
+                    p.length() <= radius_m + 1e-4,
+                    "contour point outside the drum with a compacted clump present: {p:?}"
                 );
             }
         }
