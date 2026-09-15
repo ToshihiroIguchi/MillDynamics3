@@ -267,4 +267,85 @@ mod tests {
             "expected a non-zero reaction on the ball"
         );
     }
+
+    #[test]
+    fn extreme_rotation_keeps_the_coupled_fluid_state_bounded_every_sub_step() {
+        // Far beyond anything the UI permits (omega = 40 rad/s, ~9x critical speed for this
+        // drum) with a ball charge, to exercise fluid squeezed between the centrifuged charge
+        // and the wall -- the configuration that drives `pbf.rs` step 5's velocity ramp.
+        // Asserted on *every* sub-step, not just at the end: a transient excursion that later
+        // relaxes is exactly the event that would make the rendered free surface disappear for
+        // a frame (see `crate::surface`), so checking only the final state isn't enough.
+        let radius_m = 0.5;
+        let omega = 40.0f32;
+        let drum = Drum::new(
+            radius_m,
+            omega,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+        let media = MediaParams {
+            ball_diameter_m: 0.02,
+            fill_fraction: 0.2,
+            ..MediaParams::default()
+        };
+        let slurry = SlurryParams {
+            fill_fraction: 0.15,
+            ..SlurryParams::default()
+        };
+        let dt = 1.0 / 240.0;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: media.ball_diameter_m,
+            diameter_m: media.ball_diameter_m,
+            density_kg_m3: media.density_kg_m3,
+            ball_count: 40,
+            scale_factor: 1.0,
+        };
+        let mut dem = DemState::new(&effective, radius_m, 1);
+        let mut fluid =
+            FluidParticles::seed_lattice(&slurry, radius_m, 16, &dem.balls.x, dem.balls.radius);
+
+        // Mirrors pbf.rs's `FLUID_SPEED_SAFETY_FACTOR` clamp formula exactly.
+        let v_max = 5.0 * (omega.abs() * radius_m + (4.0 * 9.81 * radius_m).sqrt());
+        let mut drum_angle = 0.0f32;
+        for s in 0..300 {
+            step(
+                &mut dem, &mut fluid, &drum, drum_angle, &media, &slurry, 4, 3, dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+
+            for (i, (&x, &v)) in fluid.x.iter().zip(&fluid.v).enumerate() {
+                assert!(
+                    x.is_finite(),
+                    "sub-step {s}, fluid {i}: non-finite position {x:?}"
+                );
+                assert!(
+                    v.is_finite(),
+                    "sub-step {s}, fluid {i}: non-finite velocity {v:?}"
+                );
+                assert!(
+                    x.length() <= radius_m * 1.05,
+                    "sub-step {s}, fluid {i}: escaped the drum: {x:?}"
+                );
+                assert!(
+                    v.length() <= v_max * 1.001,
+                    "sub-step {s}, fluid {i}: speed {} exceeds clamp {v_max}",
+                    v.length()
+                );
+            }
+            for (i, (&x, &v)) in dem.balls.x.iter().zip(&dem.balls.v).enumerate() {
+                assert!(
+                    x.is_finite(),
+                    "sub-step {s}, ball {i}: non-finite position {x:?}"
+                );
+                assert!(
+                    v.is_finite(),
+                    "sub-step {s}, ball {i}: non-finite velocity {v:?}"
+                );
+            }
+        }
+    }
 }

@@ -244,10 +244,14 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
 - Boundaries: SDF projection against drum/lifters with wall velocity blending
   `v ← (1−β)·v + β·v_wall` for particles that were projected (touching the wall) this substep (β = no-slip factor,
   default 1 → no-slip).
-- **Viscosity (v1, implemented)**: XSPH `v_i += c·Σ (m_j/ρ_j)(v_j − v_i) W_ij` with `c = clamp(μ/μ_ref, 0, 1)`,
-  `μ_ref = 2 Pa·s` (a single formula; the plan's earlier draft listed two redundant candidate formulas, resolved to
-  this simpler one during implementation). Qualitative (monotone in μ, not quantitatively calibrated to real Pa·s) —
-  consistent with this project's project-wide 2D/qualitative caveat.
+- **Viscosity (v1, implemented)**: XSPH `v_i += c·Σ (m_j/ρ_j)(v_j − v_i) W_ij` with a smooth saturating coefficient
+  `c = sqrt(μ)/(sqrt(μ)+sqrt(μ_half))`, `μ_half = 15 Pa·s` (the viscosity at which `c = 0.5`; `c → 1` asymptotically,
+  never exactly reached, for any `μ`). An earlier version used a hard-clamped `c = clamp(μ/2, 0, 1)`, which saturated
+  at 2 Pa·s — every viscosity from 2 Pa·s upward produced identical output, silently capping the UI's usable range.
+  The current curve is monotone across the full 0–200 Pa·s the UI exposes but is still qualitative (ordinal, not
+  quantitatively calibrated to real Pa·s: XSPH's effective kinematic viscosity is bounded by `~h²/dt` regardless of
+  `c`) — consistent with this project's project-wide 2D/qualitative caveat. See `pbf.rs`'s `xsph_coefficient` doc
+  comment for the full derivation.
 - **Viscosity (v2, phase M7)**: implicit viscosity (Weiler et al. 2018) with conjugate gradient; Bingham/Herschel–Bulkley via
   Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇`.
 - Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.

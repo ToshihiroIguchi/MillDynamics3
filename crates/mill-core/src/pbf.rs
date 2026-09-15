@@ -10,13 +10,17 @@
 //! accumulating the reaction as a [`crate::coupling::CouplingImpulses`] for [`crate::dem`] to
 //! apply. [`FluidParticles::step`] is the ball-free special case (equivalent to an empty ball list).
 //!
-//! **Viscosity, v1 simplification.** The plan's original two formulas for the XSPH mixing
-//! coefficient (a simple `clamp(mu/mu_ref)` and a separate dt-normalized exponential) were
-//! redundant; this implementation uses the simpler, dt-independent-in-practice form
-//! `c = clamp(viscosity_pa_s / MU_REF, 0, 1)` applied directly as the XSPH coefficient. Like the
-//! rest of the v1 slurry model, this is qualitative (monotonic in viscosity, not a quantitatively
-//! calibrated match to real Pa*s); see the module-level caveat already noted project-wide (2D
-//! slice, qualitative results).
+//! **Viscosity, v1 simplification.** The XSPH mixing coefficient is a smooth saturating curve in
+//! `sqrt(viscosity_pa_s)` (see [`xsph_coefficient`]), applied directly as the XSPH coefficient.
+//! Like the rest of the v1 slurry model, this is qualitative (monotonic in viscosity, not a
+//! quantitatively calibrated match to real Pa*s -- see [`xsph_coefficient`]'s "range caveat");
+//! see the module-level caveat already noted project-wide (2D slice, qualitative results).
+//!
+//! An earlier version used a hard-clamped linear mapping (`clamp(viscosity_pa_s / 2.0, 0, 1)`)
+//! that saturated at 2 Pa*s: every viscosity from 2 Pa*s upward produced bit-identical output,
+//! so a UI control allowing up to (say) 200 Pa*s would have moved a slider that did nothing
+//! past 2. [`xsph_coefficient`]'s curve never hard-saturates, so raising the UI's range stays
+//! meaningful across the whole advertised span.
 
 use glam::Vec2;
 
@@ -42,9 +46,41 @@ const EPSILON_RELAX: f32 = 200.0;
 const S_CORR_K: f32 = 0.0;
 const S_CORR_DELTA_Q_FACTOR: f32 = 0.2;
 const S_CORR_N: i32 = 4;
-/// Reference viscosity (Pa*s) at which the XSPH mixing coefficient saturates at 1.0; see the
-/// module doc comment's "Viscosity, v1 simplification" note.
-const MU_REF: f32 = 2.0;
+/// Viscosity (Pa*s) at which the XSPH mixing coefficient reaches half of its (asymptotic, never
+/// attained) saturation value of 1.0. See [`xsph_coefficient`].
+const MU_HALF_SATURATION_PA_S: f32 = 15.0;
+
+/// XSPH mixing coefficient for a given dynamic viscosity (Pa*s): `c = sqrt(mu) / (sqrt(mu) +
+/// sqrt(MU_HALF_SATURATION_PA_S))`, strictly monotonic on `[0, inf)` into `[0, 1)`. `c(0) = 0`,
+/// `c(MU_HALF_SATURATION_PA_S) = 0.5`, and `c < 1` for every finite input -- so the XSPH update
+/// (step 7) stays a strict convex combination for *any* non-negative viscosity, without a hard
+/// clamp (a hard clamp used to be the stability guard; the curve's own asymptote now is).
+///
+/// Replaces an earlier `clamp(mu / 2.0, 0, 1)`, which saturated at 2 Pa*s -- see the module doc
+/// comment's "Viscosity, v1 simplification" note for why that made a wide UI range meaningless.
+///
+/// Why `sqrt(mu)` and not `mu`: a rational (Michaelis-Menten-style) curve is required at all --
+/// an exponential `1 - exp(-mu/S)` has a single scale, so keeping e.g. 100 vs. 200 Pa*s visually
+/// distinguishable forces an `S` large enough to collapse the *default* slurry viscosity (0.5
+/// Pa*s) down to `c ~ 0.005`, an unhelpfully weak effect. Taking the rational curve in
+/// `sqrt(mu)` instead of plain `mu` widens the low end -- where real slurries mostly live -- at
+/// negligible cost to the top-end separation: with `MU_HALF_SATURATION_PA_S = 15.0`,
+/// `c(0.5) = 0.154` (vs. `0.032` for the same curve in plain `mu`), `c(100) = 0.870`,
+/// `c(200) = 0.930` (a 6 percentage-point gap, clearly distinguishable, vs. the old scheme's
+/// zero gap across the entire 2-200 Pa*s range).
+///
+/// **Range caveat.** XSPH's effective kinematic viscosity is `~ c * h^2 / dt`, linear in `c`
+/// and therefore bounded by `h^2 / dt` regardless of the mapping: doubling the parameter from
+/// 100 to 200 Pa*s changes the effective viscosity by roughly 9%, not 2x. The mapping is
+/// *ordinal* across the whole advertised range (a higher number is always measurably thicker),
+/// not a calibrated physical match -- consistent with this module's "qualitative, not
+/// quantitatively calibrated" caveat. A genuinely wider dynamic range needs multi-pass XSPH or
+/// the planned M7 implicit viscosity (docs/PLAN.md ss3.3), not a different curve; not pursued
+/// here.
+fn xsph_coefficient(viscosity_pa_s: f32) -> f32 {
+    let s = viscosity_pa_s.max(0.0).sqrt();
+    s / (s + MU_HALF_SATURATION_PA_S.sqrt())
+}
 
 /// 2D Poly6 kernel (docs/PLAN.md ss3.3: `4/(pi h^8)`), evaluated from squared distance.
 fn poly6(r2: f32, h: f32) -> f32 {
@@ -90,6 +126,19 @@ const F_CLAMP_G_MULTIPLE: f32 = 3.0;
 fn impulse_clamp(ball_mass: f32, dt: f32) -> f32 {
     F_CLAMP_G_MULTIPLE * ball_mass * 9.81 * dt
 }
+
+/// Safety factor on the physically-attainable slurry speed, used by
+/// [`FluidParticles::step_coupled`]'s fluid speed clamp (step 7.5): `v_max =
+/// FLUID_SPEED_SAFETY_FACTOR * (|omega| * radius_m + sqrt(4 * g * radius_m))` -- the drum's
+/// wall speed plus the free-fall speed across the full drum diameter. `5.0` is far above
+/// anything the slurry reaches in a physically meaningful state (e.g. ~6 m/s attainable vs. a
+/// ~30 m/s clamp at this project's defaults), so this is a pure stability/visibility backstop,
+/// never a model parameter users tune.
+///
+/// Deliberately *not* a CFL-style `h / dt` bound: that is coupled to `simulation.resolution`
+/// and at high resolution would sit below the physically-attainable speed, clipping real motion
+/// instead of blow-ups.
+const FLUID_SPEED_SAFETY_FACTOR: f32 = 5.0;
 
 /// Slurry (fluid) particle population. All particles share one kernel radius/mass/rest density
 /// (see [`FluidParticles::seed_lattice`]); `dye` is a pure Lagrangian tracer (no diffusion) used
@@ -240,6 +289,24 @@ impl FluidParticles {
         if n == 0 || dt <= 0.0 {
             return coupling;
         }
+
+        // --- 0. Sanitize state carried in from the previous sub-step ------------------------
+        // Given finite input this solver provably produces finite output (position only ever
+        // advances via `x += v * dt` in step 1; every later correction is individually bounded
+        // -- step 3's by the CFM-relaxed lambda denominator, step 3.5's by `0.5 * balls.radius`,
+        // step 4's by the drum radius). So this can only fire on a value that entered from
+        // outside this struct -- e.g. a ball position, read directly in steps 3.5/6.5, which
+        // `dem.rs` does not itself guard. Resetting to the drum centre at rest is the cheapest
+        // way to stop one bad particle from silently manufacturing a *finite-looking* bogus
+        // ball impulse in step 3.5 (see the `is_nan` guard there) and poisoning the rendered
+        // surface field (`crate::surface`).
+        for (x, v) in self.x.iter_mut().zip(self.v.iter_mut()) {
+            if !x.is_finite() || !v.is_finite() {
+                *x = Vec2::ZERO;
+                *v = Vec2::ZERO;
+            }
+        }
+
         let h = self.h;
         let rest_density = self.rest_density;
         let mass = self.particle_mass;
@@ -331,7 +398,12 @@ impl FluidParticles {
                     let b = b as usize;
                     let delta = self.x[i] - balls.x[b];
                     let dist = delta.length();
-                    if dist >= contact_radius {
+                    if dist.is_nan() || dist >= contact_radius {
+                        // `>=` alone is false for NaN, and `f32::min` below ignores NaN
+                        // (returns the other operand) -- together they would turn a
+                        // non-finite position into a finite, plausible, permanently-repeating
+                        // reaction impulse on the ball. (Step 0 should make this unreachable
+                        // in practice; this is the second layer.)
                         continue;
                     }
                     let n_hat = if dist > 1e-9 { delta / dist } else { Vec2::X };
@@ -386,7 +458,7 @@ impl FluidParticles {
         // --- 6.5 Ball viscous no-slip (docs/PLAN.md ss3.4 step 2): fluid within `h` of a ball's
         // surface blends toward the ball's surface velocity; the momentum removed from the fluid
         // is added to that ball as an impulse (see CouplingImpulses's doc comment).
-        let c = (slurry.viscosity_pa_s / MU_REF).clamp(0.0, 1.0);
+        let c = xsph_coefficient(slurry.viscosity_pa_s);
         if let Some(ball_grid) = &ball_grid {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
             let factor = beta_b * c;
@@ -398,7 +470,9 @@ impl FluidParticles {
                         let b = b as usize;
                         let r_vec = self.x[i] - balls.x[b];
                         let dist = r_vec.length();
-                        if dist >= balls.radius + h {
+                        if dist.is_nan() || dist >= balls.radius + h {
+                            // See the identical guard in step 3.5 above for why `is_nan()` is
+                            // checked explicitly rather than relying on `>=` alone.
                             continue;
                         }
                         let v_surf = balls.v[b] + balls.omega[b] * Vec2::new(-r_vec.y, r_vec.x);
@@ -430,17 +504,46 @@ impl FluidParticles {
             let mut delta_v = vec![Vec2::ZERO; n];
             for i in 0..n {
                 let mut sum = Vec2::ZERO;
+                let mut w_sum = 0.0f32;
                 for &j in &neighbors[i] {
                     let ju = j as usize;
                     let r2 = (self.x[i] - self.x[ju]).length_squared();
                     let w = poly6(r2, h);
                     let rho_j = density[ju].max(1e-6);
                     sum += (mass / rho_j) * (self.v[ju] - self.v[i]) * w;
+                    w_sum += (mass / rho_j) * w;
                 }
-                delta_v[i] = c * sum;
+                // Normalizing by `w_sum` (clamped to >= 1 so the well-relaxed case, where
+                // `w_sum ~ 0.68`, is unaffected) keeps this a strict convex combination toward
+                // the neighbour average even for the pathological density ratios where the
+                // unnormalized weight sum could otherwise exceed 1 -- tightening the "usually a
+                // contraction" stability argument to "always a contraction" for any `c < 1`.
+                delta_v[i] = c * sum / w_sum.max(1.0);
             }
             for (v, dv) in self.v.iter_mut().zip(&delta_v) {
                 *v += *dv;
+            }
+        }
+
+        // --- 7.5 Fluid speed clamp (stability backstop) --------------------------------------
+        // Step 5 reconstructs `v = (x - x0) / dt` from *position* corrections, so a particle
+        // persistently squeezed -- e.g. trapped between a centrifuged ball layer and the wall
+        // at high rotation speed -- gains `correction / dt` of speed every sub-step, with
+        // nothing to stop it until step 4's wall projection caps it at roughly
+        // `2 * radius_m / dt` (~240 m/s at this project's defaults) -- finite, but ~40x the
+        // physically attainable speed, and a fluid field running that fast shreds the rendered
+        // free surface into incoherent noise (`crate::surface`). Note: momentum removed here is
+        // deliberately *not* returned to any ball (unlike step 6.5's exchange) -- a small
+        // conservation violation confined to states that are already unphysical, the right
+        // trade for an operation that must never itself inject energy.
+        let v_max = FLUID_SPEED_SAFETY_FACTOR
+            * (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt());
+        for v in self.v.iter_mut() {
+            let speed = v.length();
+            if !speed.is_finite() {
+                *v = Vec2::ZERO;
+            } else if speed > v_max {
+                *v *= v_max / speed;
             }
         }
 
@@ -650,5 +753,229 @@ mod tests {
 
         assert_eq!(fluid.dye, dye_before);
         assert!(dye_before.contains(&0.0) && dye_before.contains(&1.0));
+    }
+
+    #[test]
+    fn viscosity_coefficient_is_strictly_monotonic_over_the_whole_ui_range() {
+        let mut prev = -1.0f32;
+        for &mu in &[
+            0.0, 0.05, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 50.0, 100.0, 150.0, 200.0, 1.0e6,
+        ] {
+            let c = xsph_coefficient(mu);
+            assert!(
+                c > prev,
+                "not strictly increasing at mu={mu}: {c} <= {prev}"
+            );
+            assert!((0.0..1.0).contains(&c), "c({mu}) = {c} outside [0, 1)");
+            prev = c;
+        }
+    }
+
+    #[test]
+    fn viscosity_coefficient_separates_the_top_of_the_ui_range() {
+        // Regression: the old `clamp(mu / 2.0, 0, 1)` mapping made every viscosity from 2 Pa*s
+        // upward produce an identical coefficient of exactly 1.0, so the UI's viscosity slider
+        // did nothing above 2 Pa*s.
+        let (c100, c200) = (xsph_coefficient(100.0), xsph_coefficient(200.0));
+        assert!(
+            c200 - c100 > 0.05,
+            "100 vs 200 Pa*s barely differ: {c100} -> {c200}"
+        );
+        assert!(
+            xsph_coefficient(2.0) < 0.5,
+            "2 Pa*s must no longer be near-saturated"
+        );
+    }
+
+    #[test]
+    fn viscosity_coefficient_keeps_the_default_slurry_meaningfully_viscous() {
+        // Widening the advertised range must not make the *default* (0.5 Pa*s) look inviscid.
+        let c = xsph_coefficient(SlurryParams::default().viscosity_pa_s);
+        assert!(
+            c > 0.1,
+            "default viscosity gives a negligible XSPH coefficient: {c}"
+        );
+    }
+
+    #[test]
+    fn viscosity_coefficient_matches_its_documented_half_saturation_point() {
+        assert!((xsph_coefficient(MU_HALF_SATURATION_PA_S) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn higher_viscosity_damps_a_high_frequency_perturbation_more_across_the_whole_range() {
+        // XSPH smooths toward the local neighbourhood average, so a spatially checkerboarded
+        // (the highest frequency this particle spacing can resolve) velocity perturbation
+        // should be damped more by higher viscosity -- including from 100 to 200 Pa*s, which
+        // the old hard-clamped mapping made bit-identical. A *linear* shear profile would not
+        // distinguish any viscosity here: a symmetric averaging kernel reproduces a linear
+        // field exactly, so only a genuinely high-frequency pattern exercises the coefficient.
+        //
+        // Settling dynamics themselves depend weakly on viscosity, so settling independently at
+        // each candidate `mu` (as an earlier version of this test did) lets that per-mu
+        // divergence -- not the injected signal -- dominate the measured residual, non-
+        // monotonically. Instead, settle *once* at a fixed baseline viscosity to get one common
+        // pre-perturbation state, then re-run the perturbation-and-decay phase from an identical
+        // clone of that state at each candidate `mu` -- isolating mu's effect purely to the
+        // decay phase.
+        let radius_m = 0.5;
+        let resolution = 20u32;
+        let dx = radius_m / resolution as f32;
+        let baseline_slurry = SlurryParams {
+            fill_fraction: 0.2,
+            viscosity_pa_s: 0.5,
+            ..SlurryParams::default()
+        };
+        let drum = still_drum(radius_m);
+        let mut baseline =
+            FluidParticles::seed_lattice(&baseline_slurry, radius_m, resolution, &[], 0.0);
+        for _ in 0..240 {
+            baseline.step(&drum, 0.0, &baseline_slurry, 3, 1.0 / 240.0);
+        }
+        // Checkerboard the x-velocity by spatial column parity, so neighbours in space carry
+        // opposite-sign perturbations -- the highest frequency this particle spacing resolves.
+        const PERTURBATION_MPS: f32 = 2.0;
+        for i in 0..baseline.len() {
+            let col = (baseline.x[i].x / dx).round() as i64;
+            baseline.v[i].x += if col % 2 == 0 {
+                PERTURBATION_MPS
+            } else {
+                -PERTURBATION_MPS
+            };
+        }
+
+        let residual_after_stepping = |mu: f32| -> f32 {
+            let slurry = SlurryParams {
+                viscosity_pa_s: mu,
+                ..baseline_slurry
+            };
+            let mut fluid = FluidParticles {
+                x: baseline.x.clone(),
+                v: baseline.v.clone(),
+                dye: baseline.dye.clone(),
+                particle_mass: baseline.particle_mass,
+                h: baseline.h,
+                rest_density: baseline.rest_density,
+            };
+            for _ in 0..20 {
+                fluid.step(&drum, 0.0, &slurry, 3, 1.0 / 240.0);
+            }
+            fluid.v.iter().map(|v| v.x * v.x).sum::<f32>() / fluid.len() as f32
+        };
+
+        let viscosities = [0.5f32, 2.0, 10.0, 50.0, 100.0, 200.0];
+        let residuals: Vec<f32> = viscosities
+            .iter()
+            .map(|&mu| residual_after_stepping(mu))
+            .collect();
+        for w in residuals.windows(2) {
+            assert!(
+                w[1] < w[0],
+                "viscosity stopped mattering across {viscosities:?}: residuals {residuals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_injected_extreme_velocity_is_bounded_within_one_sub_step() {
+        let slurry = test_slurry();
+        let radius_m = 0.5;
+        let drum = still_drum(radius_m);
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+        assert!(!fluid.is_empty());
+        fluid.v[0] = Vec2::new(1.0e6, 0.0);
+
+        let dt = 1.0 / 240.0;
+        fluid.step(&drum, 0.0, &slurry, 3, dt);
+
+        let v_max = FLUID_SPEED_SAFETY_FACTOR
+            * (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt());
+        for &v in &fluid.v {
+            assert!(v.is_finite(), "non-finite velocity after clamping: {v:?}");
+            assert!(
+                v.length() <= v_max * 1.001,
+                "speed {} exceeds the computed clamp {v_max}",
+                v.length()
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_fluid_particle_is_reset_and_never_reaches_the_ball_coupling() {
+        use crate::params::EffectiveMedia;
+
+        let radius_m = 0.5;
+        let drum = still_drum(radius_m);
+        let slurry = SlurryParams {
+            fill_fraction: 0.0, // inject the one fluid particle manually, below
+            ..SlurryParams::default()
+        };
+        let dt = 1.0 / 240.0;
+
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+        assert!(fluid.is_empty());
+        fluid.x.push(Vec2::new(f32::NAN, 0.0));
+        fluid.v.push(Vec2::ZERO);
+        fluid.dye.push(0.0);
+
+        // One ball, placed well away from the drum centre -- where the sanitize step resets a
+        // non-finite particle to -- so a legitimate, unrelated overlap can't happen and any
+        // impulse the ball receives must have come from the (supposedly sanitized) particle.
+        let effective = EffectiveMedia {
+            true_diameter_m: 0.05,
+            diameter_m: 0.05,
+            density_kg_m3: 7800.0,
+            ball_count: 1,
+            scale_factor: 1.0,
+        };
+        let mut dem = crate::dem::DemState::new(&effective, radius_m, 1);
+        dem.balls.x[0] = Vec2::new(0.35, 0.0);
+        dem.balls.v[0] = Vec2::ZERO;
+        dem.balls.omega[0] = 0.0;
+
+        let impulses = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
+
+        assert!(
+            fluid.x[0].is_finite() && fluid.v[0].is_finite(),
+            "non-finite fluid particle survived the sanitize step: x={:?} v={:?}",
+            fluid.x[0],
+            fluid.v[0]
+        );
+        assert!(fluid.x[0].length() <= radius_m * 1.05);
+        assert!(
+            impulses.impulses[0].length() < 1e-6,
+            "a non-finite fluid particle leaked a reaction impulse into the ball solver: {:?}",
+            impulses.impulses[0]
+        );
+    }
+
+    #[test]
+    fn a_non_finite_ball_position_does_not_contaminate_the_fluid() {
+        use crate::params::EffectiveMedia;
+
+        let radius_m = 0.5;
+        let drum = still_drum(radius_m);
+        let slurry = test_slurry();
+        let dt = 1.0 / 240.0;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: 0.05,
+            diameter_m: 0.05,
+            density_kg_m3: 7800.0,
+            ball_count: 4,
+            scale_factor: 1.0,
+        };
+        let mut dem = crate::dem::DemState::new(&effective, radius_m, 1);
+        dem.balls.x[0] = Vec2::splat(f32::INFINITY);
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+
+        let _ = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
+
+        for (&x, &v) in fluid.x.iter().zip(&fluid.v) {
+            assert!(
+                x.is_finite() && v.is_finite(),
+                "fluid contaminated by a non-finite ball position: x={x:?} v={v:?}"
+            );
+        }
     }
 }

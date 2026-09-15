@@ -73,7 +73,21 @@ impl Drum {
 
     /// Signed distance and outward-pointing normal at a **world-space** point, given the current
     /// drum rotation angle (radians). The normal points from the wall towards free space.
+    ///
+    /// A non-finite `p_world` returns `(0.0, Vec2::ZERO)` rather than computing anything: for an
+    /// infinite input, `self.sdf` would return `-inf` at every probe, the central-difference
+    /// gradient `(-inf) - (-inf)` would be `NaN`, the `length_squared() > 1e-12` fallback guard
+    /// below is false for a NaN gradient so the `normalize_or_zero` branch runs, and
+    /// `normalize_or_zero` on an infinite vector returns `Vec2::ZERO` -- so a caller's typical
+    /// `p += -d * normal` correction would become `inf * 0 = NaN`, manufacturing a NaN position
+    /// out of a merely-infinite input rather than just propagating one. Reporting "on the
+    /// boundary, no usable normal" instead means every caller's `d < 0` (or similar) test
+    /// declines to apply any correction, leaving cleanup to the caller's own state guard (e.g.
+    /// [`crate::pbf::FluidParticles::step_coupled`]'s sanitize step).
     pub fn sdf_world(&self, p_world: Vec2, drum_angle: f32) -> (f32, Vec2) {
+        if !p_world.is_finite() {
+            return (0.0, Vec2::ZERO);
+        }
         let to_local = Vec2::from_angle(-drum_angle);
         let p_local = rotate(p_world, to_local);
 
@@ -209,6 +223,25 @@ mod tests {
         let (_, n0) = drum.sdf_world(p, 0.0);
         let (_, n1) = drum.sdf_world(p, 2.0 * PI);
         assert!((n0 - n1).length() < 1e-3);
+    }
+
+    #[test]
+    fn sdf_world_never_manufactures_a_non_finite_result() {
+        let drum = smooth_drum(0.3, 0.0);
+        for p in [
+            Vec2::new(f32::NAN, 0.0),
+            Vec2::splat(f32::INFINITY),
+            Vec2::new(0.0, f32::NEG_INFINITY),
+        ] {
+            let (d, n) = drum.sdf_world(p, 0.3);
+            assert!(
+                d.is_finite() && n.is_finite(),
+                "sdf_world({p:?}) = ({d}, {n:?})"
+            );
+            // A caller applying the typical `p += -d * normal` correction must get a no-op,
+            // not `inf * 0 = NaN`.
+            assert!((-d * n).is_finite());
+        }
     }
 
     fn lifter_drum(radius_m: f32, count: u32) -> Drum {
