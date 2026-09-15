@@ -60,6 +60,10 @@ async function boot(initialParams?: ParamsJson): Promise<void> {
     sim = new Simulation(json);
     const params = JSON.parse(sim.paramsJson()) as ParamsJson;
     post({ type: "ready", params });
+    // Send an immediate snapshot so the drum/balls/slurry reflect the new params right away, even
+    // while paused -- without this the canvas keeps showing the previous sim's frame until Play or
+    // Step is pressed.
+    postFrame(sim, 1);
   } catch (err) {
     post({ type: "error", message: String(err) });
   }

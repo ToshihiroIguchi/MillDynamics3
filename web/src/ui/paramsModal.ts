@@ -5,7 +5,7 @@
 
 import type { ParamsJson } from "../protocol";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
-import { GROUPS, getPath, SCHEMA, withPath } from "../params/schema";
+import { fromDisplayValue, GROUPS, getPath, SCHEMA, toDisplayValue, withPath } from "../params/schema";
 
 export interface ParamsModal {
   /** Opens the modal, pre-filled from `params`. */
@@ -109,7 +109,7 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
     for (const [path, input] of inputs) {
       const field = SCHEMA.find((f) => f.path === path);
       let value: unknown;
-      if (field?.type === "number") value = Number(input.value);
+      if (field?.type === "number") value = fromDisplayValue(field, Number(input.value));
       else if (field?.type === "boolean") value = (input as HTMLInputElement).checked;
       else value = input.value;
       next = withPath(next, path, value);
@@ -130,7 +130,7 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
         if (field?.type === "boolean") {
           (input as HTMLInputElement).checked = Boolean(value);
         } else {
-          input.value = String(value);
+          input.value = String(field ? toDisplayValue(field, value) : value);
         }
       }
       refreshDerived();

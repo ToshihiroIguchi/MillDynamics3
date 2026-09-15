@@ -39,8 +39,9 @@ impl Default for MillParams {
     fn default() -> Self {
         Self {
             diameter_m: 1.0,
-            speed_mode: SpeedMode::PercentCritical,
-            speed_value: 70.0,
+            speed_mode: SpeedMode::Rpm,
+            // ~70% Nc for the default 1.0 m drum (Nc = 42.3 rpm), expressed directly in rpm.
+            speed_value: 30.0,
             direction: Direction::CounterClockwise,
         }
     }
@@ -115,15 +116,19 @@ pub struct MediaParams {
 }
 
 impl Default for MediaParams {
+    // Defaults model yttria-stabilized zirconia (ZrO2) grinding media, a common ceramic ball-mill
+    // charge: density ~6.0 g/cm^3, harder and more elastic (higher restitution, lower friction)
+    // than the steel media this used to default to. 10 mm is a typical lab/bench tumbling-mill
+    // ball size (as opposed to sub-mm beads used in attritor/bead mills).
     fn default() -> Self {
         Self {
-            ball_diameter_m: 0.002,
+            ball_diameter_m: 0.010,
             fill_fraction: 0.30,
-            density_kg_m3: 7800.0,
-            restitution_ball_ball: 0.5,
-            restitution_ball_wall: 0.3,
-            friction_ball_ball: 0.4,
-            friction_ball_wall: 0.5,
+            density_kg_m3: 6000.0,
+            restitution_ball_ball: 0.7,
+            restitution_ball_wall: 0.5,
+            friction_ball_ball: 0.25,
+            friction_ball_wall: 0.35,
             rolling_friction: 0.01,
         }
     }

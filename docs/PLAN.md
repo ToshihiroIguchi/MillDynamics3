@@ -345,8 +345,8 @@ rate (`FIXED_DT` x `substeps`), estimated cost.
 
 | Group | Parameters (defaults) |
 |---|---|
-| Mill | diameter D = 1.0 m; speed mode = %Nc; speed = 70 %Nc (or rpm); rotation direction CCW |
-| Media | ball diameter 2 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 7800; restitution 0.5 (ball–ball) / 0.3 (ball–wall); friction μ 0.4 / 0.5; rolling μ_r 0.01 |
+| Mill | diameter D = 1.0 m; speed mode = rpm (or %Nc); speed = 30 rpm (~70 %Nc for D = 1 m); rotation direction CCW |
+| Media | ball diameter 10 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
 | Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 0.5 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
 | Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
 | Simulation | resolution 40 (particles across R); substeps 4; PBF iterations 3; DEM (XPBD) iterations 4; max balls 2000; time scale 1.0; frame budget 12 ms; seed 1 |
