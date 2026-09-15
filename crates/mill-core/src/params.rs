@@ -102,10 +102,17 @@ impl MillParams {
 pub struct MediaParams {
     /// Ball diameter (m). A future size-distribution table can extend this.
     pub ball_diameter_m: f32,
-    /// Fraction of the drum's cross-sectional area occupied by media, including voids
-    /// (i.e. the conventional "J" ball-filling fraction).
+    /// Fraction of the drum's cross-sectional area occupied by the charge *including voids*
+    /// (the conventional "J" ball-filling fraction). The solid disc area actually seeded is
+    /// `fill_fraction * packing_fraction_2d` of the drum area, see
+    /// [`Params::effective_media`].
     pub fill_fraction: f32,
-    /// Media (steel) density (kg/m^3).
+    /// 2D areal packing fraction of the settled disc charge (solid area / charge footprint area),
+    /// used to convert `fill_fraction` into a disc count. Random close packing of equal discs is
+    /// ~0.82; the hexagonal upper bound is `pi / (2 sqrt 3) ~= 0.907`.
+    pub packing_fraction_2d: f32,
+    /// Media density (kg/m^3). Balls are modelled as unit-depth discs (see
+    /// [`crate::dem::ball_mass`]), so this is also the areal mass per metre of mill length.
     pub density_kg_m3: f32,
     pub restitution_ball_ball: f32,
     pub restitution_ball_wall: f32,
@@ -124,6 +131,7 @@ impl Default for MediaParams {
         Self {
             ball_diameter_m: 0.010,
             fill_fraction: 0.30,
+            packing_fraction_2d: 0.82,
             density_kg_m3: 6000.0,
             restitution_ball_ball: 0.7,
             restitution_ball_wall: 0.5,
@@ -141,6 +149,9 @@ impl MediaParams {
         }
         if !(0.0..=0.9).contains(&self.fill_fraction) {
             return Err("media.fill_fraction must be in [0, 0.9]".into());
+        }
+        if !(0.5..=0.907).contains(&self.packing_fraction_2d) {
+            return Err("media.packing_fraction_2d must be in [0.5, 0.907]".into());
         }
         if !(self.density_kg_m3.is_finite() && self.density_kg_m3 > 0.0) {
             return Err("media.density_kg_m3 must be > 0".into());
@@ -374,36 +385,38 @@ impl Params {
         Ok(())
     }
 
+    /// True (uncoarsened) disc count implied by the mill/media parameters:
+    /// `N_true = fill_fraction * packing_fraction_2d * drum_area / (pi * r_true^2)`, i.e. the
+    /// charge footprint `J * drum_area` times the areal packing fraction, divided by one disc's
+    /// area. Fractional (not rounded); see [`Params::effective_media`].
+    pub fn true_ball_count(&self) -> f32 {
+        let r_true = self.media.ball_diameter_m * 0.5;
+        if r_true <= 0.0 {
+            return 0.0;
+        }
+        let drum_area = std::f32::consts::PI * self.mill.radius_m().powi(2);
+        (self.media.fill_fraction * self.media.packing_fraction_2d * drum_area)
+            / (std::f32::consts::PI * r_true * r_true)
+    }
+
     /// Derives the media population actually simulated, applying coarse-graining (particle
     /// scaling) when the true media population would exceed `simulation.max_balls`.
     ///
-    /// The true ball count is `N_real = fill_fraction * drum_area / (pi * r_true^2)`. If
-    /// `N_real > max_balls`, we substitute `N_sim` larger, lighter balls with scale factor
-    /// `k = sqrt(N_real / max_balls)`:
-    ///
-    /// - `diameter_m = true_diameter_m * k`   (so `N_sim = N_real / k^2 ~= max_balls`, preserving
-    ///   the total cross-sectional area occupied by media, i.e. the fill fraction).
-    /// - `density_kg_m3 = true_density_kg_m3 / k`   (preserving total charge mass, since a
-    ///   3D-sphere mass `m = rho * 4/3 * pi * r^3` grows by `k^3` while the particle count shrinks
-    ///   by `k^2`, net growth `k`, canceled by dividing density by `k`).
+    /// The true disc count is [`Params::true_ball_count`]. If `N_true > max_balls`, we substitute
+    /// `N_sim` larger discs with scale factor `k = sqrt(N_true / max_balls)`:
+    /// `diameter_m = true_diameter_m * k`, so `N_sim = N_true / k^2 ~= max_balls`. Because balls
+    /// are unit-depth discs ([`crate::dem::ball_mass`], mass `~ r^2`), preserving the total solid
+    /// area automatically preserves the total charge mass, so the density is left unchanged
+    /// (`density_kg_m3 == true density`).
     ///
     /// This is a standard coarse-grained DEM approximation (see docs/PLAN.md ss3.2): it preserves
-    /// bulk charge mass and footprint area, and downstream contact-stiffness/timestep derivations
-    /// (which are computed from mass and radius) inherit it automatically. It does not preserve
-    /// the true interstitial void structure or single-collision statistics at the true particle
-    /// size. When `N_real <= max_balls`, `scale_factor` is `1.0` and the true media parameters are
-    /// returned unchanged.
+    /// bulk charge mass and footprint area but not the true interstitial void structure or
+    /// single-collision statistics at the true particle size. When `N_true <= max_balls`,
+    /// `scale_factor` is `1.0` and the true media parameters are returned unchanged.
     pub fn effective_media(&self) -> EffectiveMedia {
         let true_diameter_m = self.media.ball_diameter_m;
-        let true_density_kg_m3 = self.media.density_kg_m3;
-
-        let r_true = true_diameter_m * 0.5;
-        let n_true = if r_true > 0.0 {
-            let drum_area = std::f32::consts::PI * self.mill.radius_m().powi(2);
-            (self.media.fill_fraction * drum_area) / (std::f32::consts::PI * r_true * r_true)
-        } else {
-            0.0
-        };
+        let density_kg_m3 = self.media.density_kg_m3;
+        let n_true = self.true_ball_count();
 
         let max_balls = self.simulation.max_balls as f32;
         if n_true > max_balls && max_balls > 0.0 {
@@ -412,7 +425,7 @@ impl Params {
             EffectiveMedia {
                 true_diameter_m,
                 diameter_m: true_diameter_m * scale_factor,
-                density_kg_m3: true_density_kg_m3 / scale_factor,
+                density_kg_m3,
                 ball_count,
                 scale_factor,
             }
@@ -420,7 +433,7 @@ impl Params {
             EffectiveMedia {
                 true_diameter_m,
                 diameter_m: true_diameter_m,
-                density_kg_m3: true_density_kg_m3,
+                density_kg_m3,
                 ball_count: n_true.round().max(0.0) as u32,
                 scale_factor: 1.0,
             }
@@ -436,8 +449,8 @@ pub struct EffectiveMedia {
     pub true_diameter_m: f32,
     /// Diameter actually simulated (m). Equals `true_diameter_m` when `scale_factor == 1.0`.
     pub diameter_m: f32,
-    /// Density actually simulated (kg/m^3), scaled down so total charge mass matches the true
-    /// (uncoarsened) media.
+    /// Density actually simulated (kg/m^3). Always the true media density: with unit-depth disc
+    /// masses, preserving solid area preserves total charge mass without rescaling density.
     pub density_kg_m3: f32,
     /// Number of DEM ball particles actually simulated.
     pub ball_count: u32,
@@ -554,20 +567,17 @@ mod tests {
 
     #[test]
     fn effective_media_coarse_grains_when_true_count_is_large() {
-        // Default scenario: D = 1 m, d = 2 mm, J = 0.30 => ~75,000 true balls, far above
+        // Default scenario: D = 1 m, d = 10 mm, J = 0.30 => several thousand true discs, above
         // max_balls (2000), so coarse-graining must kick in.
         let params = Params::default();
-        let n_true = {
-            let r = params.media.ball_diameter_m * 0.5;
-            let drum_area = std::f32::consts::PI * params.mill.radius_m().powi(2);
-            (params.media.fill_fraction * drum_area) / (std::f32::consts::PI * r * r)
-        };
+        let n_true = params.true_ball_count();
         assert!(n_true > params.simulation.max_balls as f32);
 
         let eff = params.effective_media();
         assert!(eff.scale_factor > 1.0);
         assert!(eff.diameter_m > eff.true_diameter_m);
-        assert!(eff.density_kg_m3 < params.media.density_kg_m3);
+        // Unit-depth disc masses: density is left unchanged, area preservation alone preserves mass.
+        assert!((eff.density_kg_m3 - params.media.density_kg_m3).abs() < 1e-6);
         assert!(eff.ball_count <= params.simulation.max_balls);
         // Should land close to the target, not just "under" it.
         assert!(eff.ball_count as f32 > 0.5 * params.simulation.max_balls as f32);
@@ -577,10 +587,7 @@ mod tests {
     fn effective_media_preserves_total_footprint_area() {
         let params = Params::default();
         let r_true = params.media.ball_diameter_m * 0.5;
-        let n_true = {
-            let drum_area = std::f32::consts::PI * params.mill.radius_m().powi(2);
-            (params.media.fill_fraction * drum_area) / (std::f32::consts::PI * r_true * r_true)
-        };
+        let n_true = params.true_ball_count();
         let area_true = n_true * std::f32::consts::PI * r_true * r_true;
 
         let eff = params.effective_media();
@@ -593,26 +600,34 @@ mod tests {
 
     #[test]
     fn effective_media_preserves_total_charge_mass() {
+        // With unit-depth disc masses (`m = rho * pi * r^2`, see `crate::dem::ball_mass`),
+        // preserving total footprint area (checked separately above) at unchanged density
+        // preserves total charge mass automatically -- this test confirms that end-to-end.
         let params = Params::default();
         let r_true = params.media.ball_diameter_m * 0.5;
-        let drum_area = std::f32::consts::PI * params.mill.radius_m().powi(2);
-        let n_true =
-            (params.media.fill_fraction * drum_area) / (std::f32::consts::PI * r_true * r_true);
-        let mass_true = n_true
-            * params.media.density_kg_m3
-            * (4.0 / 3.0)
-            * std::f32::consts::PI
-            * r_true.powi(3);
+        let n_true = params.true_ball_count();
+        let mass_true = n_true * params.media.density_kg_m3 * std::f32::consts::PI * r_true.powi(2);
 
         let eff = params.effective_media();
         let r_eff = eff.diameter_m * 0.5;
-        let mass_sim = eff.ball_count as f32
-            * eff.density_kg_m3
-            * (4.0 / 3.0)
-            * std::f32::consts::PI
-            * r_eff.powi(3);
+        let mass_sim =
+            eff.ball_count as f32 * eff.density_kg_m3 * std::f32::consts::PI * r_eff.powi(2);
 
         let rel_err = (mass_sim - mass_true).abs() / mass_true;
         assert!(rel_err < 0.01, "relative mass error too large: {rel_err}");
+    }
+
+    #[test]
+    fn true_ball_count_scales_with_packing_fraction() {
+        let base = Params::default();
+        let denser = Params {
+            media: MediaParams {
+                packing_fraction_2d: 0.907,
+                ..base.media
+            },
+            ..base
+        };
+        let ratio = denser.true_ball_count() / base.true_ball_count();
+        assert!((ratio - 0.907 / base.media.packing_fraction_2d).abs() < 1e-3);
     }
 }

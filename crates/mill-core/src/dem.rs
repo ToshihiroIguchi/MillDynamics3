@@ -24,13 +24,22 @@ const GRAVITY: f32 = -9.81;
 /// buzz indefinitely instead of settling). See docs/PLAN.md ss3.2 step 6.
 const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
 
-fn ball_mass(diameter_m: f32, density_kg_m3: f32) -> f32 {
+/// Mass of one ball, modelled as a **unit-depth disc** (kg per metre of mill length):
+/// `rho * pi * r^2 * 1 m`. This is the same 2D slice convention the fluid uses
+/// ([`crate::pbf::FluidParticles::seed_lattice`]: `particle_mass = rho * dx^2 * 1 m`), so ball and
+/// fluid masses are dimensionally consistent and the ball<->fluid momentum exchange
+/// ([`crate::coupling`]) is meaningful. An earlier version used a 3D sphere mass here, which made
+/// a fluid particle hundreds of times heavier than a coarse-grained ball. Every mass, energy and
+/// power reported by this crate is therefore "per metre of mill length".
+pub fn ball_mass(diameter_m: f32, density_kg_m3: f32) -> f32 {
     let r = diameter_m * 0.5;
-    density_kg_m3 * (4.0 / 3.0) * PI * r * r * r
+    density_kg_m3 * PI * r * r
 }
 
-fn ball_inertia(mass: f32, radius_m: f32) -> f32 {
-    0.4 * mass * radius_m * radius_m // 2/5 m r^2, solid sphere
+/// Moment of inertia of a uniform disc about its centre, `1/2 m r^2` (per metre of mill length,
+/// consistent with [`ball_mass`]).
+pub fn ball_inertia(mass: f32, radius_m: f32) -> f32 {
+    0.5 * mass * radius_m * radius_m
 }
 
 /// Ball (grinding media) population. All balls currently share one effective radius/mass/inertia

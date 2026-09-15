@@ -37,6 +37,18 @@ use crate::pbf::FluidParticles;
 pub struct CouplingImpulses {
     pub impulses: Vec<Vec2>,
     pub angular_impulses: Vec<f32>,
+    /// Number of balls whose linear impulse was reduced by the stability clamp
+    /// ([`crate::pbf::FluidParticles::step_coupled`] step 8) this sub-step. Surfaced as a metrics
+    /// debug indicator (`Metrics::coupling_clamp_hits`): a healthy run stays at (or very near) 0
+    /// once the charge has settled -- persistent clamping means the coupling forces are pinned at
+    /// an artificial ceiling rather than reflecting the physical interaction.
+    pub clamp_hits: u32,
+    /// Sum of this sub-step's fluid momentum change (kg*m/s) from every ball<->fluid interaction
+    /// (overlap push, viscous drag, buoyancy). Debug accumulator only, populated by
+    /// [`crate::pbf::FluidParticles::step_coupled`]: a test can check `sum(impulses) ==
+    /// -fluid_momentum_change` (Newton's third law) when no clamp fired this sub-step (clamping
+    /// breaks the equality by construction, since it discards momentum on the ball side only).
+    pub fluid_momentum_change: Vec2,
 }
 
 impl CouplingImpulses {
@@ -44,6 +56,8 @@ impl CouplingImpulses {
         Self {
             impulses: vec![Vec2::ZERO; n_balls],
             angular_impulses: vec![0.0; n_balls],
+            clamp_hits: 0,
+            fluid_momentum_change: Vec2::ZERO,
         }
     }
 }

@@ -113,15 +113,16 @@ fn cross2(a: Vec2, b: Vec2) -> f32 {
 /// ss3.4: equivalent to a force of `F_CLAMP_G_MULTIPLE * m_b * g` sustained for one sub-step,
 /// `F_clamp * dt`), for stability against transient large overlaps.
 ///
-/// The plan's original `20x` g-multiple (tuned for an explicit force-based scheme, before the
-/// impulse-based fix described in [`crate::coupling::CouplingImpulses`]'s doc comment) was still
-/// too permissive when combined with real per-sub-step contact impulses at this project's default
-/// scale, where the coarse-grained ball radius can end up *smaller* than the fluid's own particle
-/// spacing (e.g. defaults: ~6 mm balls vs. ~12.5 mm fluid spacing at `resolution = 40`) --
-/// visibly ejecting balls from the charge over several seconds of simulated time. `3x` was
-/// empirically the largest multiple that stayed visually stable in that scenario while still
-/// allowing a meaningful buoyancy/drag effect (several times the ball's own weight).
-const F_CLAMP_G_MULTIPLE: f32 = 3.0;
+/// An earlier version of this project gave balls a 3D-sphere mass while fluid particles used a
+/// unit-depth 2D mass, making a fluid particle hundreds of times heavier than a coarse-grained
+/// ball; `F_CLAMP_G_MULTIPLE` was then tuned down to `3x` purely to survive that mismatch (see
+/// git history). Balls are now unit-depth discs too ([`crate::dem::ball_mass`]), so the coupling
+/// forces (overlap push, viscous drag, buoyancy, docs/PLAN.md ss3.4) are dimensionally consistent
+/// and no longer need an artificially tight ceiling: `20x` is a pure numerical-stability backstop
+/// against a transient large overlap, not a value that shapes normal behaviour. Persistent
+/// clamping (see [`crate::coupling::CouplingImpulses::clamp_hits`]) after the charge has settled
+/// indicates a real problem (e.g. an under-resolved fluid), not an expected steady state.
+const F_CLAMP_G_MULTIPLE: f32 = 20.0;
 
 fn impulse_clamp(ball_mass: f32, dt: f32) -> f32 {
     F_CLAMP_G_MULTIPLE * ball_mass * 9.81 * dt
@@ -423,6 +424,7 @@ impl FluidParticles {
                     // this is expressed as an impulse, not a force (no extra `/ dt`).
                     let reaction_impulse = -(mass * push) / dt;
                     coupling.impulses[b] += reaction_impulse;
+                    coupling.fluid_momentum_change -= reaction_impulse;
                     let lever = n_hat * balls.radius; // approximate contact point on the ball's surface
                     coupling.angular_impulses[b] += cross2(lever, reaction_impulse);
                 }
@@ -455,13 +457,30 @@ impl FluidParticles {
             }
         }
 
-        // --- 6.5 Ball viscous no-slip (docs/PLAN.md ss3.4 step 2): fluid within `h` of a ball's
-        // surface blends toward the ball's surface velocity; the momentum removed from the fluid
-        // is added to that ball as an impulse (see CouplingImpulses's doc comment).
-        let c = xsph_coefficient(slurry.viscosity_pa_s);
+        // --- 6.5 Ball viscous drag (docs/PLAN.md ss3.4 step 2): fluid within `h` of a ball's
+        // surface blends toward the ball's surface velocity over this sub-step's `dt`, with the
+        // blend factor derived from the disc's own viscous relaxation time -- an
+        // order-of-magnitude Stokes-regime closure for drag on a disc immersed in a viscous
+        // fluid, `tau = rho_ball * r^2 / (4 * mu)` (`mu` the *physical* slurry viscosity, not
+        // the qualitative XSPH coefficient `c` used by step 7's fluid-fluid mixing below):
+        // `beta = ball_no_slip * (1 - exp(-dt / tau))`, so a highly viscous fluid (small `tau`)
+        // reaches full no-slip within one sub-step while an inviscid fluid (`mu -> 0`,
+        // `tau -> inf`) applies essentially no drag. The momentum removed from the fluid is
+        // added to that ball as an impulse (see CouplingImpulses's doc comment).
+        let mu = slurry.viscosity_pa_s.max(0.0);
         if let Some(ball_grid) = &ball_grid {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
-            let factor = beta_b * c;
+            let rho_ball = if balls.radius > 0.0 {
+                balls.mass / (std::f32::consts::PI * balls.radius * balls.radius)
+            } else {
+                0.0
+            };
+            let factor = if mu > 1e-6 && rho_ball > 0.0 {
+                let tau = (rho_ball * balls.radius * balls.radius / (4.0 * mu)).max(1e-9);
+                beta_b * (1.0 - (-dt / tau).exp())
+            } else {
+                0.0
+            };
             if factor > 0.0 {
                 for i in 0..n {
                     let mut nearby: Vec<u32> = Vec::new();
@@ -483,13 +502,66 @@ impl FluidParticles {
                         // position-derived overlap-projection impulse above).
                         let reaction_impulse = -(mass * dv);
                         coupling.impulses[b] += reaction_impulse;
+                        coupling.fluid_momentum_change -= reaction_impulse;
                         coupling.angular_impulses[b] += cross2(r_vec, reaction_impulse);
                     }
                 }
             }
         }
 
+        // --- 6.6 Buoyancy (docs/PLAN.md ss3.4 step 3): balls are typically sub-resolution
+        // relative to the fluid spacing and do not contribute to the density-constraint sum
+        // (step 3), so buoyancy is not an emergent effect here -- it is modelled directly. Each
+        // ball samples the local fluid density with the same Poly6 kernel PBF already uses
+        // (reusing the fluid's own neighbour grid `grid`, built in step 2; ball positions are
+        // fixed for the whole of this fluid sub-step, so querying it with a ball's position is
+        // the same kind of "neighbour set from slightly-stale positions, kernel evaluated at
+        // current positions" approximation step 7 already relies on) and receives an Archimedes
+        // buoyant impulse `-rho_eff * (pi r^2) * g_vec * dt`, `rho_eff = min(rho_local,
+        // rest_density)` -- clamping to rest density avoids over-buoyancy from a locally
+        // compacted pocket, and tapers smoothly to zero as a ball approaches the free surface
+        // (lower sampled density there) rather than an on/off cutoff. The reaction is applied
+        // immediately as a velocity change split across the contributing fluid particles,
+        // weighted by each one's share of `rho_local` -- consistent with step 6.5's direct
+        // velocity-based exchange (this must run after step 5's `self.v` reconstruction, not
+        // before, or the reconstruction would discard it).
+        if !balls.is_empty() && balls.radius > 0.0 {
+            let area = std::f32::consts::PI * balls.radius * balls.radius;
+            for b in 0..balls.len() {
+                let mut nearby: Vec<u32> = Vec::new();
+                grid.for_each_near(balls.x[b], |j| nearby.push(j));
+                if nearby.is_empty() {
+                    continue;
+                }
+                let mut rho_local = 0.0f32;
+                let mut weights: Vec<(usize, f32)> = Vec::with_capacity(nearby.len());
+                for j in nearby {
+                    let ju = j as usize;
+                    let r2 = (balls.x[b] - self.x[ju]).length_squared();
+                    let w = mass * poly6(r2, h);
+                    if w > 0.0 {
+                        rho_local += w;
+                        weights.push((ju, w));
+                    }
+                }
+                if rho_local <= 0.0 {
+                    continue;
+                }
+                let rho_eff = rho_local.min(rest_density);
+                // Acts through the ball's centroid, so it contributes no angular impulse.
+                let impulse_on_ball = Vec2::new(0.0, -rho_eff * area * GRAVITY * dt);
+                coupling.impulses[b] += impulse_on_ball;
+                for (ju, w) in weights {
+                    let frac = w / rho_local;
+                    let dv = -(impulse_on_ball * frac) / mass;
+                    self.v[ju] += dv;
+                    coupling.fluid_momentum_change += mass * dv;
+                }
+            }
+        }
+
         // --- 7. XSPH viscosity (see module doc comment's v1 simplification note) -----------
+        let c = xsph_coefficient(slurry.viscosity_pa_s);
         if c > 0.0 {
             // Recompute density once more at the final (post-boundary-projection) positions so
             // viscosity uses up-to-date neighbour densities.
