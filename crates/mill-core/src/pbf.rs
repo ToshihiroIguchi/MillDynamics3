@@ -528,6 +528,13 @@ impl FluidParticles {
         if !balls.is_empty() && balls.radius > 0.0 {
             let area = std::f32::consts::PI * balls.radius * balls.radius;
             for b in 0..balls.len() {
+                if !balls.x[b].is_finite() {
+                    // See the identical guard rationale in steps 3.5/6.5 above: a non-finite ball
+                    // position must never manufacture a plausible-looking buoyant impulse (or, via
+                    // `UniformGrid::cell_key`'s NaN-to-zero saturation, spuriously borrow real
+                    // fluid neighbours near the grid origin).
+                    continue;
+                }
                 let mut nearby: Vec<u32> = Vec::new();
                 grid.for_each_near(balls.x[b], |j| nearby.push(j));
                 if nearby.is_empty() {
@@ -631,6 +638,7 @@ impl FluidParticles {
                 let mag = impulse.length();
                 if mag > clamp && mag > 1e-9 {
                     *impulse *= clamp / mag;
+                    coupling.clamp_hits += 1;
                 }
                 *angular = angular.clamp(-angular_clamp, angular_clamp);
             }

@@ -362,4 +362,195 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_light_disc_rises_through_a_still_pool() {
+        // Buoyancy (docs/PLAN.md ss3.4 step 3): a disc much less dense than the slurry, released
+        // fully submerged in a still, settled pool, should rise rather than sink or stay put.
+        let radius_m = 2.0;
+        let slurry = SlurryParams {
+            fill_fraction: 0.35,
+            density_kg_m3: 1800.0,
+            viscosity_pa_s: 0.5,
+            ..SlurryParams::default()
+        };
+        let drum = still_drum(radius_m);
+        let dt = 1.0 / 240.0;
+
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 24, &[], 0.0);
+        for _ in 0..120 {
+            fluid.step(&drum, 0.0, &slurry, 3, dt);
+        }
+        let pool_top = fluid.x.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+
+        let media = MediaParams {
+            ball_diameter_m: 0.05,
+            density_kg_m3: 300.0, // a sixth of the slurry's rest density: should float up briskly
+            fill_fraction: 0.0,
+            restitution_ball_wall: 0.0,
+            friction_ball_wall: 0.0,
+            rolling_friction: 0.0,
+            ..MediaParams::default()
+        };
+        let effective = EffectiveMedia {
+            true_diameter_m: media.ball_diameter_m,
+            diameter_m: media.ball_diameter_m,
+            density_kg_m3: media.density_kg_m3,
+            ball_count: 1,
+            scale_factor: 1.0,
+        };
+        let mut dem = DemState::new(&effective, radius_m, 1);
+        // Start well below the pool's own surface so the disc is fully submerged, comfortably
+        // above the drum's bottom wall (radius_m = 2.0) so wall contact never intervenes.
+        let start_y = pool_top - 0.5;
+        dem.balls.x[0] = Vec2::new(0.0, start_y);
+        dem.balls.v[0] = Vec2::ZERO;
+
+        // Track the *peak* height reached, not just the final position: a disc this much
+        // lighter than the slurry (1/6th the rest density) rises briskly enough to shoot clear
+        // through the free surface within a fraction of a second (physically the same thing a
+        // released cork does underwater), after which it is a free-falling/bouncing projectile
+        // for whatever remains of the run -- its position at an arbitrary later time is not a
+        // reliable "did it rise" signal, but the peak height it reached on the way up is.
+        let mut max_y = start_y;
+        for _ in 0..240 {
+            step(&mut dem, &mut fluid, &drum, 0.0, &media, &slurry, 4, 3, dt);
+            max_y = max_y.max(dem.balls.x[0].y);
+        }
+
+        assert!(
+            dem.balls.x[0].is_finite() && dem.balls.v[0].is_finite(),
+            "non-finite disc state: x={:?} v={:?}",
+            dem.balls.x[0],
+            dem.balls.v[0]
+        );
+        // The disc's own viscous drag reaction (step 6.5) opposes its rise in proportion to its
+        // velocity relative to the fluid, so the ascent settles into a modest terminal creep
+        // rather than accelerating unbounded -- measured empirically at ~4.4 cm over this run's
+        // 1 s. The bound below is set well under that with margin, while staying far above any
+        // plausible settling jitter from the fresh lattice (millimetres, not centimetres).
+        assert!(
+            max_y > start_y + 0.02,
+            "light disc should have risen: start_y={start_y}, peak_y={max_y}"
+        );
+    }
+
+    #[test]
+    fn ball_fluid_momentum_exchange_is_symmetric_when_unclamped() {
+        // Newton's third law: absent clamping, the total momentum the balls gain from fluid
+        // interaction (overlap push, viscous drag, buoyancy) must equal minus the momentum the
+        // fluid gained (`CouplingImpulses::fluid_momentum_change`) -- see that field's doc
+        // comment. Clamping breaks the equality by construction (it discards momentum on the
+        // ball side only), so the check only applies when no clamp fired this sub-step.
+        let radius_m = 1.0;
+        let drum = still_drum(radius_m);
+        let slurry = SlurryParams {
+            fill_fraction: 0.3,
+            ..SlurryParams::default()
+        };
+        let media = MediaParams::default();
+        let dt = 1.0 / 240.0;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: 0.05,
+            diameter_m: 0.05,
+            density_kg_m3: 4000.0, // between the slurry and steel: exercises drag and buoyancy
+            ball_count: 6,
+            scale_factor: 1.0,
+        };
+        let mut dem = DemState::new(&effective, radius_m, 3);
+        let mut fluid =
+            FluidParticles::seed_lattice(&slurry, radius_m, 20, &dem.balls.x, dem.balls.radius);
+
+        // Settle briefly so the sub-step under test has realistic (not raw-lattice) contacts.
+        for _ in 0..60 {
+            step(&mut dem, &mut fluid, &drum, 0.0, &media, &slurry, 4, 3, dt);
+        }
+
+        let impulses = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
+        if impulses.clamp_hits == 0 {
+            let sum_ball_impulse: Vec2 = impulses.impulses.iter().copied().sum();
+            let expected = -impulses.fluid_momentum_change;
+            let rel_err = (sum_ball_impulse - expected).length() / expected.length().max(1e-9);
+            assert!(
+                rel_err < 1e-3,
+                "momentum not conserved: sum_ball={sum_ball_impulse:?} \
+                 expected={expected:?} rel_err={rel_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cascading_charge_keeps_coupling_clamp_hits_rare_once_settled() {
+        // A multi-second run at representative cascading parameters should settle into a state
+        // where the ball<->fluid coupling clamp (`CouplingImpulses::clamp_hits`'s doc comment)
+        // fires only occasionally, not persistently. This project's default media (2 cm balls)
+        // are comparable in size to the default fluid particle spacing here (dx ~= 2.5 cm at
+        // resolution 20), i.e. sub-resolution/unresolved (docs/PLAN.md ss3.4) -- a ball can end
+        // up briefly overlapped by several fluid particles at once during an energetic
+        // cascading contact, producing a legitimately large single-substep overlap-push impulse
+        // (step 3.5) even after the charge has otherwise settled into steady motion. Zero clamp
+        // hits is therefore not a realistic bar here; what matters is that clamping stays rare
+        // (an occasional large contact, not the steady state) rather than dominant (which would
+        // mean the coupling forces are pinned at an artificial ceiling instead of reflecting the
+        // physical interaction). Measured empirically at ~3.4% of ball-substeps for this exact
+        // scenario; the bound below is set with generous headroom above that.
+        let radius_m = 0.5;
+        let omega = 3.0; // a representative cascading speed for this drum radius
+        let drum = Drum::new(
+            radius_m,
+            omega,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+        let media = MediaParams {
+            ball_diameter_m: 0.02,
+            fill_fraction: 0.25,
+            ..MediaParams::default()
+        };
+        let slurry = SlurryParams {
+            fill_fraction: 0.15,
+            ..SlurryParams::default()
+        };
+        let dt = 1.0 / 240.0;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: media.ball_diameter_m,
+            diameter_m: media.ball_diameter_m,
+            density_kg_m3: media.density_kg_m3,
+            ball_count: 150,
+            scale_factor: 1.0,
+        };
+        let mut dem = DemState::new(&effective, radius_m, 1);
+        let mut fluid =
+            FluidParticles::seed_lattice(&slurry, radius_m, 20, &dem.balls.x, dem.balls.radius);
+
+        let mut drum_angle = 0.0f32;
+        // Settling phase (not checked -- the initial lattice contacts are expected to be noisy).
+        for _ in 0..(3 * 240) {
+            step(
+                &mut dem, &mut fluid, &drum, drum_angle, &media, &slurry, 4, 3, dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+        }
+        // Measurement phase: once the charge is in steady cascading motion.
+        let n_measurement_steps = 2 * 240;
+        let mut clamp_hits_total = 0u32;
+        for _ in 0..n_measurement_steps {
+            let impulses = fluid.step_coupled(&drum, drum_angle, &slurry, 3, dt, &dem.balls);
+            clamp_hits_total += impulses.clamp_hits;
+            dem.step_with_external_forces(&drum, drum_angle, &media, 4, dt, Some(&impulses));
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+        }
+
+        let ball_substeps = dem.balls.len() as f32 * n_measurement_steps as f32;
+        let clamp_rate = clamp_hits_total as f32 / ball_substeps;
+        assert!(
+            clamp_rate < 0.15,
+            "coupling clamp fired too often once settled: {clamp_hits_total} hits over \
+             {ball_substeps} ball-substeps (rate={clamp_rate})"
+        );
+    }
 }

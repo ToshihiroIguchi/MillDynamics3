@@ -17,7 +17,12 @@ pub struct UniformGrid {
 }
 
 impl UniformGrid {
-    /// Builds a grid bucketing every point in `points` by its cell of side `cell_size`.
+    /// Builds a grid bucketing every point in `points` by its cell of side `cell_size`. A
+    /// non-finite point (NaN or +/-infinity in either coordinate) is skipped entirely -- it is
+    /// never inserted into any cell, so it can never be reported as a candidate neighbour of
+    /// anything (see [`UniformGrid::cell_key`]'s doc comment for why simply computing *some* cell
+    /// key for it, instead of excluding it, is not safe). Its index is otherwise left unused,
+    /// which every caller already treats as "no candidates" for that point.
     ///
     /// `cell_size` must be at least as large as the interaction range being queried (e.g. the sum
     /// of two particle radii for contact detection, or the kernel radius for SPH-style
@@ -30,6 +35,9 @@ impl UniformGrid {
         );
         let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (i, &p) in points.iter().enumerate() {
+            if !p.is_finite() {
+                continue;
+            }
             cells
                 .entry(Self::cell_key(p, cell_size))
                 .or_default()
@@ -38,6 +46,14 @@ impl UniformGrid {
         Self { cell_size, cells }
     }
 
+    /// Integer cell coordinates of `p`. A non-finite `p` is never passed here by
+    /// [`UniformGrid::build`] (it skips such points) or [`UniformGrid::for_each_near`] (it
+    /// returns early for one) -- but if it ever were, `as i32`'s saturating float-to-int cast
+    /// would silently fold `NaN` to `(0, 0)` (a real, populated cell, not a harmless out-of-range
+    /// one) and +/-infinity to `i32::{MAX, MIN}` (which, added to a same-sign offset one cell
+    /// over, would *overflow* rather than simply miss). Neither failure mode is a safe "no
+    /// neighbours" default, which is why both callers guard against non-finite input themselves
+    /// rather than relying on this function to degrade gracefully.
     fn cell_key(p: Vec2, cell_size: f32) -> (i32, i32) {
         (
             (p.x / cell_size).floor() as i32,
@@ -63,9 +79,22 @@ impl UniformGrid {
                     f(i.min(j), i.max(j));
                 }
             }
-            // Pairs against each forward-neighbouring cell.
+            // Pairs against each forward-neighbouring cell. `build` never inserts a non-finite
+            // point, but a merely huge *finite* coordinate (a badly diverged but not yet
+            // infinite simulation state) can still floor/cast to a cell key at the `i32`
+            // boundary; a plain `cx + dx` there would overflow (debug builds panic, release
+            // builds silently wrap), so the offset uses `saturating_add`. That alone is not
+            // sufficient right at the boundary, though: `i32::MAX.saturating_add(1) ==
+            // i32::MAX`, so a "forward" offset can degenerate to the *same* cell as `(cx, cy)`
+            // -- the explicit `!=` check below skips that case, since this cell's own points are
+            // already paired against each other just above and must not be paired against
+            // themselves a second time as bogus zero-distance self-pairs.
             for (dx, dy) in FORWARD_OFFSETS {
-                let Some(other) = self.cells.get(&(cx + dx, cy + dy)) else {
+                let key = (cx.saturating_add(dx), cy.saturating_add(dy));
+                if key == (cx, cy) {
+                    continue;
+                }
+                let Some(other) = self.cells.get(&key) else {
                     continue;
                 };
                 for &i in indices {
@@ -80,17 +109,36 @@ impl UniformGrid {
     /// Calls `f(j)` for every point index in the same or an adjacent cell to `p` (a 3x3
     /// neighbourhood around `p`'s own cell). Used to query neighbours of a point that is not
     /// itself necessarily one of the grid's indexed points (e.g. a ball centre when broad-phasing
-    /// against fluid particles).
+    /// against fluid particles). A non-finite `p` is treated as having no neighbours at all
+    /// (`f` is never called) -- see [`UniformGrid::cell_key`]'s doc comment for why a non-finite
+    /// coordinate cannot be allowed to produce *some* cell key here (`NaN` would alias a real,
+    /// populated cell at the origin, not miss cleanly).
     pub fn for_each_near<F: FnMut(u32)>(&self, p: Vec2, mut f: F) {
+        if !p.is_finite() {
+            return;
+        }
         let (cx, cy) = Self::cell_key(p, self.cell_size);
+        // Collect the up-to-9 candidate cell keys before querying, deduplicating with a linear
+        // scan (cheap at this size): right at the `i32` boundary (see `cell_key`'s doc comment),
+        // `saturating_add` can fold two or three distinct offsets onto the same key, which would
+        // otherwise report that cell's points more than once to `f`.
+        let mut keys: [(i32, i32); 9] = [(0, 0); 9];
+        let mut n_keys = 0;
         for dy in -1..=1 {
             for dx in -1..=1 {
-                let Some(indices) = self.cells.get(&(cx + dx, cy + dy)) else {
-                    continue;
-                };
-                for &i in indices {
-                    f(i);
+                let key = (cx.saturating_add(dx), cy.saturating_add(dy));
+                if !keys[..n_keys].contains(&key) {
+                    keys[n_keys] = key;
+                    n_keys += 1;
                 }
+            }
+        }
+        for &key in &keys[..n_keys] {
+            let Some(indices) = self.cells.get(&key) else {
+                continue;
+            };
+            for &i in indices {
+                f(i);
             }
         }
     }
@@ -194,5 +242,48 @@ mod tests {
         let mut near_count = 0;
         grid.for_each_near(Vec2::ZERO, |_| near_count += 1);
         assert_eq!(near_count, 0);
+    }
+
+    #[test]
+    fn for_each_near_does_not_overflow_on_a_non_finite_query_point() {
+        // Regression: `cell_key`'s `as i32` cast saturates a non-finite coordinate to
+        // `i32::{MAX, MIN}`; a plain `cx + dx` on that value then overflows (debug builds panic).
+        // Every non-finite value that can appear in this crate's f32 state (see e.g.
+        // `crate::pbf::FluidParticles::step_coupled`'s step-0 sanitize comment) must be safe here.
+        let points = vec![Vec2::new(0.9, 0.0), Vec2::new(-0.9, 0.0)];
+        let grid = UniformGrid::build(&points, 1.0);
+        for p in [
+            Vec2::splat(f32::INFINITY),
+            Vec2::splat(f32::NEG_INFINITY),
+            Vec2::new(f32::INFINITY, 0.0),
+            Vec2::splat(f32::NAN),
+        ] {
+            let mut count = 0;
+            grid.for_each_near(p, |_| count += 1);
+            assert_eq!(
+                count, 0,
+                "expected no neighbours for non-finite point {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_and_candidate_pairs_do_not_overflow_when_a_point_is_non_finite() {
+        // Same regression as `for_each_near_does_not_overflow_on_a_non_finite_query_point`, but
+        // for a non-finite point stored *in* the grid (e.g. an already-diverged ball position)
+        // rather than only used as a query -- `for_each_candidate_pair` walks every stored cell
+        // key, including one saturated to `i32::MAX`, so it needs the same guard.
+        let points = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.05, 0.0),
+            Vec2::splat(f32::INFINITY),
+        ];
+        let grid = UniformGrid::build(&points, 0.2);
+        let mut pairs = Vec::new();
+        grid.for_each_candidate_pair(|i, j| pairs.push((i, j)));
+        // The two finite points are still found as neighbours; the non-finite one pairs with
+        // nothing (its saturated cell has no real neighbours).
+        assert!(pairs.contains(&(0, 1)));
+        assert!(!pairs.iter().any(|&(i, j)| i == 2 || j == 2));
     }
 }
