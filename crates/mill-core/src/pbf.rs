@@ -2,25 +2,29 @@
 //!
 //! 2D Poly6 (density) / Spiky (gradient) kernels, iterative density-constraint projection with
 //! artificial-pressure anti-clustering, drum-wall boundary projection with wall-velocity
-//! blending (no-slip), and XSPH viscosity. See docs/PLAN.md ss3.3 for the full per-substep
-//! algorithm and the rationale for choosing PBF over WCSPH/LBM/MPM.
+//! blending (no-slip), and implicit Newtonian viscosity. See docs/PLAN.md ss3.3 for the full
+//! per-substep algorithm and the rationale for choosing PBF over WCSPH/LBM/MPM.
 //!
 //! Two-way ball<->fluid coupling ([`FluidParticles::step_coupled`], docs/PLAN.md ss3.4) projects
 //! fluid particles out of overlapping balls and exchanges viscous momentum near a ball's surface,
 //! accumulating the reaction as a [`crate::coupling::CouplingImpulses`] for [`crate::dem`] to
 //! apply. [`FluidParticles::step`] is the ball-free special case (equivalent to an empty ball list).
 //!
-//! **Viscosity, v1 simplification.** The XSPH mixing coefficient is a smooth saturating curve in
-//! `sqrt(viscosity_pa_s)` (see [`xsph_coefficient`]), applied directly as the XSPH coefficient.
-//! Like the rest of the v1 slurry model, this is qualitative (monotonic in viscosity, not a
-//! quantitatively calibrated match to real Pa*s -- see [`xsph_coefficient`]'s "range caveat");
-//! see the module-level caveat already noted project-wide (2D slice, qualitative results).
-//!
-//! An earlier version used a hard-clamped linear mapping (`clamp(viscosity_pa_s / 2.0, 0, 1)`)
-//! that saturated at 2 Pa*s: every viscosity from 2 Pa*s upward produced bit-identical output,
-//! so a UI control allowing up to (say) 200 Pa*s would have moved a slider that did nothing
-//! past 2. [`xsph_coefficient`]'s curve never hard-saturates, so raising the UI's range stays
-//! meaningful across the whole advertised span.
+//! **Viscosity.** Step 7 discretises the Newtonian viscous term `(mu/rho) * laplacian(v)` with the
+//! Morris (1997) SPH viscous Laplacian ([`morris_weights`]) and solves the resulting backward-Euler
+//! system `(I + dt*L) v_new = v` implicitly by conjugate gradient ([`solve_implicit_viscosity`]),
+//! `L` being the (symmetric positive semi-definite) graph Laplacian `(Lv)_i = sum_j c_ij (v_i -
+//! v_j)`. Unlike an explicit scheme, this is unconditionally stable for any `viscosity_pa_s` at
+//! this project's fixed sub-step, and `viscosity_pa_s` enters the physics directly (Pa*s) rather
+//! than through a separately-calibrated qualitative coefficient -- an earlier version used
+//! explicit XSPH mixing with a hand-tuned saturating coefficient curve instead (see git history),
+//! whose effective kinematic viscosity was bounded by `~h^2/dt` regardless of the input and so
+//! could not represent a genuinely low-viscosity (near-water) slurry. This is still a 2D-slice
+//! model (see the project-wide qualitative-results caveat), and `nu = mu/rho` uses the fluid's own
+//! *measured* SPH density at each particle, not `slurry.density_kg_m3` directly -- the two agree
+//! closely in a well-relaxed interior but diverge at a low-density boundary (free surface, sparse
+//! neighbourhood), where the resulting locally elevated `nu` is itself physically reasonable (a
+//! thin/rarefied film should be *more*, not less, resistant to shearing relative to its own mass).
 
 use glam::Vec2;
 
@@ -46,41 +50,21 @@ const EPSILON_RELAX: f32 = 200.0;
 const S_CORR_K: f32 = 0.0;
 const S_CORR_DELTA_Q_FACTOR: f32 = 0.2;
 const S_CORR_N: i32 = 4;
-/// Viscosity (Pa*s) at which the XSPH mixing coefficient reaches half of its (asymptotic, never
-/// attained) saturation value of 1.0. See [`xsph_coefficient`].
-const MU_HALF_SATURATION_PA_S: f32 = 15.0;
 
-/// XSPH mixing coefficient for a given dynamic viscosity (Pa*s): `c = sqrt(mu) / (sqrt(mu) +
-/// sqrt(MU_HALF_SATURATION_PA_S))`, strictly monotonic on `[0, inf)` into `[0, 1)`. `c(0) = 0`,
-/// `c(MU_HALF_SATURATION_PA_S) = 0.5`, and `c < 1` for every finite input -- so the XSPH update
-/// (step 7) stays a strict convex combination for *any* non-negative viscosity, without a hard
-/// clamp (a hard clamp used to be the stability guard; the curve's own asymptote now is).
-///
-/// Replaces an earlier `clamp(mu / 2.0, 0, 1)`, which saturated at 2 Pa*s -- see the module doc
-/// comment's "Viscosity, v1 simplification" note for why that made a wide UI range meaningless.
-///
-/// Why `sqrt(mu)` and not `mu`: a rational (Michaelis-Menten-style) curve is required at all --
-/// an exponential `1 - exp(-mu/S)` has a single scale, so keeping e.g. 100 vs. 200 Pa*s visually
-/// distinguishable forces an `S` large enough to collapse the *default* slurry viscosity (0.5
-/// Pa*s) down to `c ~ 0.005`, an unhelpfully weak effect. Taking the rational curve in
-/// `sqrt(mu)` instead of plain `mu` widens the low end -- where real slurries mostly live -- at
-/// negligible cost to the top-end separation: with `MU_HALF_SATURATION_PA_S = 15.0`,
-/// `c(0.5) = 0.154` (vs. `0.032` for the same curve in plain `mu`), `c(100) = 0.870`,
-/// `c(200) = 0.930` (a 6 percentage-point gap, clearly distinguishable, vs. the old scheme's
-/// zero gap across the entire 2-200 Pa*s range).
-///
-/// **Range caveat.** XSPH's effective kinematic viscosity is `~ c * h^2 / dt`, linear in `c`
-/// and therefore bounded by `h^2 / dt` regardless of the mapping: doubling the parameter from
-/// 100 to 200 Pa*s changes the effective viscosity by roughly 9%, not 2x. The mapping is
-/// *ordinal* across the whole advertised range (a higher number is always measurably thicker),
-/// not a calibrated physical match -- consistent with this module's "qualitative, not
-/// quantitatively calibrated" caveat. A genuinely wider dynamic range needs multi-pass XSPH or
-/// the planned M7 implicit viscosity (docs/PLAN.md ss3.3), not a different curve; not pursued
-/// here.
-fn xsph_coefficient(viscosity_pa_s: f32) -> f32 {
-    let s = viscosity_pa_s.max(0.0).sqrt();
-    s / (s + MU_HALF_SATURATION_PA_S.sqrt())
-}
+/// Relative-residual stopping tolerance for [`solve_implicit_viscosity`]'s conjugate-gradient
+/// solve: iterate until `|r| <= VISCOSITY_CG_TOLERANCE * |b|`, `b` the right-hand side (the
+/// incoming velocity field).
+const VISCOSITY_CG_TOLERANCE: f32 = 1e-3;
+/// Iteration budget for [`solve_implicit_viscosity`]. The operator is well-conditioned (a
+/// graph Laplacian scaled by `dt`, itself small at this project's fixed sub-step), so this is a
+/// generous ceiling in practice, not a value tuned tight against real convergence needs.
+const VISCOSITY_CG_MAX_ITERS: u32 = 50;
+/// Regularisation `eta^2 = VISCOSITY_ETA_FACTOR * h^2` added to the denominator of
+/// [`morris_weights`], preventing a blow-up as `|x_ij| -> 0` (docs/PLAN.md ss3.3's own
+/// `EPSILON_RELAX` plays the analogous role for the density-constraint solve). `0.01` is the
+/// standard choice in the SPH viscosity literature (Morris 1997, Monaghan 1992's artificial
+/// viscosity).
+const VISCOSITY_ETA_FACTOR: f32 = 0.01;
 
 /// 2D Poly6 kernel (docs/PLAN.md ss3.3: `4/(pi h^8)`), evaluated from squared distance.
 fn poly6(r2: f32, h: f32) -> f32 {
@@ -107,6 +91,229 @@ fn spiky_grad(delta: Vec2, r: f32, h: f32) -> Vec2 {
 /// angular impulse = lever_arm x linear impulse.
 fn cross2(a: Vec2, b: Vec2) -> f32 {
     a.x * b.y - a.y * b.x
+}
+
+/// Builds each particle's neighbour-index list (mutual: `j` in `neighbors[i]` implies `i` in
+/// `neighbors[j]`) from `grid` (a [`UniformGrid`] already built over `x` with cell size `h`),
+/// keeping only candidate pairs actually within `h`. Factored out of [`FluidParticles::step_coupled`]
+/// (its step 2) so the viscosity solver's tests below can drive it in isolation without a full
+/// coupled sub-step.
+fn build_neighbor_lists(x: &[Vec2], grid: &UniformGrid, h: f32) -> Vec<Vec<u32>> {
+    let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); x.len()];
+    grid.for_each_candidate_pair(|i, j| {
+        let (iu, ju) = (i as usize, j as usize);
+        if (x[iu] - x[ju]).length_squared() <= h * h {
+            neighbors[iu].push(j);
+            neighbors[ju].push(i);
+        }
+    });
+    neighbors
+}
+
+/// Real inner product `<a, b> = sum_i a_i . b_i` treating a `&[Vec2]` field as one flat `2n`-real
+/// vector, used throughout [`solve_implicit_viscosity`]'s conjugate-gradient iteration.
+fn dot(a: &[Vec2], b: &[Vec2]) -> f32 {
+    a.iter().zip(b).map(|(&ai, &bi)| ai.dot(bi)).sum()
+}
+
+/// Morris (1997) SPH viscous-Laplacian weights, laid out parallel to `neighbors` (`out[i][k]` is
+/// the weight of `neighbors[i][k]`):
+///
+/// ```text
+/// c_ij = m_j * (mu_i + mu_j) / (rho_i * rho_j)
+///        * |x_ij . grad_W_ij| / (|x_ij|^2 + eta^2), eta^2 = VISCOSITY_ETA_FACTOR * h^2
+/// ```
+///
+/// so that `(Lv)_i = sum_j c_ij * (v_i - v_j)` (see [`laplacian_apply`]) discretises `-(mu/rho) *
+/// laplacian(v)` at particle `i`. This crate's fluid is single-phase (`mu_i = mu_j = mu` for every
+/// particle), so the `(mu_i + mu_j)` term is simply `2*mu` here, but the two-sided form is kept
+/// for clarity against the cited derivation. `c_ij >= 0` for every pair (each factor is
+/// non-negative), so the resulting `L` is a graph Laplacian: symmetric (`c_ij` depends only on the
+/// unordered pair) and positive semi-definite -- the property [`solve_implicit_viscosity`]'s
+/// conjugate-gradient solve relies on.
+fn morris_weights(
+    x: &[Vec2],
+    neighbors: &[Vec<u32>],
+    density: &[f32],
+    mass: f32,
+    mu: f32,
+    h: f32,
+) -> Vec<Vec<f32>> {
+    let eta2 = VISCOSITY_ETA_FACTOR * h * h;
+    neighbors
+        .iter()
+        .enumerate()
+        .map(|(i, js)| {
+            let rho_i = density[i].max(1e-6);
+            js.iter()
+                .map(|&j| {
+                    let ju = j as usize;
+                    let rho_j = density[ju].max(1e-6);
+                    let delta = x[i] - x[ju];
+                    let r = delta.length();
+                    let grad = spiky_grad(delta, r, h);
+                    let numerator = (mass * 2.0 * mu / (rho_i * rho_j)) * delta.dot(grad).abs();
+                    numerator / (delta.length_squared() + eta2)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Matrix-free application of the graph Laplacian `(Lv)_i = sum_j c_ij * (v_i - v_j)`, `weights`
+/// laid out parallel to `neighbors` (see [`morris_weights`]).
+fn laplacian_apply(neighbors: &[Vec<u32>], weights: &[Vec<f32>], v: &[Vec2]) -> Vec<Vec2> {
+    neighbors
+        .iter()
+        .zip(weights)
+        .enumerate()
+        .map(|(i, (js, cs))| {
+            let mut sum = Vec2::ZERO;
+            for (&j, &c) in js.iter().zip(cs) {
+                sum += c * (v[i] - v[j as usize]);
+            }
+            sum
+        })
+        .collect()
+}
+
+/// Applies the implicit-viscosity system operator `A = I + dt*L` to `v`.
+fn apply_viscosity_system(
+    neighbors: &[Vec<u32>],
+    weights: &[Vec<f32>],
+    dt: f32,
+    v: &[Vec2],
+) -> Vec<Vec2> {
+    let lv = laplacian_apply(neighbors, weights, v);
+    v.iter().zip(&lv).map(|(&vi, &lvi)| vi + dt * lvi).collect()
+}
+
+/// Solves `(I + dt*L) v_new = v` in place by conjugate gradient, warm-started from `v` itself
+/// (the incoming velocity is usually already close to the diffused result at this project's
+/// small fixed sub-step), and returns the iteration count actually used (0 if the right-hand
+/// side was already within tolerance, or degenerate). `A = I + dt*L` is symmetric positive
+/// definite whenever `L` is symmetric positive semi-definite (true of [`morris_weights`]'s
+/// output, docs/PLAN.md ss3.3) and `dt > 0`, since `L`'s eigenvalues are `>= 0` and `I` shifts
+/// them to `>= 1`.
+///
+/// The 2D vector system is solved directly over `Vec2`, with the real inner product `<a, b> =
+/// sum_i a_i . b_i` ([`dot`]), rather than as two independent scalar systems. This is ordinary CG
+/// on the full `2n`-dimensional real vector space `A` and `v` actually live in (`L`, and hence
+/// `A`, acts identically and independently on the x- and y-components, so this is mathematically
+/// equivalent to running the scalar algorithm twice -- just without the bookkeeping of splitting
+/// and re-merging the two components).
+fn solve_implicit_viscosity(
+    neighbors: &[Vec<u32>],
+    weights: &[Vec<f32>],
+    v: &mut [Vec2],
+    dt: f32,
+) -> u32 {
+    // The right-hand side `b` *is* the incoming velocity, and `x` is warm-started to the same
+    // value, so neither needs its own copy: `v` plays both roles and is updated in place.
+    let b_norm = dot(v, v).sqrt();
+    if b_norm <= 0.0 || !b_norm.is_finite() {
+        // All-zero (nothing to diffuse) or non-finite (step 0 should have made this unreachable;
+        // running CG on it would only spread the NaN across the whole field).
+        return 0;
+    }
+    let target = VISCOSITY_CG_TOLERANCE * b_norm;
+
+    let ax = apply_viscosity_system(neighbors, weights, dt, v);
+    let mut r: Vec<Vec2> = v.iter().zip(&ax).map(|(&bi, &axi)| bi - axi).collect();
+    let mut p = r.clone();
+    let mut rs_old = dot(&r, &r);
+    if rs_old.sqrt() <= target {
+        return 0;
+    }
+
+    for iter in 1..=VISCOSITY_CG_MAX_ITERS {
+        let ap = apply_viscosity_system(neighbors, weights, dt, &p);
+        let p_ap = dot(&p, &ap);
+        if p_ap <= 0.0 || !p_ap.is_finite() {
+            // Unreachable for a genuinely SPD operator; bail out rather than divide by ~0 if f32
+            // rounding on a degenerate (e.g. fully disconnected) neighbourhood ever produces it.
+            return iter;
+        }
+        let alpha = rs_old / p_ap;
+        for i in 0..v.len() {
+            v[i] += alpha * p[i];
+            r[i] -= alpha * ap[i];
+        }
+        let rs_new = dot(&r, &r);
+        if rs_new.sqrt() <= target {
+            return iter;
+        }
+        let beta = rs_new / rs_old;
+        for i in 0..v.len() {
+            p[i] = r[i] + beta * p[i];
+        }
+        rs_old = rs_new;
+    }
+    VISCOSITY_CG_MAX_ITERS
+}
+
+/// Mean shear rate `gamma_dot = sqrt(2 D:D)` over all particles, `D = sym(grad v)` the symmetric
+/// part of the SPH velocity-gradient tensor `grad_v_i = sum_j (m_j/rho_j) * (v_j - v_i) (x)
+/// grad_W_ij` (standard SPH gradient estimator, the same neighbour-averaging form the density
+/// constraint (step 3) and viscosity ([`morris_weights`]) already use). Used for
+/// [`crate::metrics`]'s mean-shear-rate readout and (future work) a Bingham/Herschel-Bulkley
+/// effective viscosity. `0.0` if there are no particles or every particle's gradient is
+/// degenerate (no neighbours).
+fn mean_shear_rate(
+    x: &[Vec2],
+    v: &[Vec2],
+    neighbors: &[Vec<u32>],
+    density: &[f32],
+    mass: f32,
+    h: f32,
+) -> f32 {
+    let n = x.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for i in 0..n {
+        let (mut gxx, mut gxy, mut gyx, mut gyy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for &j in &neighbors[i] {
+            let ju = j as usize;
+            let delta = x[i] - x[ju];
+            let r = delta.length();
+            let grad = spiky_grad(delta, r, h);
+            let rho_j = density[ju].max(1e-6);
+            let coeff = mass / rho_j;
+            let dv = v[ju] - v[i];
+            gxx += coeff * dv.x * grad.x;
+            gxy += coeff * dv.x * grad.y;
+            gyx += coeff * dv.y * grad.x;
+            gyy += coeff * dv.y * grad.y;
+        }
+        let dxy = 0.5 * (gxy + gyx);
+        let d_contraction = gxx * gxx + gyy * gyy + 2.0 * dxy * dxy;
+        let gamma_dot = (2.0 * d_contraction).sqrt();
+        if gamma_dot.is_finite() {
+            sum += gamma_dot;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f32
+    }
+}
+
+/// Per-sub-step fluid solver diagnostics, returned alongside (or instead of, for
+/// [`FluidParticles::step`]) [`crate::coupling::CouplingImpulses`]. Surfaced by
+/// [`crate::Simulation`] for [`crate::metrics`] (docs/PLAN.md ss3.5).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FluidStepStats {
+    /// Conjugate-gradient iterations [`solve_implicit_viscosity`] used this sub-step. A healthy
+    /// run stays comfortably under [`VISCOSITY_CG_MAX_ITERS`]; persistently hitting the ceiling
+    /// would mean the viscosity solve is not actually converging.
+    pub viscosity_iterations: u32,
+    /// Mean shear rate (1/s) over the fluid population this sub-step, from [`mean_shear_rate`].
+    pub mean_shear_rate_per_s: f32,
 }
 
 /// Clamp magnitude for the coupling impulse applied to a ball over one sub-step (docs/PLAN.md
@@ -266,8 +473,9 @@ impl FluidParticles {
         slurry: &SlurryParams,
         iterations: u32,
         dt: f32,
-    ) {
-        let _ = self.step_coupled(drum, drum_angle, slurry, iterations, dt, &Balls::empty());
+    ) -> FluidStepStats {
+        self.step_coupled(drum, drum_angle, slurry, iterations, dt, &Balls::empty())
+            .1
     }
 
     /// As [`FluidParticles::step`], but also two-way couples against `balls` (docs/PLAN.md ss3.4,
@@ -284,11 +492,11 @@ impl FluidParticles {
         iterations: u32,
         dt: f32,
         balls: &Balls,
-    ) -> CouplingImpulses {
+    ) -> (CouplingImpulses, FluidStepStats) {
         let n = self.len();
         let mut coupling = CouplingImpulses::zeros(balls.len());
         if n == 0 || dt <= 0.0 {
-            return coupling;
+            return (coupling, FluidStepStats::default());
         }
 
         // --- 0. Sanitize state carried in from the previous sub-step ------------------------
@@ -326,17 +534,7 @@ impl FluidParticles {
 
         // --- 2. Neighbour lists (rebuilt each sub-step, reused across iterations) -----------
         let grid = UniformGrid::build(&self.x, h);
-        let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); n];
-        {
-            let positions = &self.x;
-            grid.for_each_candidate_pair(|i, j| {
-                let (iu, ju) = (i as usize, j as usize);
-                if (positions[iu] - positions[ju]).length_squared() <= h * h {
-                    neighbors[iu].push(j);
-                    neighbors[ju].push(i);
-                }
-            });
-        }
+        let neighbors = build_neighbor_lists(&self.x, &grid, h);
 
         // --- 3. Density-constraint solve (Jacobi-style: compute all deltas, then apply) -----
         let delta_q = S_CORR_DELTA_Q_FACTOR * h;
@@ -567,42 +765,25 @@ impl FluidParticles {
             }
         }
 
-        // --- 7. XSPH viscosity (see module doc comment's v1 simplification note) -----------
-        let c = xsph_coefficient(slurry.viscosity_pa_s);
-        if c > 0.0 {
-            // Recompute density once more at the final (post-boundary-projection) positions so
-            // viscosity uses up-to-date neighbour densities.
-            for i in 0..n {
-                let mut rho = mass * poly6(0.0, h);
-                for &j in &neighbors[i] {
-                    let r2 = (self.x[i] - self.x[j as usize]).length_squared();
-                    rho += mass * poly6(r2, h);
-                }
-                density[i] = rho;
+        // --- 7. Implicit Newtonian viscosity (see module doc comment) -----------------------
+        let mu = slurry.viscosity_pa_s.max(0.0);
+        let mut viscosity_iterations = 0u32;
+        // Recompute density once more at the final (post-boundary-projection) positions, so both
+        // the viscosity solve and the shear-rate readout below use up-to-date neighbour densities.
+        for i in 0..n {
+            let mut rho = mass * poly6(0.0, h);
+            for &j in &neighbors[i] {
+                let r2 = (self.x[i] - self.x[j as usize]).length_squared();
+                rho += mass * poly6(r2, h);
             }
-            let mut delta_v = vec![Vec2::ZERO; n];
-            for i in 0..n {
-                let mut sum = Vec2::ZERO;
-                let mut w_sum = 0.0f32;
-                for &j in &neighbors[i] {
-                    let ju = j as usize;
-                    let r2 = (self.x[i] - self.x[ju]).length_squared();
-                    let w = poly6(r2, h);
-                    let rho_j = density[ju].max(1e-6);
-                    sum += (mass / rho_j) * (self.v[ju] - self.v[i]) * w;
-                    w_sum += (mass / rho_j) * w;
-                }
-                // Normalizing by `w_sum` (clamped to >= 1 so the well-relaxed case, where
-                // `w_sum ~ 0.68`, is unaffected) keeps this a strict convex combination toward
-                // the neighbour average even for the pathological density ratios where the
-                // unnormalized weight sum could otherwise exceed 1 -- tightening the "usually a
-                // contraction" stability argument to "always a contraction" for any `c < 1`.
-                delta_v[i] = c * sum / w_sum.max(1.0);
-            }
-            for (v, dv) in self.v.iter_mut().zip(&delta_v) {
-                *v += *dv;
-            }
+            density[i] = rho;
         }
+        if mu > 0.0 {
+            let weights = morris_weights(&self.x, &neighbors, &density, mass, mu, h);
+            viscosity_iterations = solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
+        }
+        let mean_shear_rate_per_s =
+            mean_shear_rate(&self.x, &self.v, &neighbors, &density, mass, h);
 
         // --- 7.5 Fluid speed clamp (stability backstop) --------------------------------------
         // Step 5 reconstructs `v = (x - x0) / dt` from *position* corrections, so a particle
@@ -643,7 +824,13 @@ impl FluidParticles {
                 *angular = angular.clamp(-angular_clamp, angular_clamp);
             }
         }
-        coupling
+        (
+            coupling,
+            FluidStepStats {
+                viscosity_iterations,
+                mean_shear_rate_per_s,
+            },
+        )
     }
 }
 
@@ -836,60 +1023,158 @@ mod tests {
     }
 
     #[test]
-    fn viscosity_coefficient_is_strictly_monotonic_over_the_whole_ui_range() {
-        let mut prev = -1.0f32;
-        for &mu in &[
-            0.0, 0.05, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 50.0, 100.0, 150.0, 200.0, 1.0e6,
-        ] {
-            let c = xsph_coefficient(mu);
+    fn viscosity_solve_is_a_no_op_at_zero_viscosity() {
+        // mu = 0 must skip the CG solve entirely (no diffusion, no iteration cost) rather than
+        // running an expensive no-op solve.
+        let slurry = SlurryParams {
+            fill_fraction: 0.2,
+            viscosity_pa_s: 0.0,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let drum = still_drum(radius_m);
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+        let stats = fluid.step(&drum, 0.0, &slurry, 3, 1.0 / 240.0);
+        assert_eq!(stats.viscosity_iterations, 0);
+    }
+
+    #[test]
+    fn viscosity_keeps_mattering_between_100_and_200_pa_s() {
+        // Regression: the old qualitative XSPH coefficient this solver replaced saturated by
+        // ~100 Pa*s, so 100 vs 200 Pa*s produced bit-identical decay -- the UI's viscosity
+        // slider did nothing in the top half of its advertised range. The physically implicit
+        // solver used now should still show a measurable difference this far up the range, even
+        // though the unconditionally-stable implicit scheme itself saturates *somewhat* at very
+        // large `dt * (viscosity term)` (that is expected and fine -- it's what keeps the solve
+        // stable without a vanishingly small sub-step -- the point here is only that it must not
+        // be bit-identical the way the old ordinal coefficient was).
+        let (rate_100, rate_200) = (
+            checkerboard_shear_decay_rate(100.0),
+            checkerboard_shear_decay_rate(200.0),
+        );
+        assert!(
+            rate_200 > rate_100 * 1.1,
+            "100 vs 200 Pa*s should still measurably differ: rate_100={rate_100} rate_200={rate_200}"
+        );
+    }
+
+    #[test]
+    fn viscosity_solve_stays_finite_and_converges_at_high_viscosity_and_rotation() {
+        // Far beyond anything the UI permits (omega = 6 rad/s at this drum radius), with the
+        // top of the advertised viscosity range, to exercise the CG solve under a genuinely
+        // stiff, fast-moving field. Checked on *every* sub-step, not just at the end -- a
+        // transient excursion (non-finite velocity, or the solve failing to converge, i.e.
+        // hitting VISCOSITY_CG_MAX_ITERS) that later recovers is exactly the kind of event a
+        // final-state-only check would miss.
+        let slurry = SlurryParams {
+            fill_fraction: 0.2,
+            viscosity_pa_s: 200.0,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let omega = 6.0;
+        let drum = Drum::new(
+            radius_m,
+            omega,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+        let dt = 1.0 / 240.0;
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+        let mut drum_angle = 0.0f32;
+        for s in 0..(2 * 240) {
+            let stats = fluid.step(&drum, drum_angle, &slurry, 3, dt);
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
             assert!(
-                c > prev,
-                "not strictly increasing at mu={mu}: {c} <= {prev}"
+                stats.viscosity_iterations < VISCOSITY_CG_MAX_ITERS,
+                "sub-step {s}: viscosity CG hit the iteration ceiling without converging"
             );
-            assert!((0.0..1.0).contains(&c), "c({mu}) = {c} outside [0, 1)");
-            prev = c;
+            assert!(
+                stats.mean_shear_rate_per_s.is_finite() && stats.mean_shear_rate_per_s >= 0.0,
+                "sub-step {s}: non-finite or negative mean shear rate: {}",
+                stats.mean_shear_rate_per_s
+            );
+            for (i, &v) in fluid.v.iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "sub-step {s}, particle {i}: non-finite velocity {v:?}"
+                );
+            }
         }
     }
 
-    #[test]
-    fn viscosity_coefficient_separates_the_top_of_the_ui_range() {
-        // Regression: the old `clamp(mu / 2.0, 0, 1)` mapping made every viscosity from 2 Pa*s
-        // upward produce an identical coefficient of exactly 1.0, so the UI's viscosity slider
-        // did nothing above 2 Pa*s.
-        let (c100, c200) = (xsph_coefficient(100.0), xsph_coefficient(200.0));
-        assert!(
-            c200 - c100 > 0.05,
-            "100 vs 200 Pa*s barely differ: {c100} -> {c200}"
-        );
-        assert!(
-            xsph_coefficient(2.0) < 0.5,
-            "2 Pa*s must no longer be near-saturated"
-        );
-    }
+    /// Shared harness for the checkerboard-perturbation viscosity tests: settles a puddle once
+    /// at a fixed baseline viscosity, imposes a spatially-checkerboarded (the highest frequency
+    /// this particle spacing can resolve) x-velocity perturbation, then measures the perturbation
+    /// energy's exponential decay rate after stepping for `n_steps` at `mu`. Settling once and
+    /// re-running the decay phase from an identical clone of that state at each candidate `mu`
+    /// (rather than settling independently per `mu`) isolates `mu`'s effect from per-mu settling
+    /// divergence -- the same rationale
+    /// `higher_viscosity_damps_a_high_frequency_perturbation_more_across_the_whole_range` uses.
+    fn checkerboard_shear_decay_rate(mu: f32) -> f32 {
+        let radius_m = 0.5;
+        let resolution = 20u32;
+        let dx = radius_m / resolution as f32;
+        let baseline_slurry = SlurryParams {
+            fill_fraction: 0.2,
+            viscosity_pa_s: 0.5,
+            ..SlurryParams::default()
+        };
+        let drum = still_drum(radius_m);
+        let mut baseline =
+            FluidParticles::seed_lattice(&baseline_slurry, radius_m, resolution, &[], 0.0);
+        for _ in 0..240 {
+            baseline.step(&drum, 0.0, &baseline_slurry, 3, 1.0 / 240.0);
+        }
+        const PERTURBATION_MPS: f32 = 2.0;
+        for i in 0..baseline.len() {
+            let col = (baseline.x[i].x / dx).round() as i64;
+            baseline.v[i].x += if col % 2 == 0 {
+                PERTURBATION_MPS
+            } else {
+                -PERTURBATION_MPS
+            };
+        }
+        let initial_energy: f32 =
+            baseline.v.iter().map(|v| v.x * v.x).sum::<f32>() / baseline.len() as f32;
 
-    #[test]
-    fn viscosity_coefficient_keeps_the_default_slurry_meaningfully_viscous() {
-        // Widening the advertised range must not make the *default* (0.5 Pa*s) look inviscid.
-        let c = xsph_coefficient(SlurryParams::default().viscosity_pa_s);
-        assert!(
-            c > 0.1,
-            "default viscosity gives a negligible XSPH coefficient: {c}"
-        );
-    }
-
-    #[test]
-    fn viscosity_coefficient_matches_its_documented_half_saturation_point() {
-        assert!((xsph_coefficient(MU_HALF_SATURATION_PA_S) - 0.5).abs() < 1e-6);
+        let slurry = SlurryParams {
+            viscosity_pa_s: mu,
+            ..baseline_slurry
+        };
+        let mut fluid = FluidParticles {
+            x: baseline.x.clone(),
+            v: baseline.v.clone(),
+            dye: baseline.dye.clone(),
+            particle_mass: baseline.particle_mass,
+            h: baseline.h,
+            rest_density: baseline.rest_density,
+        };
+        let n_steps = 20;
+        let dt = 1.0 / 240.0;
+        for _ in 0..n_steps {
+            fluid.step(&drum, 0.0, &slurry, 3, dt);
+        }
+        let final_energy: f32 = fluid.v.iter().map(|v| v.x * v.x).sum::<f32>() / fluid.len() as f32;
+        // Perturbation energy decays as exp(-2 * decay_rate * t) (energy ~ amplitude^2); solve
+        // for decay_rate from the before/after ratio, clamped so a fully-decayed or noisy
+        // final_energy can't produce a nonsensical negative/infinite rate.
+        let ratio = (final_energy / initial_energy.max(1e-12)).clamp(1e-6, 1.0);
+        -0.5 * ratio.ln() / (n_steps as f32 * dt)
     }
 
     #[test]
     fn higher_viscosity_damps_a_high_frequency_perturbation_more_across_the_whole_range() {
-        // XSPH smooths toward the local neighbourhood average, so a spatially checkerboarded
-        // (the highest frequency this particle spacing can resolve) velocity perturbation
-        // should be damped more by higher viscosity -- including from 100 to 200 Pa*s, which
-        // the old hard-clamped mapping made bit-identical. A *linear* shear profile would not
-        // distinguish any viscosity here: a symmetric averaging kernel reproduces a linear
-        // field exactly, so only a genuinely high-frequency pattern exercises the coefficient.
+        // The implicit solver diffuses velocity toward the local neighbourhood average, so a
+        // spatially checkerboarded (the highest frequency this particle spacing can resolve)
+        // velocity perturbation should be damped more by higher viscosity -- including from 100
+        // to 200 Pa*s, which the old hard-clamped XSPH mapping this solver replaced made
+        // bit-identical (see `viscosity_keeps_mattering_between_100_and_200_pa_s` for that
+        // specific regression). A *linear* shear profile would not distinguish any viscosity
+        // here: a symmetric averaging kernel reproduces a linear field exactly, so only a
+        // genuinely high-frequency pattern exercises the solver's viscosity-dependence.
         //
         // Settling dynamics themselves depend weakly on viscosity, so settling independently at
         // each candidate `mu` (as an earlier version of this test did) lets that per-mu
@@ -1013,7 +1298,7 @@ mod tests {
         dem.balls.v[0] = Vec2::ZERO;
         dem.balls.omega[0] = 0.0;
 
-        let impulses = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
 
         assert!(
             fluid.x[0].is_finite() && fluid.v[0].is_finite(),

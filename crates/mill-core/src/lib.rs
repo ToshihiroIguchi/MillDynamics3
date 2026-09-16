@@ -44,6 +44,10 @@ pub struct Simulation {
     sim_time: f64,
     dem: DemState,
     fluid: FluidParticles,
+    /// Fluid solver diagnostics (viscosity CG iterations, mean shear rate) from the most
+    /// recently completed sub-step. `Default` (all zero) before the first [`Simulation::step`]
+    /// call.
+    fluid_stats: pbf::FluidStepStats,
 }
 
 impl Simulation {
@@ -82,6 +86,7 @@ impl Simulation {
             sim_time: 0.0,
             dem,
             fluid,
+            fluid_stats: pbf::FluidStepStats::default(),
         })
     }
 
@@ -119,6 +124,20 @@ impl Simulation {
     /// `false` at construction time.
     pub fn fluid(&self) -> &FluidParticles {
         &self.fluid
+    }
+
+    /// Conjugate-gradient iterations the implicit viscosity solve used on the most recently
+    /// completed sub-step ([`pbf::FluidStepStats::viscosity_iterations`]). `0` before the first
+    /// [`Simulation::step`] call.
+    pub fn viscosity_iterations(&self) -> u32 {
+        self.fluid_stats.viscosity_iterations
+    }
+
+    /// Mean shear rate (1/s) over the fluid population on the most recently completed sub-step
+    /// ([`pbf::FluidStepStats::mean_shear_rate_per_s`]). `0.0` before the first
+    /// [`Simulation::step`] call.
+    pub fn mean_shear_rate_per_s(&self) -> f32 {
+        self.fluid_stats.mean_shear_rate_per_s
     }
 
     /// Extracts the fluid's free-surface contour(s) at the current state (docs/PLAN.md ss3.5).
@@ -159,7 +178,7 @@ impl Simulation {
 
         for _ in 0..n_substeps {
             let drum = Drum::new(radius_m, omega, lifters);
-            coupling::step(
+            self.fluid_stats = coupling::step(
                 &mut self.dem,
                 &mut self.fluid,
                 &drum,

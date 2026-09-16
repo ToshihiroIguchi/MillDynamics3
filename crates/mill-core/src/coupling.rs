@@ -78,9 +78,11 @@ pub fn step(
     dem_iterations: u32,
     pbf_iterations: u32,
     dt: f32,
-) {
-    let impulses = fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
+) -> crate::pbf::FluidStepStats {
+    let (impulses, stats) =
+        fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
     dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&impulses));
+    stats
 }
 
 #[cfg(test)]
@@ -262,7 +264,7 @@ mod tests {
         dem.balls.v[0] = Vec2::ZERO;
         dem.balls.omega[0] = 0.0;
 
-        let impulses = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
 
         let fluid_momentum_gained = fluid.particle_mass * fluid.v[0];
         let ball_impulse = impulses.impulses[0]; // already an impulse, see CouplingImpulses's doc comment
@@ -366,12 +368,17 @@ mod tests {
     #[test]
     fn a_light_disc_rises_through_a_still_pool() {
         // Buoyancy (docs/PLAN.md ss3.4 step 3): a disc much less dense than the slurry, released
-        // fully submerged in a still, settled pool, should rise rather than sink or stay put.
+        // fully submerged in a still, settled pool, should rise rather than sink or stay put. Low
+        // viscosity keeps this isolated to buoyancy: the implicit solver's drag reaction (step
+        // 6.5) is now a genuine physical Stokes-regime term, strong enough at this project's
+        // default 0.5 Pa*s (let alone higher) to fully arrest this small a disc's rise, which
+        // would defeat the point of this test -- see `higher_viscosity_slows_a_rising_disc`
+        // below for the viscosity-dependence check instead.
         let radius_m = 2.0;
         let slurry = SlurryParams {
             fill_fraction: 0.35,
             density_kg_m3: 1800.0,
-            viscosity_pa_s: 0.5,
+            viscosity_pa_s: 0.02,
             ..SlurryParams::default()
         };
         let drum = still_drum(radius_m);
@@ -426,12 +433,73 @@ mod tests {
         );
         // The disc's own viscous drag reaction (step 6.5) opposes its rise in proportion to its
         // velocity relative to the fluid, so the ascent settles into a modest terminal creep
-        // rather than accelerating unbounded -- measured empirically at ~4.4 cm over this run's
-        // 1 s. The bound below is set well under that with margin, while staying far above any
-        // plausible settling jitter from the fresh lattice (millimetres, not centimetres).
+        // rather than accelerating unbounded. The bound below is set with margin under what is
+        // measured at this low viscosity, while staying far above any plausible settling jitter
+        // from the fresh lattice (millimetres, not centimetres).
         assert!(
             max_y > start_y + 0.02,
             "light disc should have risen: start_y={start_y}, peak_y={max_y}"
+        );
+    }
+
+    #[test]
+    fn higher_viscosity_slows_a_rising_disc() {
+        // The disc's viscous drag reaction (step 6.5) is now derived from the slurry's *physical*
+        // viscosity (a Stokes-regime relaxation-time closure) rather than a qualitative XSPH
+        // coefficient, so a more viscous pool should measurably slow the same disc's buoyant
+        // ascent -- a genuine, checkable quantitative dependency the old scheme did not have.
+        let peak_rise = |viscosity_pa_s: f32| -> f32 {
+            let radius_m = 2.0;
+            let slurry = SlurryParams {
+                fill_fraction: 0.35,
+                density_kg_m3: 1800.0,
+                viscosity_pa_s,
+                ..SlurryParams::default()
+            };
+            let drum = still_drum(radius_m);
+            let dt = 1.0 / 240.0;
+
+            let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 24, &[], 0.0);
+            for _ in 0..120 {
+                fluid.step(&drum, 0.0, &slurry, 3, dt);
+            }
+            let pool_top = fluid.x.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+
+            let media = MediaParams {
+                ball_diameter_m: 0.05,
+                density_kg_m3: 300.0,
+                fill_fraction: 0.0,
+                restitution_ball_wall: 0.0,
+                friction_ball_wall: 0.0,
+                rolling_friction: 0.0,
+                ..MediaParams::default()
+            };
+            let effective = EffectiveMedia {
+                true_diameter_m: media.ball_diameter_m,
+                diameter_m: media.ball_diameter_m,
+                density_kg_m3: media.density_kg_m3,
+                ball_count: 1,
+                scale_factor: 1.0,
+            };
+            let mut dem = DemState::new(&effective, radius_m, 1);
+            let start_y = pool_top - 0.5;
+            dem.balls.x[0] = Vec2::new(0.0, start_y);
+            dem.balls.v[0] = Vec2::ZERO;
+
+            let mut max_y = start_y;
+            for _ in 0..60 {
+                step(&mut dem, &mut fluid, &drum, 0.0, &media, &slurry, 4, 3, dt);
+                max_y = max_y.max(dem.balls.x[0].y);
+            }
+            max_y - start_y
+        };
+
+        let rise_low_mu = peak_rise(0.02);
+        let rise_high_mu = peak_rise(2.0);
+        assert!(
+            rise_high_mu < rise_low_mu * 0.7,
+            "higher viscosity should meaningfully slow the disc's rise: \
+             rise(0.02 Pa*s)={rise_low_mu}, rise(2.0 Pa*s)={rise_high_mu}"
         );
     }
 
@@ -467,7 +535,7 @@ mod tests {
             step(&mut dem, &mut fluid, &drum, 0.0, &media, &slurry, 4, 3, dt);
         }
 
-        let impulses = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
         if impulses.clamp_hits == 0 {
             let sum_ball_impulse: Vec2 = impulses.impulses.iter().copied().sum();
             let expected = -impulses.fluid_momentum_change;
@@ -539,7 +607,8 @@ mod tests {
         let n_measurement_steps = 2 * 240;
         let mut clamp_hits_total = 0u32;
         for _ in 0..n_measurement_steps {
-            let impulses = fluid.step_coupled(&drum, drum_angle, &slurry, 3, dt, &dem.balls);
+            let (impulses, _stats) =
+                fluid.step_coupled(&drum, drum_angle, &slurry, 3, dt, &dem.balls);
             clamp_hits_total += impulses.clamp_hits;
             dem.step_with_external_forces(&drum, drum_angle, &media, 4, dt, Some(&impulses));
             drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);

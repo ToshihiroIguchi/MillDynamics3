@@ -1,11 +1,20 @@
 //! Uniform-grid spatial hash for neighbour search.
 //!
 //! Shared broadphase structure used by both the ball solver ([`crate::dem`]) and the PBF fluid
-//! solver ([`crate::pbf`], M3): a hash map from integer cell coordinates to the point indices
-//! inside that cell, cell size chosen per-solver (ball diameter for DEM, kernel radius `h` for
-//! PBF), rebuilt each sub-step. See docs/PLAN.md ss3.2/3.3 for how each solver uses it.
+//! solver ([`crate::pbf`], M3): cell coordinates map to the point indices inside that cell, cell
+//! size chosen per-solver (ball diameter for DEM, kernel radius `h` for PBF), rebuilt each
+//! sub-step. See docs/PLAN.md ss3.2/3.3 for how each solver uses it.
+//!
+//! **`BTreeMap`, not `HashMap`.** `std::collections::HashMap`'s default hasher is randomly seeded
+//! per process, so its iteration order (used by [`UniformGrid::for_each_candidate_pair`]) is not
+//! reproducible run-to-run even for byte-identical input -- silently breaking this crate's stated
+//! "every run is reproducible from `Params` + `seed`" convention (CLAUDE.md) at the level of exact
+//! floating-point summation order (contact/kernel contributions get accumulated in a different
+//! sequence each run, which f32 addition is not associative under). `BTreeMap` costs `O(log n)`
+//! instead of `O(1)` per cell lookup, negligible next to the per-cell candidate-pair work this
+//! grid exists to bound in the first place, in exchange for a fully deterministic iteration order.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use glam::Vec2;
 
@@ -13,7 +22,7 @@ use glam::Vec2;
 /// point's neighbours) without an all-pairs O(n^2) scan.
 pub struct UniformGrid {
     cell_size: f32,
-    cells: HashMap<(i32, i32), Vec<u32>>,
+    cells: BTreeMap<(i32, i32), Vec<u32>>,
 }
 
 impl UniformGrid {
@@ -33,7 +42,7 @@ impl UniformGrid {
             cell_size.is_finite() && cell_size > 0.0,
             "cell_size must be positive"
         );
-        let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        let mut cells: BTreeMap<(i32, i32), Vec<u32>> = BTreeMap::new();
         for (i, &p) in points.iter().enumerate() {
             if !p.is_finite() {
                 continue;
@@ -285,5 +294,41 @@ mod tests {
         // nothing (its saturated cell has no real neighbours).
         assert!(pairs.contains(&(0, 1)));
         assert!(!pairs.iter().any(|&(i, j)| i == 2 || j == 2));
+    }
+
+    #[test]
+    fn candidate_pair_iteration_order_is_deterministic_across_rebuilds() {
+        // Regression: this crate is documented (CLAUDE.md) as "every run is reproducible from
+        // Params + seed", which requires not just the same *set* of candidate pairs but the same
+        // *order* every time (contact/kernel contributions are accumulated with f32 addition,
+        // which is not associative, so a different summation order can shift the result at the
+        // bit level). A plain `HashMap`'s default hasher is randomly seeded per process, so its
+        // iteration order is not reproducible run-to-run for byte-identical input -- this is why
+        // `UniformGrid` uses a `BTreeMap` (see the module doc comment). Rebuilding the identical
+        // grid many times within *this* process and comparing the exact candidate-pair sequence
+        // each time is a reasonable proxy for that cross-process guarantee, since the ordering
+        // only depends on the map's key comparison, not on any process-specific hasher state.
+        let points: Vec<Vec2> = (0..60)
+            .map(|i| {
+                let t = i as f32 * 0.53;
+                Vec2::new(t.sin() * 2.0, (t * 0.7).cos() * 2.0)
+            })
+            .collect();
+
+        let first_run: Vec<(u32, u32)> = {
+            let grid = UniformGrid::build(&points, 0.3);
+            let mut pairs = Vec::new();
+            grid.for_each_candidate_pair(|i, j| pairs.push((i, j)));
+            pairs
+        };
+        for _ in 0..5 {
+            let grid = UniformGrid::build(&points, 0.3);
+            let mut pairs = Vec::new();
+            grid.for_each_candidate_pair(|i, j| pairs.push((i, j)));
+            assert_eq!(
+                pairs, first_run,
+                "candidate-pair order changed across an identical rebuild"
+            );
+        }
     }
 }

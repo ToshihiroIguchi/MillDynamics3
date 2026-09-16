@@ -22,7 +22,7 @@ Decisions already made with the user:
 |---|---|
 | Coarse-grained DEM "liquid" particles with damping/cohesion | Single solver, but no incompressibility → slurry compacts/sinks, viscosity is uncontrolled, free surface is ill-defined. Rejected. |
 | WCSPH (weakly compressible SPH) | Physically faithful viscosity, but dt ≈ 1e-4 s → ~170 substeps per 60 Hz frame → ~10× too slow for real time in single-thread WASM at useful resolution. Kept as a possible high-fidelity mode later. |
-| **PBF (Position Based Fluids)** | Unconditionally stable at dt = 1/240 s, 3–4 iterations; ~10–20× cheaper than WCSPH; clean free surface; well-proven for real-time (NVIDIA Flex). Viscosity is qualitative (XSPH) in v1, upgradeable to implicit viscosity. **Chosen.** |
+| **PBF (Position Based Fluids)** | Unconditionally stable at dt = 1/240 s, 3–4 iterations; ~10–20× cheaper than WCSPH; clean free surface; well-proven for real-time (NVIDIA Flex). Viscosity is an implicit (conjugate-gradient) Newtonian solve, see ss3.3. **Chosen.** |
 | LBM free-surface | Grid-based, free-surface tracking and moving lifters are complex. Rejected. |
 | MPM | Great for non-Newtonian, but grid+particles transfer cost is too high for real time here. Rejected. |
 
@@ -75,7 +75,7 @@ MillDynamics3/
         geometry.rs             # drum SDF (circle + optional lifters), wall velocity, rotating frame
         grid.rs                 # uniform grid spatial hash (cell list) shared by DEM & PBF
         dem.rs                  # balls: state, contact model, integration, wall/lifter contacts
-        pbf.rs                  # fluid: kernels, density constraint, XSPH viscosity, boundaries
+        pbf.rs                  # fluid: kernels, density constraint, implicit viscosity, boundaries
         coupling.rs             # two-way ball↔fluid exchange
         surface.rs              # density grid splat + marching squares → free-surface polylines
         metrics.rs              # toe/shoulder angles, slurry level, mixing index, energy, power
@@ -244,16 +244,18 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
 - Boundaries: SDF projection against drum/lifters with wall velocity blending
   `v ← (1−β)·v + β·v_wall` for particles that were projected (touching the wall) this substep (β = no-slip factor,
   default 1 → no-slip).
-- **Viscosity (v1, implemented)**: XSPH `v_i += c·Σ (m_j/ρ_j)(v_j − v_i) W_ij` with a smooth saturating coefficient
-  `c = sqrt(μ)/(sqrt(μ)+sqrt(μ_half))`, `μ_half = 15 Pa·s` (the viscosity at which `c = 0.5`; `c → 1` asymptotically,
-  never exactly reached, for any `μ`). An earlier version used a hard-clamped `c = clamp(μ/2, 0, 1)`, which saturated
-  at 2 Pa·s — every viscosity from 2 Pa·s upward produced identical output, silently capping the UI's usable range.
-  The current curve is monotone across the full 0–200 Pa·s the UI exposes but is still qualitative (ordinal, not
-  quantitatively calibrated to real Pa·s: XSPH's effective kinematic viscosity is bounded by `~h²/dt` regardless of
-  `c`) — consistent with this project's project-wide 2D/qualitative caveat. See `pbf.rs`'s `xsph_coefficient` doc
-  comment for the full derivation.
-- **Viscosity (v2, phase M7)**: implicit viscosity (Weiler et al. 2018) with conjugate gradient; Bingham/Herschel–Bulkley via
-  Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇`.
+- **Viscosity (implemented)**: implicit (backward-Euler) Newtonian viscosity on the Morris (1997) SPH Laplacian.
+  Weights `c_ij = m_j(μ_i+μ_j)/(ρ_i ρ_j) · |x_ij·∇W_ij| / (|x_ij|² + 0.01h²)` give `(Lv)_i = Σ_j c_ij (v_i − v_j)`;
+  the system `(I + Δt·L) v_new = v` is solved matrix-free by conjugate gradient (relative residual `1e-3`, ≤ 50
+  iterations, warm-started from `v`), unconditionally stable for any `μ ≥ 0` at this project's fixed sub-step. This
+  replaces an earlier qualitative XSPH scheme (`v_i += c·Σ(m_j/ρ_j)(v_j−v_i)W_ij` with a hand-tuned saturating
+  coefficient `c(μ)`) whose effective kinematic viscosity was bounded by `~h²/dt` regardless of the input, so it
+  could not represent a genuinely low-viscosity slurry and saturated well before the top of the advertised 0–200
+  Pa·s range. `μ` now enters the physics directly as a real Pa·s value; `ν = μ/ρ` uses the fluid's own measured SPH
+  density at each particle. See `pbf.rs`'s `morris_weights`/`solve_implicit_viscosity` doc comments for the full
+  derivation, and `mean_shear_rate` for the `γ̇ = sqrt(2 D:D)` readout (`pbf.rs`'s `FluidStepStats`, surfaced on
+  `Simulation`) used by `crates/mill-core/src/metrics.rs` and a future Bingham/Herschel–Bulkley extension via
+  Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇` (not yet implemented).
 - Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.
 
 ### 3.4 Coupling (`coupling.rs`) — one shared sub-step for both solvers, implemented
@@ -440,7 +442,7 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 
 | Risk | Mitigation |
 |---|---|
-| PBF viscosity only qualitative | Calibrated mapping in v1 documented as such; implicit viscosity + Bingham in M7 |
+| PBF viscosity only qualitative | **Resolved, implemented** (ss3.3): implicit Morris/conjugate-gradient Newtonian viscosity, `μ` a real Pa·s value; Bingham/Herschel–Bulkley remains future work |
 | Coupling instability (light fluid pushing heavy balls is fine, but many overlapping corrections) | Impulse clamp, shared fixed sub-step for both solvers (ss3.2/3.4, no separate DEM/fluid time-step ratio to get wrong), symmetric momentum test, per-substep overlap resolution |
 | WASM single-thread too slow at high resolution | Frame budget + achieved-time-scale HUD, auto resolution, SIMD; targets defined in M6 |
 | 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
