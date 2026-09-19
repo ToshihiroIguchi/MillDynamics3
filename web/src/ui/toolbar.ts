@@ -5,7 +5,8 @@ export interface ToolbarCallbacks {
   onTogglePlay(): boolean; // returns the new "running" state, so the button label can reflect it
   onStep(): void;
   onReset(): void;
-  onOpenParams(): void;
+  onToggleParams(): boolean; // returns the new "params panel visible" state, reflected via aria-pressed
+  initialParamsVisible: boolean;
   onTogglePanel(): boolean; // returns the new "panel visible" state, reflected via aria-pressed
   initialPanelVisible: boolean;
 }
@@ -35,7 +36,11 @@ export function createToolbar(callbacks: ToolbarCallbacks): HTMLElement {
   const paramsBtn = document.createElement("button");
   paramsBtn.type = "button";
   paramsBtn.textContent = "Parameters";
-  paramsBtn.addEventListener("click", () => callbacks.onOpenParams());
+  paramsBtn.setAttribute("aria-pressed", String(callbacks.initialParamsVisible));
+  paramsBtn.addEventListener("click", () => {
+    const visible = callbacks.onToggleParams();
+    paramsBtn.setAttribute("aria-pressed", String(visible));
+  });
 
   const panelBtn = document.createElement("button");
   panelBtn.type = "button";

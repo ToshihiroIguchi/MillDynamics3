@@ -332,26 +332,46 @@ contact zone cannot produce an outsized single-substep correction. This position
 a velocity via the later reconstruction (`Δv = push/dt`), so the fluid particle's own momentum
 change is `mass * push / dt`; the ball's Newton's-third-law reaction impulse is the exact opposite,
 `-(mass * push) / dt`, applied at the contact point (`lever = n_hat * balls.radius`) for the angular
-component.
+component. The grid used to find a ball's nearby fluid particles here is sized to cover this step's
+`contact_radius` exactly (it used to default to `2 * balls.radius`, which was smaller than
+`contact_radius` at this project's defaults and silently missed real neighbours — regression test:
+`pbf::tests::coupling_finds_ball_neighbours_beyond_two_radii`).
 
 ### 6.2 Viscous no-slip drag (pbf.rs step 6.5)
 
-Fluid within `balls.radius + h` of a ball's surface blends toward the ball's local surface velocity
-`v_surf = v_b + omega_b x (x_i - x_b)` over this sub-step:
+Each ball relaxes toward its locally-entrained fluid mass via a centre-of-mass relaxation, not a
+per-particle blend. Every fluid particle `i` within `h_c = balls.radius + h` of a ball contributes
+a smooth poly6 taper weight `phi_i = poly6(|r_i|^2, h_c) / poly6(0, h_c)` (`r_i = x_i - x_b`), giving
+an entrained mass `m_ent = sum_i particle_mass * phi_i` and a weighted mean fluid velocity `v_bar =
+(sum_i particle_mass * phi_i * v_i) / m_ent`:
 
 ```
-tau = rho_ball * r^2 / (4 * mu)          (Stokes-regime disc relaxation-time closure)
-beta = slurry.ball_no_slip * (1 - exp(-dt / tau))
-dv = beta * (v_surf - v_fluid)
+tau   = rho_ball * r^2 / (4 * mu)                     (Stokes-regime disc relaxation-time closure)
+beta  = slurry.ball_no_slip * (1 - exp(-dt / tau))     (unchanged closure)
+a_lin = beta * m_ent / (balls.mass + m_ent)            <= 1 for every mu, dt
+dv_b  = a_lin * (v_bar - v_b)
 ```
 
-`rho_ball = balls.mass / (pi * balls.radius^2)` (the ball's own effective areal density); `mu =
-slurry.viscosity_pa_s` is the *physical* slurry viscosity (not the qualitative XSPH coefficient the
-now-removed explicit scheme used). A highly viscous fluid (small `tau`) reaches full no-slip within
-one sub-step; an inviscid fluid (`mu -> 0`, `tau -> inf`) applies essentially no drag. `dv` is
-already a velocity change, so the ball's reaction impulse is `-(mass * dv)` directly, no `/dt`. This
-formula replaced an earlier `ball_no_slip * xsph_c` blend (a qualitative XSPH mixing coefficient,
-not tied to the physical viscosity value).
+`rho_ball = balls.mass / (pi * balls.radius^2)`; `mu = slurry.viscosity_pa_s` is the *physical*
+slurry viscosity. The reaction is distributed back across the same weighted fluid neighbours
+(`dv_i = -(balls.mass / m_ent) * dv_b * phi_i`), so linear momentum is conserved exactly
+(`sum_i particle_mass * dv_i == -balls.mass * dv_b`). The angular part mirrors this using
+`balls.inertia` and a tangential taper field in place of `balls.mass` and `v_bar`, plus a
+`balls.mass * cross2(r_bar, dv_b)` correction to the ball's angular impulse -- the reaction torque
+from spreading the linear reaction over an off-centre weighted mean position `r_bar`, needed for
+*exact* (not just per-mechanism) angular momentum conservation once that reaction isn't applied
+through the ball's own centre.
+
+`a_lin <= 1` by construction, so the ball can never be driven past `v_bar` regardless of `mu`, `dt`,
+or the entrained/ball mass ratio. An earlier version applied `beta` independently to *every* nearby
+fluid particle and let the ball absorb the sum of all those reactions -- amplifying the ball's
+actual response by the entrained/ball mass ratio (`~9x` at this project's defaults), which the
+stability clamp (ss6.4) then hid as "occasional clamping is normal" instead of surfacing as the bug
+it was (the ball<->fluid coupling clamp rate went from ~3.4% of ball-substeps at 0.5 Pa*s to ~50%
+at 50/200 Pa*s before this fix). In the small-`beta`, entrained-mass-dominated limit (`m_ent >>
+balls.mass`, `dt << tau`) the corrected formula reduces analytically to ordinary 2D Stokes drag,
+`impulse ~= 4*pi*mu*(v_fluid - v_ball)*dt`, independent of the ball/fluid mass ratio -- verified
+directly by `pbf::tests::ball_drag_matches_two_dimensional_stokes_scaling`.
 
 ### 6.3 Buoyancy (pbf.rs step 6.6)
 
@@ -378,15 +398,23 @@ extension noted as future work); it is now a distinct, directly-modelled step.
 ### 6.4 Stability clamp (pbf.rs step 8)
 
 The accumulated per-ball impulse this sub-step is clamped to
-`impulse_clamp(mass, dt) = F_CLAMP_G_MULTIPLE * mass * 9.81 * dt`, `F_CLAMP_G_MULTIPLE = 20.0`
+`impulse_clamp(mass, dt) = F_CLAMP_G_MULTIPLE * mass * 9.81 * dt`, `F_CLAMP_G_MULTIPLE = 60.0`
 (angular impulse clamped to that magnitude times `balls.radius`). `pbf.rs`'s doc comment on
 `F_CLAMP_G_MULTIPLE` records that this constant used to be `3.0`, tuned down purely to survive an
-earlier 3D-sphere-vs-2D-disc mass mismatch between balls and fluid particles; now that both are
-unit-depth discs with dimensionally consistent masses, `20x` is a pure numerical-stability backstop
-against a transient large overlap rather than a value that shapes normal behaviour. `clamp_hits`
-(count of balls clamped this sub-step) and `fluid_momentum_change` (sum of fluid momentum change
-from every mechanism above, for a Newton's-third-law cross-check against `sum(impulses)` when no
-clamp fired) are both tracked in `CouplingImpulses` purely as diagnostics.
+earlier 3D-sphere-vs-2D-disc mass mismatch between balls and fluid particles, then `20.0` once both
+were unit-depth discs with dimensionally consistent masses. It is now `60.0`: step 6.2's corrected
+drag term is legitimately larger (though still `a_lin <= 1` bounded) than the overlap-push
+mechanism (ss6.1) this clamp was originally sized against, once `beta` saturates (`mu` above
+roughly 10 Pa*s at this project's ball sizes) -- a velocity-matching relaxation's natural impulse
+scale doesn't shrink with `dt` the way the position-capped overlap-push impulse does, so a clamp
+tuned only against the latter clips physically legitimate no-slip corrections at the former's
+scale. Residual clamp rate at the project's default sub-step rate is ~6-8% of ball-substeps at 50
+and 200 Pa*s (`coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`),
+attributable to ss6.1's sub-resolution overlap-push spikes, not step 6.2's drag -- persistent
+clamping still indicates a real problem, just a rarer one than before this fix. `clamp_hits` (count
+of balls clamped this sub-step) and `fluid_momentum_change` (sum of fluid momentum change from
+every mechanism above, for a Newton's-third-law cross-check against `sum(impulses)` when no clamp
+fired) are both tracked in `CouplingImpulses` purely as diagnostics.
 
 ---
 

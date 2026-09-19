@@ -3,7 +3,7 @@ import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage
 import { createInitialState } from "./state";
 import { createHud } from "./ui/hud";
 import { createMetricsPanel } from "./ui/metricsPanel";
-import { createParamsModal } from "./ui/paramsModal";
+import { createParamsPanel } from "./ui/paramsPanel";
 import { createToolbar } from "./ui/toolbar";
 
 const state = createInitialState();
@@ -75,12 +75,14 @@ worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
     case "ready":
       state.params = msg.params;
       metricsPanel.reset();
+      paramsPanel.setParams(msg.params);
       break;
     case "frame":
       applyFrame(msg);
       break;
     case "error":
       console.error("[mill-worker]", msg.message);
+      paramsPanel.showError(msg.message);
       break;
   }
 };
@@ -93,11 +95,16 @@ function togglePlay(): boolean {
 
 // v1 simplification (see params/schema.ts): both "Apply" and "Reset" fully reconstruct the
 // simulation via an "init" message; there is no partial "hot" apply yet (M5).
-const paramsModal = createParamsModal((params) => {
+const paramsPanelEl = document.querySelector<HTMLElement>("#params-panel");
+if (!paramsPanelEl) {
+  throw new Error("Missing #params-panel element");
+}
+const paramsPanel = createParamsPanel(paramsPanelEl, (params) => {
   send({ type: "init", params });
 });
 
 const PANEL_STORAGE_KEY = "milldynamics.panel";
+const PARAMS_PANEL_STORAGE_KEY = "milldynamics.paramsPanel";
 
 function readPanelVisiblePref(): boolean {
   try {
@@ -128,11 +135,41 @@ function togglePanel(): boolean {
   return nowVisible;
 }
 
+function readParamsPanelVisiblePref(): boolean {
+  try {
+    const raw = localStorage.getItem(PARAMS_PANEL_STORAGE_KEY);
+    if (raw === null) return true;
+    return JSON.parse(raw) === true;
+  } catch {
+    return true;
+  }
+}
+
+function setParamsPanelCollapsed(collapsed: boolean): void {
+  document.body.classList.toggle("params-collapsed", collapsed);
+}
+
+const initialParamsVisible = readParamsPanelVisiblePref();
+setParamsPanelCollapsed(!initialParamsVisible);
+
+function toggleParamsPanel(): boolean {
+  const wasCollapsed = document.body.classList.contains("params-collapsed");
+  const nowVisible = wasCollapsed;
+  setParamsPanelCollapsed(!nowVisible);
+  try {
+    localStorage.setItem(PARAMS_PANEL_STORAGE_KEY, JSON.stringify(nowVisible));
+  } catch {
+    // ignore (private browsing / disabled storage)
+  }
+  return nowVisible;
+}
+
 const toolbarEl = createToolbar({
   onTogglePlay: togglePlay,
   onStep: () => send({ type: "step" }),
   onReset: () => send({ type: "init", params: state.params ?? undefined }),
-  onOpenParams: () => paramsModal.open(state.params ?? {}),
+  onToggleParams: toggleParamsPanel,
+  initialParamsVisible,
   onTogglePanel: togglePanel,
   initialPanelVisible,
 });
@@ -147,8 +184,13 @@ if (!panelEl) {
 }
 const metricsPanel = createMetricsPanel(panelEl);
 
+const SPACE_GUARD_SELECTOR = "input, select, textarea, summary, button, [contenteditable]";
+
 window.addEventListener("keydown", (event) => {
-  if (event.code === "Space" && !(event.target instanceof HTMLElement && event.target.closest("dialog"))) {
+  if (
+    event.code === "Space" &&
+    !(event.target instanceof HTMLElement && event.target.closest(SPACE_GUARD_SELECTOR))
+  ) {
     event.preventDefault();
     togglePlay();
   }
