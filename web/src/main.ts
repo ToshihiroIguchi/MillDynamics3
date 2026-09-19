@@ -2,6 +2,7 @@ import { CanvasRenderer, type LiftersRenderState } from "./render/canvas";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 import { createInitialState } from "./state";
 import { createHud } from "./ui/hud";
+import { createMetricsPanel } from "./ui/metricsPanel";
 import { createParamsModal } from "./ui/paramsModal";
 import { createToolbar } from "./ui/toolbar";
 
@@ -73,6 +74,7 @@ worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
   switch (msg.type) {
     case "ready":
       state.params = msg.params;
+      metricsPanel.reset();
       break;
     case "frame":
       applyFrame(msg);
@@ -139,6 +141,12 @@ sceneWrap.appendChild(toolbarEl);
 const hud = createHud();
 sceneWrap.appendChild(hud.el);
 
+const panelEl = document.querySelector<HTMLElement>("#metrics-panel");
+if (!panelEl) {
+  throw new Error("Missing #metrics-panel element");
+}
+const metricsPanel = createMetricsPanel(panelEl);
+
 window.addEventListener("keydown", (event) => {
   if (event.code === "Space" && !(event.target instanceof HTMLElement && event.target.closest("dialog"))) {
     event.preventDefault();
@@ -173,6 +181,7 @@ function frameLoop(nowMs: number): void {
     fluidSurface: state.fluidSurface,
   });
   hud.update(state, smoothedFps);
+  metricsPanel.update(state, smoothedFps, nowMs);
   requestAnimationFrame(frameLoop);
 }
 requestAnimationFrame(frameLoop);
