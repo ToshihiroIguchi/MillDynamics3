@@ -19,10 +19,14 @@
 //! material along the wall. [`to_vertical_degrees`] converts between the two -- see its doc
 //! comment for the derivation of which rotation direction/sign makes the numbers match.
 //!
-//! **Power draw** (`P = sum(F_wall * v_wall)`, docs/PLAN.md ss3.5) is deferred: it needs new
-//! wall-impulse instrumentation inside `dem.rs` itself (this project's reviewed numerical core,
-//! see CLAUDE.md's model policy), which is out of scope for this pass. See the `TODO(power-draw)`
-//! note on [`Metrics`].
+//! **Grinding/solver diagnostics** (power draw, torque, collision rate/energy histogram,
+//! dissipated power, coupling-clamp hits, coarse-graining factor, viscosity solver iterations,
+//! mean shear rate, tunnelling-risk displacement) are not derivable from `(balls, fluid, drum)`
+//! alone -- they come from [`crate::dem::DemStepStats`]/[`crate::pbf::FluidStepStats`], EMA-
+//! smoothed across sub-steps by [`crate::Simulation`], or from [`crate::params::Params`] itself
+//! (ball counts). [`compute`] therefore only fills in the fields derivable from its own
+//! arguments (defaulting the rest to zero/empty); [`crate::Simulation::metrics`] fills in the
+//! remainder from its own accumulated state after calling [`compute`].
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -57,11 +61,20 @@ const POOL_DEPTH_BAND_RAD: f32 = 5.0 * PI / 180.0;
 /// not a rendering-quality field like [`crate::surface`]'s `GRID_SIZE`.
 const MIXING_GRID_SIZE: usize = 16;
 
+/// Impact-energy histogram (docs/PLAN.md ss3.5): `bin_edges_j.len() == counts_per_s.len() + 1`,
+/// log-spaced from [`crate::dem::IMPACT_ENERGY_MIN_J`] to [`crate::dem::IMPACT_ENERGY_MAX_J`]
+/// (see [`crate::dem::impact_energy_bin_edges`]). `counts_per_s[k]` is the EMA-smoothed impact
+/// rate (impacts/s per metre of mill depth) whose energy fell in
+/// `[bin_edges_j[k], bin_edges_j[k+1])`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ImpactEnergyHistogram {
+    pub bin_edges_j: Vec<f32>,
+    pub counts_per_s: Vec<f32>,
+}
+
 /// Aggregated derived metrics for one simulation state. See the module doc comment for the angle
-/// convention every angle field here uses.
-///
-/// TODO(power-draw): estimated power draw (`P = sum(F_wall * v_wall)`, docs/PLAN.md ss3.5) is
-/// deferred pending wall-impulse instrumentation in `dem.rs` itself; no field for it exists yet.
+/// convention every angle field here uses, and for which fields [`compute`] fills in versus which
+/// [`crate::Simulation::metrics`] fills in afterward.
 #[derive(Debug, Clone, Serialize)]
 pub struct Metrics {
     /// Toe (leading edge) angle of the ball charge's outer layer, or `None` if there are too few
@@ -103,6 +116,57 @@ pub struct Metrics {
     /// so a caller (e.g. the HUD) can convert `*_angle_rad` fields to the "from vertical"
     /// convention via [`to_vertical_degrees`] without needing separate access to `Params`.
     pub drum_omega_rad_s: f32,
+    /// Number of fluid (slurry) particles currently simulated. `0` if `slurry.enabled` was
+    /// `false` at construction time. See [`compute`].
+    pub fluid_particle_count: u32,
+    /// Mean fluid particle density error, as a fraction of the rest density (companion to
+    /// [`max_fluid_density_error_fraction`]'s worst-case reading). `None` if the fluid
+    /// population is empty. See [`mean_fluid_density_error_fraction`].
+    pub mean_fluid_density_error_fraction: Option<f32>,
+
+    // --- Fields below are zero/empty from `compute` alone; `Simulation::metrics` fills them in
+    // from its own accumulated state (EMA-smoothed grinding/solver diagnostics) or from `Params`
+    // (ball-count/coarse-graining fields) -- see the module doc comment.
+    /// EMA-smoothed mill power draw (W per metre of mill depth). See
+    /// [`crate::Simulation::power_draw_w`].
+    pub power_draw_w: f32,
+    /// EMA-smoothed drum torque (N*m per metre of mill depth). See
+    /// [`crate::Simulation::torque_nm`].
+    pub torque_nm: f32,
+    /// EMA-smoothed ball-ball + ball-wall collision rate (impacts/s per metre of mill depth).
+    /// See [`crate::Simulation::collision_rate_per_s`].
+    pub collision_rate_per_s: f32,
+    /// EMA-smoothed net kinetic-energy dissipation rate (W per metre of mill depth). See
+    /// [`crate::Simulation::dissipated_power_w`].
+    pub dissipated_power_w: f32,
+    /// Impact-energy histogram. See [`crate::Simulation::impact_energy_counts_per_s`].
+    pub impact_energy_histogram: ImpactEnergyHistogram,
+    /// Number of balls whose fluid-coupling impulse was clamped over the most recent
+    /// [`crate::Simulation::step`] call. A healthy run stays at (or very near) `0` once the
+    /// charge has settled. See [`crate::coupling::CouplingImpulses::clamp_hits`].
+    pub coupling_clamp_hits: u32,
+    /// Diameter actually simulated per ball (m), post coarse-graining if any. See
+    /// [`crate::params::EffectiveMedia::diameter_m`].
+    pub effective_ball_diameter_m: f32,
+    /// Number of DEM ball particles actually simulated. See
+    /// [`crate::params::EffectiveMedia::ball_count`].
+    pub simulated_ball_count: u32,
+    /// True (uncoarsened) ball count implied by the mill/media parameters. See
+    /// [`crate::params::Params::true_ball_count`].
+    pub true_ball_count: u32,
+    /// Coarse-graining scale factor `k` (`>= 1.0`; `1.0` = no coarse-graining). See
+    /// [`crate::params::EffectiveMedia::scale_factor`].
+    pub coarse_graining_factor: f32,
+    /// Largest per-ball `|v| * dt / (2 * radius)` over the most recent
+    /// [`crate::Simulation::step`] call -- a rough tunnelling-risk indicator (docs/PLAN.md ss3.2).
+    /// See [`crate::dem::DemStepStats::max_substep_displacement_over_diameter`].
+    pub max_substep_displacement_over_diameter: f32,
+    /// Mean shear rate (1/s) over the fluid population on the most recently completed sub-step.
+    /// See [`crate::Simulation::mean_shear_rate_per_s`].
+    pub mean_shear_rate_per_s: f32,
+    /// Conjugate-gradient iterations the implicit viscosity solve used on the most recently
+    /// completed sub-step. See [`crate::Simulation::viscosity_iterations`].
+    pub viscosity_solver_iterations: u32,
 }
 
 /// Computes every metric in this module for the given simulation state. `drum` should be built
@@ -127,6 +191,7 @@ pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f
     let total_kinetic_energy_j = total_kinetic_energy_j(balls);
     let max_ball_overlap_fraction = max_ball_overlap_fraction(balls);
     let max_fluid_density_error_fraction = max_fluid_density_error_fraction(fluid);
+    let mean_fluid_density_error_fraction = mean_fluid_density_error_fraction(fluid);
 
     Metrics {
         toe_angle_rad,
@@ -142,6 +207,23 @@ pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f
         max_ball_overlap_fraction,
         max_fluid_density_error_fraction,
         drum_omega_rad_s: drum.omega,
+        fluid_particle_count: fluid.len() as u32,
+        mean_fluid_density_error_fraction,
+        // Filled in by `Simulation::metrics` -- see the module doc comment and this struct's own
+        // doc comment for why `compute` cannot derive these from `(balls, fluid, drum)` alone.
+        power_draw_w: 0.0,
+        torque_nm: 0.0,
+        collision_rate_per_s: 0.0,
+        dissipated_power_w: 0.0,
+        impact_energy_histogram: ImpactEnergyHistogram::default(),
+        coupling_clamp_hits: 0,
+        effective_ball_diameter_m: 0.0,
+        simulated_ball_count: 0,
+        true_ball_count: 0,
+        coarse_graining_factor: 1.0,
+        max_substep_displacement_over_diameter: 0.0,
+        mean_shear_rate_per_s: 0.0,
+        viscosity_solver_iterations: 0,
     }
 }
 
@@ -478,6 +560,20 @@ pub fn max_fluid_density_error_fraction(fluid: &FluidParticles) -> Option<f32> {
     Some(max_err)
 }
 
+/// Mean fluid particle density error, as a fraction of the rest density (companion to
+/// [`max_fluid_density_error_fraction`]'s worst-case reading -- a settled interior can have a
+/// small mean error even while one boundary/free-surface particle drives up the max). `None` if
+/// the fluid population is empty.
+pub fn mean_fluid_density_error_fraction(fluid: &FluidParticles) -> Option<f32> {
+    if fluid.is_empty() || fluid.rest_density <= 0.0 {
+        return None;
+    }
+    let density = fluid.densities();
+    let rest = fluid.rest_density;
+    let sum_err: f32 = density.iter().map(|&rho| (rho - rest).abs() / rest).sum();
+    Some(sum_err / density.len() as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +768,37 @@ mod tests {
         assert_eq!(metrics.total_kinetic_energy_j, 0.0);
         assert_eq!(metrics.max_ball_overlap_fraction, 0.0);
         assert_eq!(metrics.max_fluid_density_error_fraction, None);
+        assert_eq!(metrics.fluid_particle_count, 0);
+        assert_eq!(metrics.mean_fluid_density_error_fraction, None);
+        // Grinding/solver diagnostics are `compute`'s own zero/empty defaults here (this test
+        // calls `compute` directly, not `Simulation::metrics`, which is what fills them in).
+        assert_eq!(metrics.power_draw_w, 0.0);
+        assert_eq!(metrics.coupling_clamp_hits, 0);
+        assert!(metrics.impact_energy_histogram.bin_edges_j.is_empty());
+        assert!(metrics.impact_energy_histogram.counts_per_s.is_empty());
+    }
+
+    #[test]
+    fn mean_fluid_density_error_is_no_larger_than_the_max() {
+        use crate::params::SlurryParams;
+
+        let slurry = SlurryParams {
+            fill_fraction: 0.2,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+        let drum = Drum::new(radius_m, 0.0, crate::params::LiftersParams::default());
+        for _ in 0..120 {
+            fluid.step(&drum, 0.0, &slurry, 3, 1.0 / 240.0);
+        }
+
+        let mean = mean_fluid_density_error_fraction(&fluid).expect("expected a mean reading");
+        let max = max_fluid_density_error_fraction(&fluid).expect("expected a max reading");
+        assert!(mean.is_finite() && mean >= 0.0);
+        assert!(
+            mean <= max + 1e-6,
+            "mean density error {mean} should not exceed the max {max}"
+        );
     }
 }

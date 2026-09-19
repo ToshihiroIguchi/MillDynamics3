@@ -314,6 +314,11 @@ pub struct FluidStepStats {
     pub viscosity_iterations: u32,
     /// Mean shear rate (1/s) over the fluid population this sub-step, from [`mean_shear_rate`].
     pub mean_shear_rate_per_s: f32,
+    /// Copy of this sub-step's [`crate::coupling::CouplingImpulses::clamp_hits`], surfaced here
+    /// too (alongside the other solver diagnostics `step_coupled` already returns) so
+    /// [`crate::Simulation`] does not need a third return value from `step_coupled` just for one
+    /// `u32`.
+    pub coupling_clamp_hits: u32,
 }
 
 /// Clamp magnitude for the coupling impulse applied to a ball over one sub-step (docs/PLAN.md
@@ -824,11 +829,13 @@ impl FluidParticles {
                 *angular = angular.clamp(-angular_clamp, angular_clamp);
             }
         }
+        let coupling_clamp_hits = coupling.clamp_hits;
         (
             coupling,
             FluidStepStats {
                 viscosity_iterations,
                 mean_shear_rate_per_s,
+                coupling_clamp_hits,
             },
         )
     }

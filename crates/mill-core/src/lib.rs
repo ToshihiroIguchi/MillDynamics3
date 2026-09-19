@@ -67,6 +67,11 @@ pub struct Simulation {
     /// call to [`Simulation::step`] (reset at the start of each call, not EMA-smoothed -- a
     /// tunnelling-risk spike is exactly the kind of transient an average would hide).
     max_substep_displacement_over_diameter: f32,
+    /// Sum of [`pbf::FluidStepStats::coupling_clamp_hits`] over every sub-step of the most recent
+    /// [`Simulation::step`] call (reset at the start of each call, not EMA-smoothed -- see
+    /// [`coupling::CouplingImpulses::clamp_hits`]'s doc comment for why this is meant to read as
+    /// "did this happen at all just now", not a smoothed rate).
+    coupling_clamp_hits: u32,
 }
 
 impl Simulation {
@@ -112,6 +117,7 @@ impl Simulation {
             dissipated_power_w: 0.0,
             impact_energy_counts_per_s: [0.0; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
             max_substep_displacement_over_diameter: 0.0,
+            coupling_clamp_hits: 0,
         })
     }
 
@@ -202,6 +208,13 @@ impl Simulation {
         self.max_substep_displacement_over_diameter
     }
 
+    /// Sum of [`pbf::FluidStepStats::coupling_clamp_hits`] over every sub-step of the most recent
+    /// [`Simulation::step`] call (not EMA-smoothed, see
+    /// [`coupling::CouplingImpulses::clamp_hits`]'s doc comment for why).
+    pub fn coupling_clamp_hits(&self) -> u32 {
+        self.coupling_clamp_hits
+    }
+
     /// Extracts the fluid's free-surface contour(s) at the current state (docs/PLAN.md ss3.5).
     /// Recomputed on demand each call -- callers should not call this more often than needed for
     /// rendering.
@@ -214,16 +227,39 @@ impl Simulation {
         surface::extract_surface(&self.fluid, &drum, self.drum_angle)
     }
 
-    /// Computes derived metrics (toe/shoulder, pool extent, mixing index, debug checks, docs/
-    /// PLAN.md ss3.5) at the current state. Recomputed on demand each call -- callers should not
-    /// call this more often than needed (e.g. once per rendered HUD update).
+    /// Computes derived metrics (toe/shoulder, pool extent, mixing index, grinding/solver
+    /// diagnostics, debug checks, docs/PLAN.md ss3.5) at the current state. The geometric/
+    /// physical fields (toe/shoulder, pool, mixing, ...) are recomputed on demand from the
+    /// current ball/fluid state each call; the grinding/solver diagnostics (power draw,
+    /// collision histogram, coarse-graining, ...) are this instance's own accumulated state at
+    /// call time (see [`metrics::Metrics`]'s doc comment). Callers should not call this more
+    /// often than needed (e.g. once per rendered HUD update).
     pub fn metrics(&self) -> metrics::Metrics {
         let drum = Drum::new(
             self.params.mill.radius_m(),
             self.params.mill.omega(),
             self.params.lifters,
         );
-        metrics::compute(&self.dem.balls, &self.fluid, &drum, self.drum_angle)
+        let mut m = metrics::compute(&self.dem.balls, &self.fluid, &drum, self.drum_angle);
+
+        let effective = self.params.effective_media();
+        m.power_draw_w = self.power_draw_w;
+        m.torque_nm = self.torque_nm;
+        m.collision_rate_per_s = self.collision_rate_per_s;
+        m.dissipated_power_w = self.dissipated_power_w;
+        m.impact_energy_histogram = metrics::ImpactEnergyHistogram {
+            bin_edges_j: dem::impact_energy_bin_edges().to_vec(),
+            counts_per_s: self.impact_energy_counts_per_s.to_vec(),
+        };
+        m.coupling_clamp_hits = self.coupling_clamp_hits;
+        m.effective_ball_diameter_m = effective.diameter_m;
+        m.simulated_ball_count = effective.ball_count;
+        m.true_ball_count = self.params.true_ball_count().round().max(0.0) as u32;
+        m.coarse_graining_factor = effective.scale_factor;
+        m.max_substep_displacement_over_diameter = self.max_substep_displacement_over_diameter;
+        m.mean_shear_rate_per_s = self.fluid_stats.mean_shear_rate_per_s;
+        m.viscosity_solver_iterations = self.fluid_stats.viscosity_iterations;
+        m
     }
 
     /// Advances the simulation by `dt` seconds of simulation time, split into
@@ -239,6 +275,7 @@ impl Simulation {
         let pbf_iterations = self.params.simulation.pbf_iterations;
 
         self.max_substep_displacement_over_diameter = 0.0;
+        self.coupling_clamp_hits = 0;
         for _ in 0..n_substeps {
             let drum = Drum::new(radius_m, omega, lifters);
             let (fluid_stats, dem_stats) = coupling::step(
@@ -252,6 +289,7 @@ impl Simulation {
                 pbf_iterations,
                 sub_dt,
             );
+            self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
             self.fluid_stats = fluid_stats;
             self.update_grinding_stats(&dem_stats, sub_dt, omega);
             self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
@@ -565,5 +603,61 @@ mod tests {
             "centrifuging should draw less power than cascading: \
              cascading={cascading_power} centrifuging={centrifuging_power}"
         );
+    }
+
+    #[test]
+    fn metrics_surfaces_grinding_and_coarse_graining_fields_after_stepping() {
+        // `Simulation::metrics()` must fill in every field `metrics::compute` itself cannot
+        // derive (see that struct's doc comment): ball-count/coarse-graining fields from
+        // `Params`, and the EMA-smoothed grinding/solver diagnostics from this instance's own
+        // accumulated state. Default params coarse-grain heavily (see
+        // `params::tests::effective_media_coarse_grains_when_true_count_is_large`), so this also
+        // exercises that path.
+        let mut params = Params::default();
+        params.simulation.max_balls = 150;
+        let mut sim = Simulation::new(params).unwrap();
+
+        for _ in 0..(3 * 60) {
+            sim.step(1.0 / 60.0);
+        }
+        let m = sim.metrics();
+
+        assert!(
+            m.true_ball_count > m.simulated_ball_count,
+            "expected coarse-graining to have kicked in: true={} sim={}",
+            m.true_ball_count,
+            m.simulated_ball_count
+        );
+        assert!(m.coarse_graining_factor > 1.0);
+        assert!(m.effective_ball_diameter_m > 0.0);
+        assert_eq!(m.simulated_ball_count, sim.balls().len() as u32);
+        assert_eq!(m.fluid_particle_count, sim.fluid().len() as u32);
+
+        assert!(m.power_draw_w.is_finite());
+        assert!(m.torque_nm.is_finite());
+        assert!(m.collision_rate_per_s.is_finite() && m.collision_rate_per_s >= 0.0);
+        assert!(m.dissipated_power_w.is_finite());
+        assert!(m.mean_shear_rate_per_s.is_finite() && m.mean_shear_rate_per_s >= 0.0);
+
+        assert_eq!(
+            m.impact_energy_histogram.bin_edges_j.len(),
+            dem::IMPACT_ENERGY_HISTOGRAM_BINS + 1
+        );
+        assert_eq!(
+            m.impact_energy_histogram.counts_per_s.len(),
+            dem::IMPACT_ENERGY_HISTOGRAM_BINS
+        );
+        assert!(
+            m.impact_energy_histogram
+                .bin_edges_j
+                .windows(2)
+                .all(|w| w[1] > w[0]),
+            "bin edges should be strictly increasing"
+        );
+
+        // Round-trips through JSON cleanly (this is exactly the wasm/frontend boundary).
+        let json = serde_json::to_string(&m).expect("Metrics should serialize");
+        assert!(json.contains("power_draw_w"));
+        assert!(json.contains("impact_energy_histogram"));
     }
 }
