@@ -50,6 +50,29 @@ impl Simulation {
         self.inner.step(dt);
     }
 
+    /// The fixed sub-step size (s) this simulation's `simulation.substeps` implies at the
+    /// project's nominal 60 Hz target frame rate. See `mill_core::Simulation::fixed_sub_dt`.
+    #[wasm_bindgen(js_name = fixedSubDt)]
+    pub fn fixed_sub_dt(&self) -> f32 {
+        self.inner.fixed_sub_dt()
+    }
+
+    /// Advances the simulation by exactly one fixed sub-step (`fixedSubDt()`). See
+    /// `mill_core::Simulation::step_fixed` for the accumulator-loop calling convention this is
+    /// meant for (docs/PLAN.md ss4.1) and why `resetFrameStats` is a separate call.
+    #[wasm_bindgen(js_name = stepFixed)]
+    pub fn step_fixed(&mut self) {
+        self.inner.step_fixed();
+    }
+
+    /// Resets the per-frame diagnostics driving a `stepFixed` accumulator loop should call once
+    /// per rendered frame, before that frame's `stepFixed` calls. See
+    /// `mill_core::Simulation::reset_frame_stats`.
+    #[wasm_bindgen(js_name = resetFrameStats)]
+    pub fn reset_frame_stats(&mut self) {
+        self.inner.reset_frame_stats();
+    }
+
     #[wasm_bindgen(js_name = drumAngle)]
     pub fn drum_angle(&self) -> f32 {
         self.inner.drum_angle()

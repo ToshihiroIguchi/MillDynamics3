@@ -222,17 +222,20 @@ mod tests {
     }
 
     #[test]
-    fn single_overlapping_fluid_particle_gives_the_ball_the_opposite_reaction() {
+    fn an_approaching_overlapping_fluid_particle_gives_the_ball_the_opposite_reaction() {
         // Isolates the ball-overlap projection mechanism (docs/PLAN.md ss3.4 step 1) from every
         // other effect (gravity, wall contact, fluid-fluid interaction, viscosity) that would
         // otherwise contaminate a whole-system momentum comparison: one fluid particle placed
         // just outside a ball's centre (so the push direction is well-defined and purely
-        // horizontal) should be pushed away by exactly the amount that gives the ball the equal
-        // and opposite reaction (Newton's third law), independent of gravity (which only acts
-        // vertically here, on the fluid's `y` and not measured against the ball at all since
-        // `dem` is never stepped in this test). Uses a small overlap (0.0025 m) so the resulting
-        // force stays comfortably under docs/PLAN.md ss3.4's stability clamp, which would
-        // otherwise break the exact cancellation this test checks for.
+        // horizontal), *approaching* the ball, should have that approach arrested by exactly the
+        // amount that gives the ball the equal and opposite reaction (Newton's third law),
+        // independent of gravity (which only acts vertically here, on the fluid's `y` and not
+        // measured against the ball at all since `dem` is never stepped in this test). Uses a
+        // small overlap (0.0025 m) and a modest approach speed (0.05 m/s, well under the
+        // 0.6 m/s the position correction alone implies at this `dt` -- see this step's doc
+        // comment for why the *momentum* exchanged is bounded by the smaller of the two) so the
+        // resulting impulse stays comfortably under docs/PLAN.md ss3.4's stability clamp, which
+        // would otherwise break the exact cancellation this test checks for.
         let radius_m = 1.0;
         let drum = still_drum(radius_m);
         let slurry = SlurryParams {
@@ -248,7 +251,11 @@ mod tests {
         let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 200, &[], 0.0);
         assert!(fluid.is_empty());
         fluid.x.push(Vec2::new(0.6, 0.0));
-        fluid.v.push(Vec2::ZERO);
+        // Moving toward the ball (at x=0.5): a purely *resting* overlap (zero approach velocity)
+        // now correctly exchanges no momentum at all, only a position correction (that's the
+        // fix this test exercises -- see this method's step 3.5 doc comment), so this test needs
+        // a genuine approach to see a reaction.
+        fluid.v.push(Vec2::new(-0.05, 0.0));
         fluid.dye.push(0.0);
 
         let effective = EffectiveMedia {
@@ -267,7 +274,11 @@ mod tests {
 
         let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
 
-        let fluid_momentum_gained = fluid.particle_mass * fluid.v[0];
+        // The particle's *actual* momentum change is only the arrested-approach part (see step
+        // 3.5's doc comment): its velocity right after this call already has the purely
+        // geometric part of the push subtracted back out, so comparing against its velocity
+        // *before* this call (not zero) is what isolates the genuine momentum exchange.
+        let fluid_momentum_gained = fluid.particle_mass * (fluid.v[0] - Vec2::new(-0.05, 0.0));
         let ball_impulse = impulses.impulses[0]; // already an impulse, see CouplingImpulses's doc comment
                                                  // Only the x-component is meaningful here: the push is purely horizontal (particle
                                                  // offset from the ball along x only), while gravity contributes only to the fluid
@@ -282,6 +293,14 @@ mod tests {
         assert!(
             ball_impulse.x.abs() > 1e-9,
             "expected a non-zero reaction on the ball"
+        );
+        // And it must be bounded by the approach speed being arrested, not by the (much larger)
+        // position correction alone -- the whole point of this fix.
+        let max_expected_impulse = fluid.particle_mass * 0.05;
+        assert!(
+            ball_impulse.x.abs() <= max_expected_impulse * 1.01,
+            "reaction exceeds what arresting the particle's actual approach speed justifies: \
+             ball_impulse={ball_impulse:?}, max_expected={max_expected_impulse}"
         );
     }
 
@@ -578,14 +597,16 @@ mod tests {
 
     #[test]
     fn cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_50_pa_s() {
-        // This project's default slurry viscosity. Measured ~6.4% empirically; bounded well
-        // above the ~3.4% baseline (pre-M6, at the old 0.5 Pa*s default) to allow for step 6.5's
-        // drag correction, which is legitimately larger (though still `a <= 1` bounded, see
-        // that step's doc comment) once the ball<->fluid relaxation factor `beta` approaches
-        // saturation at this viscosity.
+        // This project's default slurry viscosity. Measured ~5.5% empirically (down from ~6.4%
+        // pre-fix: step 3.5's overlap push is now itself momentum-bounded -- see that step's doc
+        // comment -- so essentially all remaining clamp hits are step 6.5's drag correction,
+        // which is legitimately larger (though still `a <= 1` bounded, see that step's doc
+        // comment) once the ball<->fluid relaxation factor `beta` approaches saturation at this
+        // viscosity). Bounded at 10%, comfortably above the measured rate but tight enough to
+        // catch a real regression.
         let clamp_rate = cascading_charge_clamp_rate(50.0);
         assert!(
-            clamp_rate < 0.15,
+            clamp_rate < 0.10,
             "coupling clamp fired too often once settled at 50 Pa*s (rate={clamp_rate})"
         );
     }
@@ -596,11 +617,123 @@ mod tests {
         // already essentially saturated at 50 Pa*s for this project's ball sizes (`tau << dt`),
         // so the clamp rate here should be close to the 50 Pa*s case, not worse -- confirming
         // step 6.5's fix actually saturates rather than continuing to blow up with `mu`, unlike
-        // the pre-fix per-particle blend (which reached ~50% at 200 Pa*s).
+        // the pre-fix per-particle blend (which reached ~50% at 200 Pa*s). Measured ~6.5%
+        // empirically; see the 50 Pa*s sibling test for the same bound rationale.
         let clamp_rate = cascading_charge_clamp_rate(200.0);
         assert!(
-            clamp_rate < 0.15,
+            clamp_rate < 0.10,
             "coupling clamp fired too often once settled at 200 Pa*s (rate={clamp_rate})"
         );
+    }
+
+    #[test]
+    fn a_coupled_charge_in_a_still_drum_settles_with_slurry_on() {
+        // Direct regression test for the *coupling* half of the fluidised-charge bug (step 3.5's
+        // now-momentum-bounded overlap push, docs/PHYSICS.md): a ball charge plus slurry, both
+        // released in a stationary drum, must settle and stay settled -- not have step 3.5 keep
+        // pumping momentum into the balls (or the fluid) from a resting overlap. Mirrors
+        // `dem::tests::a_charge_in_a_still_drum_settles_and_stays_dense`, but through the full
+        // coupled solver with slurry enabled, so a regression in the coupling specifically (as
+        // opposed to the DEM contact solver alone) would show up here even if that sibling test
+        // stays green.
+        let radius_m = 0.5;
+        let drum = still_drum(radius_m);
+        let media = MediaParams {
+            ball_diameter_m: 0.02,
+            fill_fraction: 0.25,
+            ..MediaParams::default()
+        };
+        let slurry = SlurryParams {
+            fill_fraction: 0.15,
+            viscosity_pa_s: 50.0,
+            ..SlurryParams::default()
+        };
+        let dt = 1.0 / 240.0;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: media.ball_diameter_m,
+            diameter_m: media.ball_diameter_m,
+            density_kg_m3: media.density_kg_m3,
+            ball_count: 150,
+            scale_factor: 1.0,
+        };
+        let mut dem = DemState::new(&effective, radius_m, 1);
+        let mut fluid =
+            FluidParticles::seed_lattice(&slurry, radius_m, 20, &dem.balls.x, dem.balls.radius);
+
+        // Settle (not checked -- the fresh lattice's initial landing is a genuine, extreme
+        // transient, same rationale as the DEM-only sibling test).
+        for _ in 0..(3 * 240) {
+            step(&mut dem, &mut fluid, &drum, 0.0, &media, &slurry, 4, 3, dt);
+        }
+
+        // Measurement phase: the charge must be quiet and dense, and the coupling must be quiet
+        // too (no ongoing clamp hits from a resting overlap being treated as a fresh contact).
+        let n_measurement_steps = 3 * 240;
+        let mut clamp_hits_total = 0u32;
+        for _ in 0..n_measurement_steps {
+            let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &dem.balls);
+            clamp_hits_total += impulses.clamp_hits;
+            dem.step_with_external_forces(&drum, 0.0, &media, 4, dt, Some(&impulses));
+        }
+
+        let r = dem.balls.radius;
+        let ke: f32 = dem
+            .balls
+            .v
+            .iter()
+            .map(|v| 0.5 * dem.balls.mass * v.length_squared())
+            .sum();
+        let v_rms = (2.0 * ke / (dem.balls.mass * dem.balls.len() as f32)).sqrt();
+        assert!(
+            v_rms < 0.15,
+            "settled coupled charge should be nearly at rest, got v_rms={v_rms} m/s"
+        );
+
+        let cell_size = (2.0 * r * 1.05).max(1e-6);
+        let grid = crate::grid::UniformGrid::build(&dem.balls.x, cell_size);
+        let mut max_overlap = 0.0f32;
+        grid.for_each_candidate_pair(|i, j| {
+            let dist = (dem.balls.x[i as usize] - dem.balls.x[j as usize]).length();
+            let overlap = (2.0 * r - dist).max(0.0);
+            max_overlap = max_overlap.max(overlap / r);
+        });
+        assert!(
+            max_overlap < 0.4,
+            "settled coupled charge has an implausibly deep overlap (charge may have inflated): \
+             overlap={max_overlap}"
+        );
+
+        let min_dist_from_center = dem
+            .balls
+            .x
+            .iter()
+            .map(|p| p.length())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            min_dist_from_center > 0.05 * radius_m,
+            "settled coupled charge reaches too close to the drum centre (looks inflated): \
+             min_dist_from_center={min_dist_from_center}, radius_m={radius_m}"
+        );
+
+        let ball_substeps = dem.balls.len() as f32 * n_measurement_steps as f32;
+        let clamp_rate = clamp_hits_total as f32 / ball_substeps;
+        assert!(
+            clamp_rate < 0.02,
+            "coupling clamp fired too often for a settled, still charge (rate={clamp_rate}): \
+             a resting overlap should exchange no momentum at all, so should almost never need \
+             clamping (contrast the cascading sibling tests, where genuine ongoing impacts make \
+             a nonzero rate expected)"
+        );
+
+        for &fp in &fluid.x {
+            for &bp in &dem.balls.x {
+                let dist = (fp - bp).length();
+                assert!(
+                    dist >= r * 0.9,
+                    "fluid particle inside a ball: dist={dist}, r={r}"
+                );
+            }
+        }
     }
 }

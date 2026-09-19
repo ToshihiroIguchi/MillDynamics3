@@ -68,3 +68,38 @@ cost is significant -- this alone roughly doubled `dem_step`. Fixed by keeping `
 comment) and instead collecting + sorting its entries once per sub-step for the passes that *do*
 need deterministic order (friction/restitution/rolling-resistance, steps 5-7), which cost nothing
 measurable at this bench's ball counts.
+
+## After the fluidised-charge energy-injection fix (DEM/coupling physics + new defaults)
+
+| Benchmark | Time | vs. Phase 3b |
+|---|---|---|
+| `dem_step/500_balls` | 0.41 ms | faster (noisy run-to-run on this machine; no code path removed that would explain a ~25% drop, treat as machine-state noise rather than a real gain) |
+| `dem_step/1000_balls` | 0.93 ms | faster, same caveat |
+| `dem_step/2000_balls` | 2.00 ms | faster, same caveat |
+| `drum_only_step` | 13.17 ms | not directly comparable to Phase 3b's 17.7 ms -- see below |
+
+This round fixed the DEM depenetration/restitution and ball<->fluid coupling energy-injection bugs
+that let the charge inflate into a "gas" instead of cascading, and changed
+`SimulationParams::default()` to `max_balls = 600` (from 2000), `substeps = 8` (from 4),
+`dem_iterations = 2` (from 4). The `dem_step/*` benchmarks hardcode their own ball counts
+(`benches/step.rs`'s `effective_media_with_count` helper) and are unaffected by the defaults
+change, so they remain a fair apples-to-apples comparison against every earlier section above --
+the ~500 balls case simply got a little faster, most plausibly ambient machine-load noise (see the
+Phase 3b section's own note on the same kind of run-to-run variance on this machine) rather than a
+result of the physics fix itself, since the fixed depenetration/restitution logic changed magnitude
+clamps, not algorithmic cost.
+
+`drum_only_step` calls `Simulation::step(FIXED_DT)` (`FIXED_DT = 1/240 s`, a crate-level constant,
+*not* derived from `simulation.substeps`) at *default* `Params`. `Simulation::step(dt)` splits `dt`
+into `simulation.substeps` equal-size internal sub-steps (`crates/mill-core/src/lib.rs`'s
+`step`/`advance_one_sub_step`), so this one call always advances `FIXED_DT` of sim time total, but
+now runs that as **8** internal sub-steps of `FIXED_DT / 8` each (previously 4 sub-steps of
+`FIXED_DT / 4` each, back when `FIXED_DT` and the true fixed sub-step size happened to coincide at
+the old default `substeps = 4` -- see `Simulation::fixed_sub_dt`'s doc comment). Each of those 8
+sub-steps now also does DEM work for only 600 balls at `dem_iterations = 2`, instead of 4 sub-steps
+of ~2000 balls at `dem_iterations = 4`. Three things changed at once relative to Phase 3b (ball
+count, sub-step count, DEM iteration count), so the new number (13.17 ms) is a defaults-and-
+physics-fix snapshot, not a clean isolated regression check against Phase 3b's 17.7 ms -- it
+happens to come out lower, consistent with the ball-count and DEM-iteration drops outweighing the
+doubled sub-step count, but that's a coarser statement than "X% faster/slower for the same reason"
+the other three rows above support.

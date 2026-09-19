@@ -333,15 +333,19 @@ pub struct FluidStepStats {
 /// and no longer need an artificially tight ceiling.
 ///
 /// `60x` (raised from an intermediate `20x`) accounts for a real difference in how the two
-/// coupling mechanisms this clamp bounds scale with `dt`. Step 3.5's overlap-push impulse is
-/// `mass * push / dt` for a *position* correction capped at a fixed distance (`0.5 * radius`),
-/// so it does not shrink as fast as `dt` does. Step 6.5's drag correction (see that step's own
-/// doc comment) is a *velocity*-matching relaxation, `impulse = mass * a * (v_bar - v_b)` with
-/// `a <= 1` bounded but otherwise `dt`-independent once the relaxation factor `beta` saturates
-/// (`dt >= tau`, i.e. `viscosity_pa_s` above roughly 10 Pa*s at this project's ball sizes) --
-/// physically correct (achieving no-slip within one sub-step is what "highly viscous" means),
-/// but larger relative to a clamp sized purely against step 3.5's mechanism. `60x` keeps
-/// clamping rare (single-digit percent of ball-substeps, see
+/// coupling mechanisms this clamp bounds scale. Step 3.5's overlap-push impulse is now itself
+/// momentum-bounded (see that step's doc comment: it exchanges only the momentum needed to
+/// arrest a particle's actual approach velocity, not `mass * push / dt` for the *position*
+/// correction's full, dt-scaled magnitude as an earlier version did) and so rarely approaches
+/// this clamp at all any more. Step 6.5's drag correction (see that step's own doc comment) is a
+/// *velocity*-matching relaxation, `impulse = mass * a * (v_bar - v_b)` with `a <= 1` bounded but
+/// otherwise `dt`-independent once the relaxation factor `beta` saturates (`dt >= tau`, i.e.
+/// `viscosity_pa_s` above roughly 10 Pa*s at this project's ball sizes) -- physically correct
+/// (achieving no-slip within one sub-step is what "highly viscous" means, and can legitimately
+/// need a large single-sub-step velocity change when a small ball is embedded in a much larger
+/// entrained fluid mass moving fast relative to it), so this clamp still needs to stay generous
+/// enough for that mechanism specifically, not just for step 3.5's (now much smaller) needs.
+/// `60x` keeps clamping rare (single-digit percent of ball-substeps, see
 /// `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled`) at
 /// `viscosity_pa_s` up to 200 while still catching genuine numerical blow-ups; persistent
 /// clamping after the charge has settled still indicates a real problem, not an expected
@@ -614,8 +618,25 @@ impl FluidParticles {
         // --- 3.5 Ball overlap projection (docs/PLAN.md ss3.4 step 1): push fluid particles out
         // of any ball they've penetrated, accumulating the Newton's-third-law reaction on that
         // ball. `balls` is a fixed boundary for this call (see this method's doc comment).
+        //
+        // The position correction (`push`) must satisfy the geometric constraint in full, but the
+        // *momentum* it exchanges with the ball is bounded separately, by how much of the
+        // particle's actual velocity toward the ball's surface this contact needs to arrest --
+        // not by how far the position moved. Without this split, the implicit velocity
+        // `push_mag / dt` (step 5 reconstructs velocity from position) diverges as `dt` shrinks or
+        // as fluid particles pile up against a ball, independent of any real contact speed -- this
+        // was the coupling half of the fluidised-charge energy-injection bug (docs/PHYSICS.md):
+        // a purely resting/settled overlap (particle not actually approaching the ball) must
+        // exchange no momentum at all, only a position correction. Any part of the push beyond the
+        // physically-justified impulse is tracked in `push_velocity_excess` and subtracted back
+        // out of the fluid's own velocity after step 5's position-to-velocity reconstruction.
+        let mut push_velocity_excess = vec![Vec2::ZERO; n];
         if let Some(ball_grid) = &ball_grid {
             let contact_radius = balls.radius + 0.25 * h; // balls.radius + 0.5*dx (dx = h/2)
+                                                          // `i` indexes both `self.x`/`self.v` (mutated in place, alongside `push_velocity_excess`)
+                                                          // and is looked up via the grid, so a plain iterator/enumerate over one collection
+                                                          // doesn't fit cleanly here.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..n {
                 let mut nearby: Vec<u32> = Vec::new();
                 ball_grid.for_each_near(self.x[i], |b| nearby.push(b));
@@ -635,21 +656,29 @@ impl FluidParticles {
                     // Cap the correction at half the ball's radius: when a fluid particle starts
                     // (or, at coarse fluid resolution relative to ball size, persistently ends up)
                     // deep inside `contact_radius`, projecting it out in a single sub-step would
-                    // otherwise produce an outsized reaction impulse, standard practice for
-                    // contact solvers (bounding the per-step correction, not just its downstream
-                    // force/impulse).
+                    // otherwise produce an outsized *position* correction. This bounds the
+                    // geometric correction only; see above for the separate momentum bound.
                     let push_mag = (contact_radius - dist).min(0.5 * balls.radius);
                     let push = push_mag * n_hat;
                     self.x[i] += push;
-                    // `push` is a position correction; the fluid particle's resulting momentum
-                    // change (impulse) is `mass * (push / dt)` (velocity is reconstructed as
-                    // displacement over dt, see step 5 below). Newton's third law gives the ball
-                    // the exact opposite impulse -- see CouplingImpulses's doc comment for why
-                    // this is expressed as an impulse, not a force (no extra `/ dt`).
-                    let reaction_impulse = -(mass * push) / dt;
-                    coupling.impulses[b] += reaction_impulse;
-                    coupling.fluid_momentum_change -= reaction_impulse;
+
                     let lever = n_hat * balls.radius; // approximate contact point on the ball's surface
+                    let v_surface = balls.v[b] + balls.omega[b] * Vec2::new(-lever.y, lever.x);
+                    // How much of the particle's velocity toward the ball this contact needs to
+                    // arrest (>= 0; a particle already moving away, or at rest relative to the
+                    // ball, needs none).
+                    let arrest_speed = (-(self.v[i] - v_surface).dot(n_hat)).max(0.0);
+                    let full_impulse_mag = mass * push_mag / dt;
+                    let impulse_mag = full_impulse_mag.min(mass * arrest_speed);
+                    push_velocity_excess[i] += ((full_impulse_mag - impulse_mag) / mass) * n_hat;
+
+                    // `impulse_mag` is the fluid particle's actual momentum change (impulse) from
+                    // this contact; Newton's third law gives the ball the exact opposite -- see
+                    // `CouplingImpulses`'s doc comment for why this is expressed as an impulse,
+                    // not a force (no extra `/ dt`).
+                    let reaction_impulse = -impulse_mag * n_hat;
+                    coupling.impulses[b] += reaction_impulse;
+                    coupling.fluid_momentum_change += impulse_mag * n_hat;
                     coupling.angular_impulses[b] += cross2(lever, reaction_impulse);
                 }
             }
@@ -669,6 +698,14 @@ impl FluidParticles {
         for ((v, &x), &x0i) in self.v.iter_mut().zip(&self.x).zip(&x0) {
             *v = (x - x0i) / dt;
         }
+        // Remove the part of step 3.5's overlap push that was purely geometric (see that step's
+        // doc comment) so it doesn't silently show up as fluid velocity via the reconstruction
+        // above -- velocity is linear in position, so this cleanly isolates just that push's
+        // excess regardless of what else (the density constraint, the wall projection) also moved
+        // this particle this sub-step.
+        for (v, &excess) in self.v.iter_mut().zip(&push_velocity_excess) {
+            *v -= excess;
+        }
 
         // --- 6. No-slip wall velocity blending -------------------------------------------------
         let beta = slurry.wall_no_slip.clamp(0.0, 1.0);
@@ -684,17 +721,17 @@ impl FluidParticles {
         // --- 6.5 Ball viscous drag (docs/PLAN.md ss3.4 step 2, docs/PHYSICS.md ss6.2): each ball
         // relaxes toward its locally-entrained fluid mass via a Stokes-regime relaxation time
         // `tau = rho_ball * r^2 / (4 * mu)`, `beta = ball_no_slip * (1 - exp(-dt / tau))`, same
-        // closure as before. The exchange is now a **centre-of-mass relaxation between the ball
-        // and its entrained fluid mass**, not a per-particle blend: an earlier version applied
-        // `beta` independently to *every* nearby fluid particle and let the ball absorb the sum
-        // of all those reactions, which amplifies the ball's actual response by the entrained/
-        // ball mass ratio (`~9x` at this project's defaults) -- harmless at low viscosity (the
-        // amplified response was still small) but an explicit over-relaxation once `beta` itself
-        // approaches 1 (mu >= ~10 Pa*s), which the stability clamp (step 8) then masked as
-        // "clamping is normal" rather than surfacing as the real bug it was. Weighting every
-        // nearby fluid particle `i` by a smooth taper `phi_i = poly6(|r_i|^2, h_c) /
-        // poly6(0, h_c)` (`r_i = x_i - x_b`, `h_c = balls.radius + h`, going to zero at the
-        // cutoff instead of a top hat) and mass `w_i = particle_mass * phi_i`:
+        // closure as before. The exchange is a **centre-of-mass relaxation between the ball and
+        // its entrained fluid mass**, not a per-particle blend: an earlier version applied `beta`
+        // independently to *every* nearby fluid particle and let the ball absorb the sum of all
+        // those reactions, which amplifies the ball's actual response by the entrained/ball mass
+        // ratio (`~9x` at this project's defaults) -- harmless at low viscosity (the amplified
+        // response was still small) but an explicit over-relaxation once `beta` itself approaches
+        // 1 (mu >= ~10 Pa*s), which the stability clamp (step 8) then masked as "clamping is
+        // normal" rather than surfacing as the real bug it was. Weighting every nearby fluid
+        // particle `i` by a smooth taper `phi_i = poly6(|r_i|^2, h_c) / poly6(0, h_c)`
+        // (`r_i = x_i - x_b`, `h_c = balls.radius + h`, going to zero at the cutoff instead of a
+        // top hat) and mass `w_i = particle_mass * phi_i`:
         //
         //   m_ent  = sum_i w_i                              entrained fluid mass
         //   v_bar  = (sum_i w_i * v_i) / m_ent               entrained-mass velocity
@@ -710,6 +747,20 @@ impl FluidParticles {
         // see docs/PHYSICS.md ss6.2 for the full derivation of why this term is required for exact
         // conservation once the linear reaction is spread non-uniformly over an off-centre `r_bar`
         // -- see [`CouplingImpulses`]'s doc comment for why impulses, not forces, throughout).
+        //
+        // **Balls are processed sequentially (Gauss-Seidel), not Jacobi.** `self.v` is updated
+        // immediately after each ball's contribution, not accumulated separately and applied once
+        // at the end: at this project's coupling resolution, `h_c` easily spans several
+        // neighbouring balls' worth of packed charge, so a fluid particle commonly sits within
+        // more than one ball's entrainment radius at once. Computing every ball's `v_bar` against
+        // the *same* stale fluid state and only summing the results onto the fluid afterwards
+        // (Jacobi-style) lets several balls' otherwise-individually-bounded (`a_lin <= 1`)
+        // corrections stack on the same fluid particle, well beyond what any single ball's own
+        // bound was meant to allow -- reproducibly driving the fluid to its speed clamp (step
+        // 7.5) even in a perfectly still drum with no rotation to drive it. Sequential
+        // application means each ball after the first already sees the fluid's up-to-date state,
+        // so its own relaxation is computed (and bounded) against reality rather than against a
+        // stale snapshot every other overlapping ball is *also* independently correcting.
         let mu = slurry.viscosity_pa_s.max(0.0);
         if !balls.is_empty() && balls.radius > 0.0 {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
@@ -725,10 +776,12 @@ impl FluidParticles {
                 let w_hc0 = poly6(0.0, h_c).max(1e-12);
                 // Coupling-only grid, sized to this step's actual query radius (`h_c`), queried
                 // ball -> fluid (the reverse direction from the fluid -> ball `ball_grid` above,
-                // which is sized for step 3.5's much smaller `contact_radius`).
+                // which is sized for step 3.5's much smaller `contact_radius`). Built once from
+                // the pre-loop fluid positions; positions don't change in this step (only
+                // velocities do), so the neighbour sets themselves stay valid throughout even
+                // though `self.v` is updated in place as the loop progresses.
                 let coupling_fluid_grid = UniformGrid::build(&self.x, h_c.max(1e-6));
                 let i_b = balls.inertia;
-                let mut fluid_dv = vec![Vec2::ZERO; n];
                 for b in 0..balls.len() {
                     if !balls.x[b].is_finite() {
                         // See the identical rationale in step 6.6 below: a non-finite ball
@@ -789,12 +842,32 @@ impl FluidParticles {
                         let a_rot = beta * i_ent / (i_b + i_ent);
                         let candidate_dw = a_rot * (omega_bar - balls.omega[b]);
                         p_bar = Vec2::new(-r_bar.y, r_bar.x);
+                        // `s` (the exact-conservation normalizer, see below) is
+                        // `sum_i mass*phi_i^2*(|r_i|^2 - cross2(r_i, p_bar))`: a positive-definite
+                        // term (`|r_i|^2`) minus a cross term that can be comparable in size to it
+                        // for perfectly ordinary neighbour geometries -- not just contrived
+                        // degenerate ones -- whenever the entrained neighbour count is small
+                        // (routine at this project's fine coupling resolution relative to a
+                        // ball's size, docs/PHYSICS.md ss6.x). `s` can therefore land anywhere
+                        // from comparable to that positive scale down to many orders of magnitude
+                        // smaller, essentially at random depending on exact particle placement.
+                        // Comparing `|s|` against a *relative* fraction of its own
+                        // positive-definite part (rather than a fixed absolute epsilon, which
+                        // would only catch an exact-zero-like degeneracy) is what actually
+                        // detects "this division is about to amplify without bound" -- a fixed
+                        // `1e-9` absolute threshold let this fire routinely and was the source of
+                        // a genuine coupling instability (a ball+slurry charge failing to settle
+                        // even in a stationary drum, `c_rot` observed in the hundreds to tens of
+                        // thousands here).
                         let mut s = 0.0f32;
+                        let mut s_scale = 0.0f32;
                         for &(_, r_i, phi) in &items {
                             let perp_i = Vec2::new(-r_i.y, r_i.x);
-                            s += mass * phi * cross2(r_i, phi * (perp_i - p_bar));
+                            let phi2 = phi * phi;
+                            s += mass * phi2 * cross2(r_i, perp_i - p_bar);
+                            s_scale += mass * phi2 * r_i.length_squared();
                         }
-                        if s.abs() > 1e-9 {
+                        if s.abs() > 0.1 * s_scale {
                             dw_b = candidate_dw;
                             c_rot = -i_b * dw_b / s;
                         }
@@ -806,7 +879,10 @@ impl FluidParticles {
                             let perp_i = Vec2::new(-r_i.y, r_i.x);
                             dv_i += c_rot * phi * (perp_i - p_bar);
                         }
-                        fluid_dv[ju] += dv_i;
+                        // Applied immediately (Gauss-Seidel), not accumulated for later -- see
+                        // this step's doc comment for why.
+                        self.v[ju] += dv_i;
+                        coupling.fluid_momentum_change += mass * dv_i;
                     }
 
                     // `dv_b`/`dw_b` are velocity changes, so the ball's impulse is `mass * dv_b`
@@ -816,10 +892,6 @@ impl FluidParticles {
                     // exactly at the ball's centre -- see this step's doc comment above.
                     coupling.impulses[b] += balls.mass * dv_b;
                     coupling.angular_impulses[b] += i_b * dw_b + balls.mass * cross2(r_bar, dv_b);
-                }
-                for (v, &dv) in self.v.iter_mut().zip(&fluid_dv) {
-                    *v += dv;
-                    coupling.fluid_momentum_change += mass * dv;
                 }
             }
         }
