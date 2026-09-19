@@ -218,7 +218,7 @@ impl Default for SlurryParams {
             enabled: true,
             fill_fraction: 0.15,
             density_kg_m3: 1800.0,
-            viscosity_pa_s: 0.5,
+            viscosity_pa_s: 50.0,
             rheology: Rheology::Newtonian,
             yield_stress_pa: 0.0,
             wall_no_slip: 1.0,
