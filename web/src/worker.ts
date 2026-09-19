@@ -6,6 +6,7 @@
 // instead of relying on ambient `DedicatedWorkerGlobalScope` types.
 
 import init, { Simulation, setPanicHook } from "./wasm/mill_wasm.js";
+import type { Metrics } from "./metrics/types";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 
 interface WorkerScope {
@@ -37,7 +38,7 @@ function buildFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
     fluidPositions: sim.fluidPositions(),
     fluidDye: sim.fluidDye(),
     fluidSurface: sim.fluidSurface(),
-    metricsJson: sim.metricsJson(),
+    metrics: JSON.parse(sim.metricsJson()) as Metrics,
   };
 }
 

@@ -1,3 +1,4 @@
+import type { Metrics } from "./metrics/types";
 import type { ParamsJson } from "./protocol";
 
 /** App-level state, updated from worker messages and read by the render loop. */
@@ -13,8 +14,9 @@ export interface AppState {
   fluidPositions: Float32Array;
   fluidDye: Float32Array;
   fluidSurface: Float32Array;
-  /** Derived metrics, JSON-encoded (docs/PLAN.md ss3.5); see protocol.ts's `FrameMessage.metricsJson`. */
-  metricsJson: string;
+  /** Derived metrics (docs/PLAN.md ss3.5); see protocol.ts's `FrameMessage.metrics`. `null`
+   * before the first frame arrives. */
+  metrics: Metrics | null;
 }
 
 export function createInitialState(): AppState {
@@ -30,6 +32,6 @@ export function createInitialState(): AppState {
     fluidPositions: new Float32Array(0),
     fluidDye: new Float32Array(0),
     fluidSurface: new Float32Array(0),
-    metricsJson: "",
+    metrics: null,
   };
 }

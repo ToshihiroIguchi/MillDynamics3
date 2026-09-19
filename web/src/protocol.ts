@@ -1,6 +1,8 @@
 // Typed messages exchanged between the main thread and the simulation worker.
 // See docs/PLAN.md ss4.1 for the runtime architecture this implements.
 
+import type { Metrics } from "./metrics/types";
+
 /**
  * Parameters as they cross the worker boundary: JSON-serializable, matching mill-core's `Params`
  * (see crates/mill-core/src/params.rs). The web app treats this as an opaque blob through M0;
@@ -70,12 +72,11 @@ export interface FrameMessage {
   /** Free-surface contour(s), flattened as [n_polys, len_0, x, y, ..., len_1, ...] (docs/PLAN.md ss3.5). */
   fluidSurface: Float32Array;
   /**
-   * Derived metrics (toe/shoulder, slurry pool extent, mixing index, debug checks, docs/PLAN.md
-   * ss3.5), JSON-encoded (matching mill-core's `metrics::Metrics`, crates/mill-core/src/metrics.rs).
-   * Kept as an opaque JSON string through M3+ -- typed field access is M5 polish, same treatment
-   * as `ParamsJson` elsewhere in this file.
+   * Derived metrics (toe/shoulder, slurry pool extent, mixing index, grinding/solver diagnostics,
+   * debug checks, docs/PLAN.md ss3.5), parsed once by the worker (see worker.ts's `buildFrame`)
+   * from `Simulation::metrics_json()`'s JSON text into the typed shape in metrics/types.ts.
    */
-  metricsJson: string;
+  metrics: Metrics;
 }
 
 export interface ErrorMessage {
