@@ -310,14 +310,17 @@ how the rest of the solver already applies position/velocity corrections directl
    `Δv = push/dt` (ss3.3 step 5's reconstruction), the fluid's own momentum change (impulse) is
    `m_f · push / dt`; the ball's Newton's-third-law reaction impulse is the exact opposite,
    `-(m_f · push) / dt`.
-2. **Viscous no-slip drag** (`step_coupled`'s step "6.5"): fluid particles within `h` of a ball's
-   surface blend towards the ball's surface velocity `v_surf = v_b + ω_b × (x_i − x_b)` using a
-   Stokes-regime relaxation-time closure rather than a fixed coefficient:
-   `β = ball_no_slip·(1 − e^(−dt/τ))`, `τ = ρ_ball·r²/(4·μ)` (`ρ_ball = m_b/(π r²)`; `μ` is the
-   slurry's physical Pa·s viscosity, not the qualitative XSPH coefficient ss3.3's fluid-fluid
-   mixing uses), so a highly viscous fluid (small `τ`) reaches full no-slip within one sub-step
-   while an inviscid fluid (`μ → 0`, `τ → ∞`) applies essentially no drag. Here `Δv = β·(v_surf −
-   v_i)` is already a velocity, so the ball's reaction impulse is simply `-(m_f · Δv)` (no `/dt`,
+2. **Viscous no-slip drag** (`step_coupled`'s step "6.5"): each ball relaxes toward its locally
+   entrained fluid mass via a centre-of-mass relaxation (docs/PHYSICS.md ss6.2), not a per-particle
+   blend — `a_lin = β·m_ent/(m_b+m_ent) ≤ 1` for every `μ`/`dt`, with `β = ball_no_slip·(1 −
+   e^(−dt/τ))`, `τ = ρ_ball·r²/(4·μ)` (`ρ_ball = m_b/(π r²)`; `μ` is the slurry's physical Pa·s
+   viscosity, not the qualitative XSPH coefficient ss3.3's fluid-fluid mixing uses; `m_ent` is the
+   poly6-taper-weighted fluid mass within `h_c = r + h`). An earlier per-particle version let the
+   ball absorb the sum of every nearby particle's independent reaction, amplifying its response by
+   the entrained/ball mass ratio (~9× at this project's defaults) — harmless at low `μ` but an
+   explicit over-relaxation once `β` saturates (`μ` above roughly 10 Pa·s), masked by the stability
+   clamp (point 4 below) as "occasional clamping" rather than surfaced as a bug. `Δv_b = a_lin·
+   (v̄_fluid − v_b)` is already a velocity, so the ball's reaction impulse is `m_b · Δv_b` (no `/dt`,
    unlike step 1's position-based `push`).
 3. **Buoyancy** (`step_coupled`'s step "6.6"), implemented directly rather than emerging from the
    density-constraint push: each ball samples the local fluid density using the fluid's own Poly6
@@ -381,6 +384,12 @@ how the rest of the solver already applies position/velocity corrections directl
 - SharedArrayBuffer + wasm threads are *not* required (Vite dev server would need COOP/COEP); listed as future work.
 - Params: `SetParams { params, reset: boolean }`. Hot-swappable (no reset): rpm, viscosity, time scale, substeps/iters,
   no-slip factors, display options. Everything else (geometry, fill, ball sizes, resolution, seed, lifters) triggers `reset`.
+- **v1 implementation status**: `simulation.time_scale` is wired end-to-end (`worker.ts` scales
+  `wallDt` by it before calling `Simulation::step`, and reports the achieved ratio back for the
+  HUD), but the hot-swappable `SetParams`/no-reset split above and the budget_ms catch-up loop are
+  not yet implemented — v1 (`ui/paramsPanel.ts`, `schema.ts`) always sends a full `init` (reset) on
+  Apply, and `worker.ts` steps by exactly `wallDt * time_scale` per frame (clamped to
+  `MAX_FRAME_DT`) rather than looping fixed sub-steps up to a frame budget. Land with M5.
 
 ### 4.2 Rendering (`render/canvas.ts`, Canvas 2D, DPR-aware)
 Layers per frame: background → drum interior disc → lifters (rotated by drumAngle) → slurry surface polygon (fill, alpha 0.55)
@@ -389,11 +398,19 @@ rotation marker → overlays (toe/shoulder rays, free-surface line) → HUD text
 Canvas 2D (dots drawn as `fillRect`; balls as `arc`). WebGL2 instancing is a documented fallback if profiling shows
 render > 6 ms.
 
-### 4.3 Parameters modal (`ui/paramsModal.ts`) — native `<dialog showModal()>`
-Tabs (buttons toggling sections): **Mill**, **Media**, **Slurry**, **Lifters**, **Simulation**, **Display**.
-Each field generated from `schema.ts` entries `{ id, group, label, unit, type: number|select|boolean, min, max, step,
-default, hot, help }` with live validation (red outline + message, Apply disabled). Footer: `Presets ▾`, `Reset to defaults`,
-`Cancel`, `Apply` (Apply asks "Restart simulation?" only if a non-hot param changed). Esc / backdrop click = Cancel.
+### 4.3 Parameters left panel (`ui/paramsPanel.ts`) — persistent `<aside>`, replaces the earlier `<dialog>` modal
+A collapsible-group panel beside the canvas (symmetric with the metrics panel on the right), not a
+modal: **Mill**, **Media**, **Lifters**, **Slurry**, **Simulation** groups as native
+`<details><summary>`, each collapsed/expanded state persisted per-browser. Each field is generated
+from `schema.ts`'s `FieldSchema` entries (`path`, `group`, `label`, `unit?`, `type`, `min?`, `max?`,
+`step?`, `options?`, `displayScale?` — no `default`/`hot`/`help` fields; those were an earlier,
+never-implemented design). The form uses `novalidate` and its own JS validation (required + range)
+rather than native HTML constraint validation, since anchoring `step` at `min` silently blocked
+`Apply` for any off-grid value (e.g. density `7850` with `step: 100`) — `step` is now a UI
+granularity hint only. A sticky header holds `Apply (resets simulation)`, `Revert`, and a status
+indicator (`Applied` / `Edited — not applied` / `Error`, driven by the worker's `ready`/`error`
+messages). On a validation failure the offending rows are marked invalid, their group is forced
+open, and an error banner explains why — without touching the running simulation.
 Derived read-only values shown in the modal: critical speed, %Nc, true vs. simulated ball count,
 coarse-graining factor `k` and effective media diameter (see ss3.2; `k = 1.0`/"no coarse-graining"
 when the true count is already <= `simulation.max_balls`), fluid particle count, shared sub-step
@@ -403,7 +420,7 @@ rate (`FIXED_DT` x `substeps`), estimated cost.
 |---|---|
 | Mill | diameter D = 1.0 m; speed mode = rpm (or %Nc); speed = 30 rpm (~70 %Nc for D = 1 m); rotation direction CCW |
 | Media | ball diameter 10 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
-| Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 0.5 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
+| Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 50 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
 | Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
 | Simulation | resolution 40 (particles across R); substeps 4; PBF iterations 3; DEM (XPBD) iterations 4; max balls 2000; time scale 1.0; frame budget 12 ms; seed 1 |
 | Display | show fluid particles / surface polygon / dye / toe-shoulder / free-surface line / spin marker / velocity vectors; ball colour by speed |
@@ -485,9 +502,9 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 - `scripts/build-wasm` → `web/src/wasm/` produced; `npm run build` succeeds; `npm run test` (vitest) and `npm run e2e` (playwright, Chromium)
   pass.
 - Manual/visual acceptance (use the `run` skill / Playwright screenshots):
-  1. Default params (no lifters, 70 % Nc, 0.5 Pa·s): cascading charge, slurry pool at toe, free-surface polygon drawn, ≥ 0.8× real time.
+  1. Default params (no lifters, 70 % Nc, 50 Pa·s): cascading charge, slurry pool at toe, free-surface polygon drawn, ≥ 0.8× real time.
   2. Set lifters = 8: balls lifted higher, visible cataracting.
-  3. Viscosity 5 Pa·s vs 0.05 Pa·s: free surface tilts more with higher viscosity; dye mixes slower.
+  3. Viscosity 200 Pa·s vs 5 Pa·s: free surface tilts more with higher viscosity; dye mixes slower.
   4. Speed 110 % Nc: centrifuging; slurry film on wall.
   5. Modal: every field validated; hot params apply without reset; others prompt for reset.
 - Determinism: same params + seed → identical position hash after 5 s (test in `mill-core`).

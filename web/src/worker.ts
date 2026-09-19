@@ -17,6 +17,9 @@ const scope = self as unknown as WorkerScope;
 
 let sim: Simulation | null = null;
 let running = true;
+/** `simulation.time_scale` from the current params (params.rs, default 1.0); set in `boot()` and
+ * used to scale the sim-time advanced per wall-clock frame (see requestFrame/step below). */
+let timeScale = 1;
 
 /** Largest wall-clock dt accepted from a single requestFrame (e.g. after a backgrounded tab
  * resumes), so a long stall doesn't get integrated as one huge, potentially unstable sub-step. */
@@ -60,6 +63,8 @@ async function boot(initialParams?: ParamsJson): Promise<void> {
     const json = initialParams ? JSON.stringify(initialParams) : undefined;
     sim = new Simulation(json);
     const params = JSON.parse(sim.paramsJson()) as ParamsJson;
+    const simulation = params.simulation as { time_scale?: number } | undefined;
+    timeScale = simulation?.time_scale ?? 1;
     post({ type: "ready", params });
     // Send an immediate snapshot so the drum/balls/slurry reflect the new params right away, even
     // while paused -- without this the canvas keeps showing the previous sim's frame until Play or
@@ -94,18 +99,20 @@ scope.onmessage = (event) => {
     case "step":
       if (sim) {
         // One "step" advances by one nominal 60 Hz frame's worth of sim time, split into
-        // simulation.substeps fixed sub-steps by mill-core (docs/PLAN.md ss3.2/4.1).
-        sim.step(1 / 60);
-        postFrame(sim, 1);
+        // simulation.substeps fixed sub-steps by mill-core (docs/PLAN.md ss3.2/4.1), scaled by
+        // simulation.time_scale for consistency with the requestFrame path below.
+        sim.step((1 / 60) * timeScale);
+        postFrame(sim, timeScale);
       }
       break;
     case "requestFrame": {
       if (!sim || !running) return;
       // Clamp so a long stall (e.g. a backgrounded tab) isn't integrated as one huge sub-step.
       // Frame-budget throttling for sustained slow-frame handling lands with PBF (M3/M4).
-      const dt = Math.min(msg.wallDt, MAX_FRAME_DT);
-      sim.step(dt);
-      const achievedTimeScale = msg.wallDt > 0 ? dt / msg.wallDt : 1;
+      const wallDt = Math.min(msg.wallDt, MAX_FRAME_DT);
+      const simDt = wallDt * timeScale;
+      sim.step(simDt);
+      const achievedTimeScale = msg.wallDt > 0 ? simDt / msg.wallDt : timeScale;
       postFrame(sim, achievedTimeScale);
       break;
     }

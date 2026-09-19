@@ -42,7 +42,7 @@ This reference documents every user-facing simulation parameter. The table data 
 | `slurry.enabled` | Enabled | — | true | on / off | — | Enable or disable slurry coupling. |
 | `slurry.fill_fraction` | Fill fraction | — | 0.15 | 0–0.9 | 0.01 | Fraction of drum cross-sectional area filled with liquid slurry. |
 | `slurry.density_kg_m3` | Slurry density | kg/m³ | 1800.0 | 100–5000 | 50 | Slurry fluid density. |
-| `slurry.viscosity_pa_s` | Viscosity | Pa·s | 0.5 | 0–200 | 0.1 | Dynamic viscosity of slurry. Only Newtonian rheology is implemented (M1–M6); Bingham yield stress (M7) is reserved for future work. |
+| `slurry.viscosity_pa_s` | Viscosity | Pa·s | 50 | 0–200 | 0.1 | Dynamic viscosity of slurry (a real mineral-processing slurry, not near-water). Only Newtonian rheology is implemented (M1–M6); Bingham yield stress (M7) is reserved for future work. `step` is a UI spinner granularity hint only, not an enforced constraint — the parameters panel validates against `min`/`max` in its own JS, not via native HTML step-grid validation. |
 | `slurry.wall_no_slip` | Wall no-slip (β) | — | 1.0 | 0–1 | 0.05 | No-slip blend factor at drum wall and lifters, in [0, 1] (1 = full no-slip boundary condition). |
 | `slurry.dye_pattern` | Dye pattern | — | `left_right` | `left_right` / `top_bottom` / `none` | — | Initial tracer dye pattern for visualizing and measuring mixing. |
 

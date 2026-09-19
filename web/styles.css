@@ -43,12 +43,39 @@ body.panel-collapsed .metrics-panel {
   display: none;
 }
 
+.params-panel {
+  width: 320px;
+  flex: none;
+  overflow-y: auto;
+  border-right: 1px solid #3a4048;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  background: #12161c;
+}
+
+body.params-collapsed .params-panel {
+  display: none;
+}
+
 @media (max-width: 800px) {
   .app {
     flex-direction: column;
   }
 
+  .scene-wrap {
+    order: 1;
+  }
+
+  .params-panel {
+    order: 2;
+    width: auto;
+    height: 40vh;
+    border-right: 0;
+    border-top: 1px solid #3a4048;
+  }
+
   .metrics-panel {
+    order: 3;
     width: auto;
     height: 40vh;
     border-left: 0;
@@ -97,41 +124,97 @@ body.panel-collapsed .metrics-panel {
   pointer-events: none;
 }
 
-dialog.params-modal {
+.params-form {
+  padding: 0 12px 12px;
+}
+
+.params-panel-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: #12161c;
+  border-bottom: 1px solid #3a4048;
+}
+
+.params-panel-header button {
   background: #1c2129;
   color: #e6e9ef;
   border: 1px solid #3a4048;
-  border-radius: 8px;
-  padding: 0;
-  max-width: min(480px, 92vw);
-  max-height: 85vh;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
 }
 
-dialog.params-modal::backdrop {
-  background: rgba(0, 0, 0, 0.5);
+.params-panel-header button:hover {
+  background: #262d38;
 }
 
-dialog.params-modal form {
-  padding: 16px 20px;
-  overflow-y: auto;
-  max-height: 85vh;
-}
-
-dialog.params-modal h2 {
-  margin: 0 0 12px;
-  font-size: 16px;
-}
-
-dialog.params-modal fieldset {
-  border: 1px solid #3a4048;
-  border-radius: 6px;
-  margin-bottom: 12px;
-}
-
-dialog.params-modal legend {
-  padding: 0 6px;
+.params-status {
+  margin-left: auto;
   font-size: 12px;
   color: #9aa3b0;
+}
+
+.params-status.is-edited {
+  color: #e8a33d;
+}
+
+.params-status.is-error {
+  color: #e8a33d;
+  font-weight: 600;
+}
+
+.params-error {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid #e8a33d;
+  border-radius: 4px;
+  color: #e8a33d;
+  font-size: 12px;
+}
+
+.params-error[hidden] {
+  display: none;
+}
+
+.params-group {
+  border: 1px solid #3a4048;
+  border-radius: 6px;
+  margin: 12px 12px 0;
+}
+
+.params-group summary {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #9aa3b0;
+  cursor: pointer;
+}
+
+.params-group > *:not(summary) {
+  padding: 0 10px;
+}
+
+.params-group > summary + * {
+  padding-top: 6px;
+}
+
+.params-group > :last-child {
+  padding-bottom: 10px;
+}
+
+.params-warn {
+  color: #e8a33d;
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.params-warn[hidden] {
+  display: none;
 }
 
 .params-row {
@@ -151,6 +234,11 @@ dialog.params-modal legend {
   border-radius: 4px;
   padding: 3px 6px;
   width: 140px;
+}
+
+.params-row.is-invalid input,
+.params-row.is-invalid select {
+  border-color: #e8a33d;
 }
 
 .params-derived {
@@ -174,22 +262,6 @@ dialog.params-modal legend {
 
 .params-derived dd.is-warn {
   color: #e8a33d;
-}
-
-.params-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.params-footer button {
-  background: #1c2129;
-  color: #e6e9ef;
-  border: 1px solid #3a4048;
-  border-radius: 4px;
-  padding: 6px 12px;
-  cursor: pointer;
 }
 
 .metrics-panel {

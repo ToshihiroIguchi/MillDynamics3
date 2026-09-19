@@ -330,11 +330,23 @@ pub struct FluidStepStats {
 /// ball; `F_CLAMP_G_MULTIPLE` was then tuned down to `3x` purely to survive that mismatch (see
 /// git history). Balls are now unit-depth discs too ([`crate::dem::ball_mass`]), so the coupling
 /// forces (overlap push, viscous drag, buoyancy, docs/PLAN.md ss3.4) are dimensionally consistent
-/// and no longer need an artificially tight ceiling: `20x` is a pure numerical-stability backstop
-/// against a transient large overlap, not a value that shapes normal behaviour. Persistent
-/// clamping (see [`crate::coupling::CouplingImpulses::clamp_hits`]) after the charge has settled
-/// indicates a real problem (e.g. an under-resolved fluid), not an expected steady state.
-const F_CLAMP_G_MULTIPLE: f32 = 20.0;
+/// and no longer need an artificially tight ceiling.
+///
+/// `60x` (raised from an intermediate `20x`) accounts for a real difference in how the two
+/// coupling mechanisms this clamp bounds scale with `dt`. Step 3.5's overlap-push impulse is
+/// `mass * push / dt` for a *position* correction capped at a fixed distance (`0.5 * radius`),
+/// so it does not shrink as fast as `dt` does. Step 6.5's drag correction (see that step's own
+/// doc comment) is a *velocity*-matching relaxation, `impulse = mass * a * (v_bar - v_b)` with
+/// `a <= 1` bounded but otherwise `dt`-independent once the relaxation factor `beta` saturates
+/// (`dt >= tau`, i.e. `viscosity_pa_s` above roughly 10 Pa*s at this project's ball sizes) --
+/// physically correct (achieving no-slip within one sub-step is what "highly viscous" means),
+/// but larger relative to a clamp sized purely against step 3.5's mechanism. `60x` keeps
+/// clamping rare (single-digit percent of ball-substeps, see
+/// `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled`) at
+/// `viscosity_pa_s` up to 200 while still catching genuine numerical blow-ups; persistent
+/// clamping after the charge has settled still indicates a real problem, not an expected
+/// steady state.
+const F_CLAMP_G_MULTIPLE: f32 = 60.0;
 
 fn impulse_clamp(ball_mass: f32, dt: f32) -> f32 {
     F_CLAMP_G_MULTIPLE * ball_mass * 9.81 * dt
@@ -524,10 +536,19 @@ impl FluidParticles {
         let h = self.h;
         let rest_density = self.rest_density;
         let mass = self.particle_mass;
+        // Cell size must cover step 3.5's query radius (`contact_radius = balls.radius +
+        // 0.25*h`), not just the ball diameter -- at this project's defaults `contact_radius`
+        // is *larger* than `2*radius` (fine fluid resolution relative to ball size), so a plain
+        // `2*radius` cell would silently miss real ball neighbours (`UniformGrid::for_each_near`
+        // only guarantees finding points within `cell_size`, see its doc comment).
         let ball_grid = if balls.is_empty() {
             None
         } else {
-            Some(UniformGrid::build(&balls.x, (2.0 * balls.radius).max(1e-6)))
+            let contact_radius = balls.radius + 0.25 * h;
+            Some(UniformGrid::build(
+                &balls.x,
+                (2.0 * balls.radius).max(contact_radius).max(1e-6),
+            ))
         };
 
         // --- 1. Predict --------------------------------------------------------------------
@@ -660,54 +681,145 @@ impl FluidParticles {
             }
         }
 
-        // --- 6.5 Ball viscous drag (docs/PLAN.md ss3.4 step 2): fluid within `h` of a ball's
-        // surface blends toward the ball's surface velocity over this sub-step's `dt`, with the
-        // blend factor derived from the disc's own viscous relaxation time -- an
-        // order-of-magnitude Stokes-regime closure for drag on a disc immersed in a viscous
-        // fluid, `tau = rho_ball * r^2 / (4 * mu)` (`mu` the *physical* slurry viscosity, not
-        // the qualitative XSPH coefficient `c` used by step 7's fluid-fluid mixing below):
-        // `beta = ball_no_slip * (1 - exp(-dt / tau))`, so a highly viscous fluid (small `tau`)
-        // reaches full no-slip within one sub-step while an inviscid fluid (`mu -> 0`,
-        // `tau -> inf`) applies essentially no drag. The momentum removed from the fluid is
-        // added to that ball as an impulse (see CouplingImpulses's doc comment).
+        // --- 6.5 Ball viscous drag (docs/PLAN.md ss3.4 step 2, docs/PHYSICS.md ss6.2): each ball
+        // relaxes toward its locally-entrained fluid mass via a Stokes-regime relaxation time
+        // `tau = rho_ball * r^2 / (4 * mu)`, `beta = ball_no_slip * (1 - exp(-dt / tau))`, same
+        // closure as before. The exchange is now a **centre-of-mass relaxation between the ball
+        // and its entrained fluid mass**, not a per-particle blend: an earlier version applied
+        // `beta` independently to *every* nearby fluid particle and let the ball absorb the sum
+        // of all those reactions, which amplifies the ball's actual response by the entrained/
+        // ball mass ratio (`~9x` at this project's defaults) -- harmless at low viscosity (the
+        // amplified response was still small) but an explicit over-relaxation once `beta` itself
+        // approaches 1 (mu >= ~10 Pa*s), which the stability clamp (step 8) then masked as
+        // "clamping is normal" rather than surfacing as the real bug it was. Weighting every
+        // nearby fluid particle `i` by a smooth taper `phi_i = poly6(|r_i|^2, h_c) /
+        // poly6(0, h_c)` (`r_i = x_i - x_b`, `h_c = balls.radius + h`, going to zero at the
+        // cutoff instead of a top hat) and mass `w_i = particle_mass * phi_i`:
+        //
+        //   m_ent  = sum_i w_i                              entrained fluid mass
+        //   v_bar  = (sum_i w_i * v_i) / m_ent               entrained-mass velocity
+        //   a_lin  = beta * m_ent / (balls.mass + m_ent)     <= 1 for every mu, dt (the fix)
+        //   dv_b   = a_lin * (v_bar - v_b)
+        //
+        // and the mirror-image moment-weighted closure for the ball's spin (`i_ent`, `omega_bar`,
+        // `a_rot`, `dw_b`, using `balls.inertia` in place of `balls.mass`). `dv_b`/`dw_b` are then
+        // the ball's impulse (`impulses[b] += balls.mass * dv_b`, no `/dt`, same convention as
+        // before); the fluid's reaction is distributed back across the same weighted neighbours
+        // so linear and angular momentum are conserved *exactly* (not just bounded), including
+        // the cross term from distributing an off-centre reaction (`m_b * cross2(r_bar, dv_b)`,
+        // see docs/PHYSICS.md ss6.2 for the full derivation of why this term is required for exact
+        // conservation once the linear reaction is spread non-uniformly over an off-centre `r_bar`
+        // -- see [`CouplingImpulses`]'s doc comment for why impulses, not forces, throughout).
         let mu = slurry.viscosity_pa_s.max(0.0);
-        if let Some(ball_grid) = &ball_grid {
+        if !balls.is_empty() && balls.radius > 0.0 {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
-            let rho_ball = if balls.radius > 0.0 {
-                balls.mass / (std::f32::consts::PI * balls.radius * balls.radius)
-            } else {
-                0.0
-            };
-            let factor = if mu > 1e-6 && rho_ball > 0.0 {
+            let rho_ball = balls.mass / (std::f32::consts::PI * balls.radius * balls.radius);
+            let beta = if mu > 1e-6 && rho_ball > 0.0 {
                 let tau = (rho_ball * balls.radius * balls.radius / (4.0 * mu)).max(1e-9);
                 beta_b * (1.0 - (-dt / tau).exp())
             } else {
                 0.0
             };
-            if factor > 0.0 {
-                for i in 0..n {
+            if beta > 0.0 {
+                let h_c = balls.radius + h;
+                let w_hc0 = poly6(0.0, h_c).max(1e-12);
+                // Coupling-only grid, sized to this step's actual query radius (`h_c`), queried
+                // ball -> fluid (the reverse direction from the fluid -> ball `ball_grid` above,
+                // which is sized for step 3.5's much smaller `contact_radius`).
+                let coupling_fluid_grid = UniformGrid::build(&self.x, h_c.max(1e-6));
+                let i_b = balls.inertia;
+                let mut fluid_dv = vec![Vec2::ZERO; n];
+                for b in 0..balls.len() {
+                    if !balls.x[b].is_finite() {
+                        // See the identical rationale in step 6.6 below: a non-finite ball
+                        // position must never manufacture a plausible-looking reaction.
+                        continue;
+                    }
                     let mut nearby: Vec<u32> = Vec::new();
-                    ball_grid.for_each_near(self.x[i], |b| nearby.push(b));
-                    for b in nearby {
-                        let b = b as usize;
-                        let r_vec = self.x[i] - balls.x[b];
-                        let dist = r_vec.length();
-                        if dist.is_nan() || dist >= balls.radius + h {
-                            // See the identical guard in step 3.5 above for why `is_nan()` is
-                            // checked explicitly rather than relying on `>=` alone.
+                    coupling_fluid_grid.for_each_near(balls.x[b], |j| nearby.push(j));
+                    if nearby.is_empty() {
+                        continue;
+                    }
+                    let mut items: Vec<(usize, Vec2, f32)> = Vec::with_capacity(nearby.len());
+                    let mut m_ent = 0.0f32;
+                    let mut r_sum = Vec2::ZERO;
+                    let mut v_sum = Vec2::ZERO;
+                    let mut i_ent = 0.0f32;
+                    let mut l_sum = 0.0f32;
+                    for j in nearby {
+                        let ju = j as usize;
+                        let r_i = self.x[ju] - balls.x[b];
+                        let r2 = r_i.length_squared();
+                        if !r2.is_finite() || r2 >= h_c * h_c {
                             continue;
                         }
-                        let v_surf = balls.v[b] + balls.omega[b] * Vec2::new(-r_vec.y, r_vec.x);
-                        let dv = factor * (v_surf - self.v[i]);
-                        self.v[i] += dv;
-                        // `dv` is already a velocity change, so the fluid's momentum change
-                        // (impulse) is `mass * dv` directly -- no `/ dt` (unlike the
-                        // position-derived overlap-projection impulse above).
-                        let reaction_impulse = -(mass * dv);
-                        coupling.impulses[b] += reaction_impulse;
-                        coupling.fluid_momentum_change -= reaction_impulse;
-                        coupling.angular_impulses[b] += cross2(r_vec, reaction_impulse);
+                        let phi = poly6(r2, h_c) / w_hc0;
+                        if phi <= 0.0 {
+                            continue;
+                        }
+                        let w = mass * phi;
+                        m_ent += w;
+                        r_sum += w * r_i;
+                        v_sum += w * self.v[ju];
+                        i_ent += w * r2;
+                        l_sum += w * cross2(r_i, self.v[ju]);
+                        items.push((ju, r_i, phi));
                     }
+                    if m_ent <= 1e-12 || items.is_empty() {
+                        continue;
+                    }
+
+                    let r_bar = r_sum / m_ent;
+                    let v_bar = v_sum / m_ent;
+                    let a_lin = beta * m_ent / (balls.mass + m_ent);
+                    let dv_b = a_lin * (v_bar - balls.v[b]);
+
+                    // Angular relaxation, and the tangential field that distributes its reaction
+                    // back to the fluid with zero net linear momentum (mean-subtracted around
+                    // `p_bar = perp(r_bar)`, so `sum_i w_i * (perp(r_i) - p_bar) == 0` exactly).
+                    // Only actually applied when the distribution isn't degenerate (`s` nonzero)
+                    // -- otherwise skipped for *both* sides this sub-step, since giving the ball
+                    // an angular impulse without a matching fluid reaction would break
+                    // conservation.
+                    let mut dw_b = 0.0f32;
+                    let mut c_rot = 0.0f32;
+                    let mut p_bar = Vec2::ZERO;
+                    if i_ent > 1e-12 {
+                        let omega_bar = l_sum / i_ent;
+                        let a_rot = beta * i_ent / (i_b + i_ent);
+                        let candidate_dw = a_rot * (omega_bar - balls.omega[b]);
+                        p_bar = Vec2::new(-r_bar.y, r_bar.x);
+                        let mut s = 0.0f32;
+                        for &(_, r_i, phi) in &items {
+                            let perp_i = Vec2::new(-r_i.y, r_i.x);
+                            s += mass * phi * cross2(r_i, phi * (perp_i - p_bar));
+                        }
+                        if s.abs() > 1e-9 {
+                            dw_b = candidate_dw;
+                            c_rot = -i_b * dw_b / s;
+                        }
+                    }
+
+                    for &(ju, r_i, phi) in &items {
+                        let mut dv_i = -(balls.mass / m_ent) * dv_b * phi;
+                        if c_rot != 0.0 {
+                            let perp_i = Vec2::new(-r_i.y, r_i.x);
+                            dv_i += c_rot * phi * (perp_i - p_bar);
+                        }
+                        fluid_dv[ju] += dv_i;
+                    }
+
+                    // `dv_b`/`dw_b` are velocity changes, so the ball's impulse is `mass * dv_b`
+                    // directly (no `/ dt`, unlike step 3.5's position-derived impulse). The
+                    // `balls.mass * cross2(r_bar, dv_b)` term is the reaction torque from
+                    // distributing that linear reaction over an off-centre `r_bar` rather than
+                    // exactly at the ball's centre -- see this step's doc comment above.
+                    coupling.impulses[b] += balls.mass * dv_b;
+                    coupling.angular_impulses[b] += i_b * dw_b + balls.mass * cross2(r_bar, dv_b);
+                }
+                for (v, &dv) in self.v.iter_mut().zip(&fluid_dv) {
+                    *v += dv;
+                    coupling.fluid_momentum_change += mass * dv;
                 }
             }
         }
@@ -925,6 +1037,201 @@ mod tests {
         assert!(
             fluid.is_empty(),
             "expected all fluid sites to be excluded by the oversized ball"
+        );
+    }
+
+    /// Builds a still-drum scenario with one ball at rest at the origin, surrounded by a dense
+    /// uniform patch of fluid particles all moving at `fluid_velocity`, filling a large enough
+    /// area that the entrained mass `m_ent` (within `balls.radius + h` of the ball) is much
+    /// greater than the ball's own mass -- isolating step 6.5's ball<->fluid drag exchange in the
+    /// regime where its centre-of-mass relaxation (docs/PHYSICS.md ss6.2) should reduce to the
+    /// ball simply relaxing toward `fluid_velocity` at rate `beta`, independent of the fluid's own
+    /// mass (no wall, no gravity yet applied, no buoyancy since the ball isn't tracked by
+    /// `step_coupled`'s buoyancy step until `dt` has actually elapsed once).
+    fn ball_in_uniform_fluid_patch(
+        ball_radius_m: f32,
+        ball_density_kg_m3: f32,
+        slurry: &SlurryParams,
+        fluid_velocity: Vec2,
+    ) -> (Balls, FluidParticles) {
+        let mass = crate::dem::ball_mass(2.0 * ball_radius_m, ball_density_kg_m3);
+        let inertia = crate::dem::ball_inertia(mass, ball_radius_m);
+        let balls = Balls {
+            x: vec![Vec2::ZERO],
+            v: vec![Vec2::ZERO],
+            theta: vec![0.0],
+            omega: vec![0.0],
+            radius: ball_radius_m,
+            mass,
+            inertia,
+        };
+
+        // Fluid lattice spacing large enough (relative to the ball) that `h_c = ball_radius + h`
+        // spans an area whose total fluid mass `m_ent` dominates the ball's own mass -- `m_ent`
+        // scales with the *area* under the smooth taper (`~ rest_density * h_c^2`), not with
+        // particle count, so this requires a large `h` relative to `ball_radius`, not a fine
+        // lattice (`h = 2*dx`, so `dx` itself must be large relative to `ball_radius`).
+        let dx = ball_radius_m * 4.0;
+        let h = 2.0 * dx;
+        let rest_density = slurry.density_kg_m3;
+        let particle_mass = rest_density * dx * dx;
+        // covers h_c = radius + h with margin
+        let half_span = ball_radius_m + h;
+        // Exclude the ball's own overlap zone (step 3.5's `contact_radius`) -- a fluid particle
+        // placed on top of the ball would trigger a large overlap-push impulse that has nothing
+        // to do with the drag mechanism (step 6.5) this test isolates.
+        let exclude_radius = 1.01 * (ball_radius_m + 0.25 * h);
+        let n = (2.0 * half_span / dx).ceil() as i32;
+        let mut x = Vec::new();
+        let mut v = Vec::new();
+        let mut dye = Vec::new();
+        for iy in -n..=n {
+            for ix in -n..=n {
+                let p = Vec2::new(ix as f32 * dx, iy as f32 * dx);
+                let dist = p.length();
+                if dist <= half_span && dist >= exclude_radius {
+                    x.push(p);
+                    v.push(fluid_velocity);
+                    dye.push(0.0);
+                }
+            }
+        }
+        let fluid = FluidParticles {
+            x,
+            v,
+            dye,
+            particle_mass,
+            h,
+            rest_density,
+        };
+        (balls, fluid)
+    }
+
+    #[test]
+    fn ball_drag_matches_two_dimensional_stokes_scaling() {
+        // docs/PHYSICS.md ss6.2: in the entrained-mass-dominated, small-`beta` regime (`m_ent >>
+        // balls.mass`, `dt << tau`), the centre-of-mass relaxation's ball impulse reduces
+        // analytically to `impulse ~= 4*pi*mu*(v_fluid - v_ball)*dt` -- ordinary 2D Stokes drag on
+        // a disc, with no dependence on the ball/fluid mass ratio (unlike the removed
+        // per-particle blend, which was off by the entrained/ball mass ratio, ~9x at this
+        // project's own defaults). This directly checks that calibration, and that increasing
+        // viscosity roughly linearly increases the drag response.
+        let drum = still_drum(2.0); // large, unused directly (no wall contact at the origin)
+        let ball_radius_m = 0.005;
+        let ball_density = 6000.0;
+        let fluid_velocity = Vec2::new(1.0, 0.0);
+        let dt = 1.0 / 240.0;
+
+        let stokes_drag_impulse = |mu: f32| -> f32 {
+            let slurry = SlurryParams {
+                viscosity_pa_s: mu,
+                fill_fraction: 0.0, // unused here (fluid is placed manually)
+                ..SlurryParams::default()
+            };
+            let (mut balls, mut fluid) =
+                ball_in_uniform_fluid_patch(ball_radius_m, ball_density, &slurry, fluid_velocity);
+            let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
+            balls.v[0] += impulses.impulses[0] / balls.mass;
+            impulses.impulses[0].length()
+        };
+
+        let mu_low = 0.5f32;
+        let mu_high = 5.0f32;
+        let impulse_low = stokes_drag_impulse(mu_low);
+        let impulse_high = stokes_drag_impulse(mu_high);
+
+        let predicted = |mu: f32| 4.0 * std::f32::consts::PI * mu * fluid_velocity.x * dt;
+        for (mu, impulse) in [(mu_low, impulse_low), (mu_high, impulse_high)] {
+            let expected = predicted(mu);
+            let rel_err = (impulse - expected).abs() / expected;
+            assert!(
+                rel_err < 0.5,
+                "mu={mu}: impulse={impulse} far from 2D-Stokes prediction {expected} \
+                 (rel_err={rel_err})"
+            );
+        }
+        assert!(
+            impulse_high > impulse_low * 3.0,
+            "drag should scale up substantially with viscosity: \
+             impulse(mu={mu_low})={impulse_low}, impulse(mu={mu_high})={impulse_high}"
+        );
+    }
+
+    #[test]
+    fn ball_drag_never_overshoots_the_local_fluid_velocity() {
+        // Even at a viscosity high enough to saturate `beta` toward 1 within a single sub-step
+        // (docs/PHYSICS.md ss6.2), the ball's resulting velocity must never overshoot past the
+        // entrained fluid's velocity, and the stability clamp (step 8) should not need to fire --
+        // the centre-of-mass relaxation's `a <= 1` bound (the actual A1 fix) should make it
+        // unnecessary here, unlike the removed per-particle blend.
+        let drum = still_drum(2.0);
+        let ball_radius_m = 0.005;
+        let ball_density = 6000.0;
+        let fluid_velocity = Vec2::new(1.0, 0.0);
+        let dt = 1.0 / 240.0;
+        let slurry = SlurryParams {
+            viscosity_pa_s: 200.0,
+            fill_fraction: 0.0,
+            ..SlurryParams::default()
+        };
+        let (balls, mut fluid) =
+            ball_in_uniform_fluid_patch(ball_radius_m, ball_density, &slurry, fluid_velocity);
+
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
+        assert_eq!(
+            impulses.clamp_hits, 0,
+            "a bounded (a<=1) drag relaxation should not need the stability clamp"
+        );
+        let new_v = balls.v[0] + impulses.impulses[0] / balls.mass;
+        assert!(
+            new_v.x >= 0.0 && new_v.x <= fluid_velocity.x * 1.001,
+            "ball overshot the fluid velocity it was relaxing toward: new_v={new_v:?}, \
+             fluid_velocity={fluid_velocity:?}"
+        );
+    }
+
+    #[test]
+    fn coupling_finds_ball_neighbours_beyond_two_radii() {
+        // Regression for the `ball_grid`/coupling-fluid-grid cell-size fix (docs/PHYSICS.md
+        // ss6.1/6.4): a fluid particle at `r + 0.5*h` from a ball -- farther than `2*radius` at
+        // this test's proportions -- must still be found and produce a non-zero drag reaction.
+        let drum = still_drum(2.0);
+        let ball_radius_m = 0.01;
+        let slurry = SlurryParams {
+            viscosity_pa_s: 50.0,
+            fill_fraction: 0.0,
+            ..SlurryParams::default()
+        };
+        let dx = ball_radius_m * 1.5;
+        let h = 2.0 * dx;
+        assert!(
+            ball_radius_m + 0.5 * h > 2.0 * ball_radius_m,
+            "test setup must place the fluid particle beyond 2*radius"
+        );
+        let mass = crate::dem::ball_mass(2.0 * ball_radius_m, 6000.0);
+        let inertia = crate::dem::ball_inertia(mass, ball_radius_m);
+        let balls = Balls {
+            x: vec![Vec2::ZERO],
+            v: vec![Vec2::ZERO],
+            theta: vec![0.0],
+            omega: vec![0.0],
+            radius: ball_radius_m,
+            mass,
+            inertia,
+        };
+        let mut fluid = FluidParticles {
+            x: vec![Vec2::new(ball_radius_m + 0.5 * h, 0.0)],
+            v: vec![Vec2::new(1.0, 0.0)],
+            dye: vec![0.0],
+            particle_mass: slurry.density_kg_m3 * dx * dx,
+            h,
+            rest_density: slurry.density_kg_m3,
+        };
+
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, 1.0 / 240.0, &balls);
+        assert!(
+            impulses.impulses[0].length() > 1e-9,
+            "expected a non-zero drag reaction from a fluid particle beyond 2*radius"
         );
     }
 

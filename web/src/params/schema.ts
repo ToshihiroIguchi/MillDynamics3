@@ -1,9 +1,10 @@
-// Parameter field definitions driving the parameters modal (src/ui/paramsModal.ts). Mirrors
+// Parameter field definitions driving the parameters left panel (src/ui/paramsPanel.ts). Mirrors
 // crates/mill-core/src/params.rs field-for-field for the groups implemented so far (Mill, Media,
-// Lifters, Slurry, Simulation); a Display tab lands with M5 (see docs/PLAN.md ss4.3).
+// Lifters, Slurry, Simulation); a Display group lands with M5 (see docs/PLAN.md ss4.3).
 // `slurry.rheology`/`yield_stress_pa` are intentionally not exposed: pbf.rs's v1 solver always
-// runs Newtonian XSPH viscosity regardless of `rheology` (Bingham is unimplemented, M7), so
-// surfacing those fields would imply behaviour that doesn't exist yet.
+// runs an implicit (conjugate-gradient) Newtonian viscosity solve regardless of `rheology`
+// (Bingham is unimplemented, M7), so surfacing those fields would imply behaviour that doesn't
+// exist yet.
 //
 // v1 (M1) simplification: every field is treated as requiring a full simulation reset on Apply
 // (no "hot" live-apply distinction yet -- see docs/PLAN.md ss4.1's hot/reset split, completed in
@@ -98,8 +99,8 @@ export const SCHEMA: FieldSchema[] = [
   { path: "slurry.enabled", group: "Slurry", label: "Enabled", type: "boolean" },
   { path: "slurry.fill_fraction", group: "Slurry", label: "Fill fraction", type: "number", min: 0, max: 0.9, step: 0.01 },
   { path: "slurry.density_kg_m3", group: "Slurry", label: "Slurry density", unit: "kg/m3", type: "number", min: 100, max: 5000, step: 50 },
-  // step must divide the 0.5 default (see params.rs SlurryParams::default) or the browser's
-  // native number-input validation silently blocks form submission (Apply does nothing).
+  // `step` is a UI granularity hint only (spinner increment); it is never enforced as a validity
+  // constraint (the form uses novalidate and its own JS range check -- see ui/paramsPanel.ts).
   { path: "slurry.viscosity_pa_s", group: "Slurry", label: "Viscosity", unit: "Pa·s", type: "number", min: 0, max: 200, step: 0.1 },
   { path: "slurry.wall_no_slip", group: "Slurry", label: "Wall no-slip (β)", type: "number", min: 0, max: 1, step: 0.05 },
   {
@@ -144,6 +145,9 @@ export function withPath(params: ParamsJson, path: string, value: unknown): Para
       throw new Error(`withPath: missing intermediate object at "${key}" for path "${path}"`);
     }
     node = next as Record<string, unknown>;
+  }
+  if (!(last in node)) {
+    throw new Error(`withPath: missing leaf key "${last}" for path "${path}"`);
   }
   node[last] = value;
   return clone;
