@@ -1,16 +1,20 @@
 # MillDynamics3
 
 A real-time, browser-based simulator of a tumbling ball mill cross-section: grinding media (balls)
-modeled with soft-sphere DEM and a viscous slurry modeled with Position Based Fluids (PBF), coupled
-two-way. The simulation core is written in Rust and compiled to WebAssembly; the frontend is a
-framework-free Vite + TypeScript app rendering to Canvas 2D.
+modeled as position-based (XPBD) rigid discs, and a viscous slurry modeled with Position Based Fluids (PBF),
+coupled two-way with buoyancy, viscous drag, and anti-penetration forces. The simulation core is written in Rust
+and compiled to WebAssembly; the frontend is a framework-free Vite + TypeScript app rendering to Canvas 2D.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full design and milestone plan, and
 [`CLAUDE.md`](CLAUDE.md) for project conventions.
 
 ## Status
 
-Early development (see `docs/PLAN.md` milestones M0–M7). Not yet runnable.
+Functional simulator with DEM ball solver (position-based rigid discs), PBF slurry solver with implicit
+Newtonian viscosity, two-way ball–fluid coupling, free-surface rendering, a live metrics panel (power draw,
+mixing index, collision energy histogram, CSV export), and a parameters modal. See `docs/PLAN.md` milestones
+M0–M7 for roadmap; the M6 real-time performance optimization pass (SIMD, wasm-opt, neighbour-list reuse) has
+not yet been done.
 
 ## Live demo
 
@@ -18,6 +22,22 @@ https://toshihiroiguchi.github.io/MillDynamics3/
 
 `main` auto-deploys to GitHub Pages via GitHub Actions (`.github/workflows/deploy.yml`) on every
 push, gated on the same checks as `## Development` below.
+
+## Performance
+
+These are native `cargo bench` results (single-threaded, release, not WASM—WASM is typically slower).
+The following table shows the current state after Phase 3b (grinding instrumentation), a pre-optimization
+baseline before the M6 real-time performance pass; these numbers are not yet a real-time-in-browser guarantee.
+See `docs/PERF.md` for the full performance history and notes.
+
+| Benchmark | Meaning | Time |
+|---|---|---|
+| `dem_step/500_balls` | One ball-solver sub-step at 500 balls | 0.55 ms |
+| `dem_step/1000_balls` | One ball-solver sub-step at 1000 balls | 1.43 ms |
+| `dem_step/2000_balls` | One ball-solver sub-step at 2000 balls | 2.55 ms |
+| `drum_only_step` | One full sub-step (DEM + PBF + coupling) at default params | 17.7 ms |
+
+All masses, energies, and power values in the core are per metre of mill axial length (2D unit-depth convention).
 
 ## Prerequisites
 

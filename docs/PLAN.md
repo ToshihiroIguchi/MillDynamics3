@@ -169,25 +169,41 @@ Units SI. World frame: drum center at origin, gravity −y, drum rotates counter
 ### 3.2 Balls — position-based rigid discs (`dem.rs`)
 
 **Coarse-graining (particle scaling), implemented in `params.rs` (`Params::effective_media`).**
-At the current defaults (D = 1 m, d = 2 mm, J = 0.30) the true 2D media population is ~75,000
-balls, far above what a single-threaded WASM solver can step in real time even with the
-unconditionally-stable XPBD approach below (the cost is per-contact, not per-substep). Rather than
-exposing this as a raw performance cliff, the solver is always seeded from an **effective** media
-population instead of the raw UI values: if the true ball count
-`N_real = J·(π R²) / (π r_true²)` exceeds `simulation.max_balls` (default 2000, chosen to meet the
-M6 "≥1.0x real time" target), it is replaced with `N_sim ≈ max_balls` larger, lighter balls using
-scale factor `k = sqrt(N_real / max_balls)`:
-- `d_eff = d_true · k` — preserves total footprint area (`N_sim·π r_eff² ≈ N_real·π r_true²`), i.e.
-  the fill fraction the user set.
-- `ρ_eff = ρ_true / k` — preserves total charge mass (a 3D-sphere mass `∝ r³` grows by `k³` while
-  the count shrinks by `k²`, net `k`, canceled by dividing density by `k`).
+Balls are modelled as **unit-depth discs**, `mass = ρ·π·r²` (kg per metre of mill length — see
+`ball_mass`), the same 2D-slice convention the fluid uses (`particle_mass = ρ·dx²·1 m`, ss3.3), so
+ball and fluid masses are dimensionally consistent and the ball↔fluid coupling (ss3.4) is
+physically meaningful. An earlier revision gave balls a 3D-sphere mass (`∝ r³`) instead, which made
+a coarse-grained fluid particle hundreds of times heavier than a ball and needed an artificial
+coupling-impulse clamp to compensate (see ss3.4); that mismatch no longer exists now that both
+populations share the same areal-mass convention.
+
+The true (uncoarsened) media population is `N_true = J·k_p·(π R²) / (π r_true²)`
+(`Params::true_ball_count`), where `J` is `media.fill_fraction` (charge footprint including voids)
+and `k_p` is `media.packing_fraction_2d` (2D areal packing fraction of the settled disc charge,
+default 0.82, range `[0.5, 0.907]`, the hexagonal upper bound `π/(2√3) ≈ 0.907`) — this refines an
+earlier `N_real = J·(π R²)/(π r_true²)` formula that implicitly assumed a 100 %-solid footprint. At
+the current defaults (D = 1 m, d = 10 mm, J = 0.30, `k_p` = 0.82), `N_true ≈ 2460`, just above
+`simulation.max_balls` (default 2000, chosen to meet the M6 "≥1.0x real time" target); at smaller
+media (e.g. d = 2 mm) `N_true` reaches the tens of thousands — far above what a single-threaded
+WASM solver can step in real time even with the unconditionally-stable XPBD approach below (the
+cost is per-contact, not per-substep). Rather than exposing this as a raw performance cliff, the
+solver is always seeded from an **effective** media population instead of the raw UI values: if
+`N_true` exceeds `max_balls`, it is replaced with `N_sim ≈ max_balls` larger discs using scale
+factor `k = sqrt(N_true / max_balls)`:
+- `d_eff = d_true · k` — preserves total footprint area exactly (`N_sim·π r_eff² = N_true·π
+  r_true²`), i.e. the fill fraction the user set.
+- Density is left unchanged (`ρ_eff = ρ_true`): because balls are unit-depth discs (mass `∝ r²`),
+  preserving footprint area alone already preserves total charge mass, so no separate density
+  rescaling is needed. (An earlier 3D-sphere-mass revision did rescale density here, since count,
+  area and mass then scaled differently with `k`; that rescaling has been removed as both
+  unnecessary and, under the disc model, wrong.)
 
 This is the standard coarse-grained DEM approximation (see e.g. Sakai & Koshizuka 2009; Bierwisch
 et al. 2009): it reproduces bulk charge behaviour (cascading/cataracting/centrifuging, toe/shoulder
 angles) but not the true interstitial void structure or single-collision statistics at the real
-particle size. `d_eff`/`ρ_eff`/`N_sim`/`k` are always shown in the parameters modal's derived-values
-panel (ss4.3) so the approximation is never silent; `k = 1.0` (no coarse-graining) whenever
-`N_real <= max_balls`. Mass/radius/inertia below are the *effective* (post coarse-graining) values.
+particle size. `d_eff`/`N_sim`/`k` are always shown in the parameters modal's derived-values panel
+(ss4.3) so the approximation is never silent; `k = 1.0` (no coarse-graining) whenever `N_true <=
+max_balls`. Mass/radius/inertia below are the *effective* (post coarse-graining) values.
 
 **Solver.** No contact stiffness or DEM-specific time step exists in this design (see the rationale
 above): balls advance on the same fixed sub-step as the fluid (`FIXED_DT` = 1/240 s,
@@ -196,9 +212,18 @@ per sub-step, analogous to PBF's `pbf_iterations`). Per sub-step `dt`:
 
 1. **Predict**: `v += g·dt`; `x += v·dt`; `θ += ω·dt` (save `x0`, `θ0` for the velocity
    reconstruction in step 4). State per ball: `x, v (Vec2), θ, ω (Vec<f32> SoA)`, plus the uniform
-   effective `r, m, I = 2/5·m·r²` from `effective_media` (size distributions are future work).
-2. **Broad-phase**: `grid.rs` uniform grid over predicted `x`, cell = `2·r_eff`; gather candidate
-   ball–ball pairs once (reused across iterations).
+   effective `r`, `m = ρ·π·r²` (unit-depth disc, per metre of mill length — see the coarse-graining
+   note above), `I = 0.5·m·r²` (a uniform disc's inertia, not a solid sphere's `2/5·m·r²`) from
+   `effective_media` (size distributions are future work).
+2. **Broad-phase**: `grid.rs` uniform grid over predicted `x`, cell size `2·r_eff·1.05` (a small
+   margin on the *cell size* only); gather candidate ball–ball pairs once (reused across
+   iterations). **Known limitation, surfaced but not fixed**: this broad-phase is purely discrete
+   per sub-step, with no displacement margin or swept/continuous collision test — a ball moving
+   more than roughly its own diameter within one sub-step can in principle tunnel through another
+   ball or the wall undetected. `DemStepStats::max_substep_displacement_over_diameter` (below)
+   surfaces this risk live (e.g. in the frontend's Solver panel) as a diagnostic ratio, but nothing
+   in the solver currently corrects for it; this remains open work, not solved by the diagnostic's
+   presence.
 3. **Solve non-penetration** (`dem_iterations` Gauss–Seidel passes, zero compliance = rigid):
    - Ball–ball: `C = |x_i − x_j| − (r_i + r_j)`; if `C < 0`, `Δλ = −C / (w_i + w_j)` (`w = 1/m`),
      apply `Δx_i = w_i·Δλ·n̂`, `Δx_j = −w_j·Δλ·n̂`, accumulate `λ_n` for this contact this sub-step.
@@ -220,6 +245,15 @@ per sub-step, analogous to PBF's `pbf_iterations`). Per sub-step `dt`:
 7. **Rolling resistance**: `Δω = −sign(ω)·min(μ_r·(λ_n,total/dt)·r/I·dt, |ω|)` per ball, where
    `λ_n,total` sums this ball's accumulated normal impulses (ball–ball + wall) this sub-step —
    capped so it cannot reverse the sign of `ω` in one sub-step.
+
+**Per-sub-step instrumentation.** Each call returns a `DemStepStats`: `wall_work_j` (friction work
+against the drum wall this sub-step, whose rate is the mill's instantaneous power draw),
+`collision_count` and `impact_energy_histogram` (log-spaced bins of fresh-impact energy, from the
+same approach-speed test the restitution pass above uses), `dissipated_energy_j` (net KE removed by
+the whole contact solve this sub-step), and `max_substep_displacement_over_diameter` (the
+tunnelling-risk diagnostic, step 2). This grinding-relevant instrumentation is surfaced through
+`metrics.rs` to the frontend's live metrics panel; see docs/PHYSICS.md for full metrics
+definitions.
 
 This is the same family of solver used for real-time rigid-body contact in production physics
 engines (XPBD / "small steps" style, e.g. Macklin, Müller & Chentanez 2016; Müller et al. 2020),
@@ -268,29 +302,49 @@ not forces (`CouplingImpulses`, applied as `Δv_ball = impulse * inv_mass` direc
 `* dt`) -- a force-based version (impulse/dt, re-integrated with another `* dt` on the ball side)
 was tried first and is more `dt`-sensitive than necessary; working in impulses throughout matches
 how the rest of the solver already applies position/velocity corrections directly (ss3.2/3.3).
-1. During `FluidParticles::step_coupled`, after its density-constraint solve, fluid particles inside a ball
-   (dist < r_b + 0.5·dx) are projected to the ball surface by a position correction `push`, **capped at
-   half the ball's radius** per sub-step (bounds the correction itself, not just its downstream impulse,
-   for particles that start or persistently end up deep inside the contact zone). Since a position
-   correction becomes a velocity via `Δv = push/dt` (ss3.3 step 5's reconstruction), the fluid's own
-   momentum change (impulse) is `m_f · push / dt`; the ball's Newton's-third-law reaction impulse is the
-   exact opposite, `-(m_f · push) / dt`.
-2. Viscous no-slip at ball surface: fluid particles within `h` of a ball surface blend towards the ball's surface velocity
-   `v_surf = v_b + ω_b × (x_i − x_b)` with factor `β_b·c_eff`; here `Δv` is already a velocity, so the
-   ball's reaction impulse is simply `-(m_f · Δv)` (no `/dt` at all, unlike step 1's position-based `push`).
-3. Both contributions' angular impulses use the lever arm from the ball's centre to the contact point/fluid
-   particle. The accumulated per-ball impulse is clamped to `|impulse| ≤ 3·m_b·g·dt` (angular impulse
-   clamped to that times `r_ball`) for stability, then applied as a direct velocity change in the ball
-   solver's predict step (`DemState::step_with_external_forces`, ss3.2 step 1). The `3x`-gravity multiple
-   (down from an initially-planned `20x`) was reached empirically: at this project's default scale, where
-   the coarse-grained ball radius can end up *smaller* than the fluid's own particle spacing (e.g.
-   defaults: ~6 mm balls vs. ~12.5 mm fluid spacing at `resolution = 40`), `20x` was still visibly ejecting
-   balls from the charge over several seconds of simulated time; `3x`, combined with the push cap in step 1,
-   stayed visually stable over 30+ seconds while still giving a meaningful buoyancy/drag effect.
-   (Buoyancy emerges from the density-constraint push; steel in slurry is a minor effect so v1 does not add ball
-   boundary particles to the density sum. v2 option: sample ball perimeter as boundary particles contributing to
-   `ρ_i` — Akinci-style — for correct buoyancy.)
-4. Balls advance their one sub-step; new positions/velocities become the moving boundary for the fluid's next sub-step.
+1. **Overlap push** (`step_coupled`'s step "3.5"): after the fluid's own density-constraint solve,
+   fluid particles inside a ball (dist < r_b + 0.5·dx) are projected to the ball surface by a
+   position correction `push`, **capped at half the ball's radius** per sub-step (bounds the
+   correction itself, not just its downstream impulse, for particles that start or persistently
+   end up deep inside the contact zone). Since a position correction becomes a velocity via
+   `Δv = push/dt` (ss3.3 step 5's reconstruction), the fluid's own momentum change (impulse) is
+   `m_f · push / dt`; the ball's Newton's-third-law reaction impulse is the exact opposite,
+   `-(m_f · push) / dt`.
+2. **Viscous no-slip drag** (`step_coupled`'s step "6.5"): fluid particles within `h` of a ball's
+   surface blend towards the ball's surface velocity `v_surf = v_b + ω_b × (x_i − x_b)` using a
+   Stokes-regime relaxation-time closure rather than a fixed coefficient:
+   `β = ball_no_slip·(1 − e^(−dt/τ))`, `τ = ρ_ball·r²/(4·μ)` (`ρ_ball = m_b/(π r²)`; `μ` is the
+   slurry's physical Pa·s viscosity, not the qualitative XSPH coefficient ss3.3's fluid-fluid
+   mixing uses), so a highly viscous fluid (small `τ`) reaches full no-slip within one sub-step
+   while an inviscid fluid (`μ → 0`, `τ → ∞`) applies essentially no drag. Here `Δv = β·(v_surf −
+   v_i)` is already a velocity, so the ball's reaction impulse is simply `-(m_f · Δv)` (no `/dt`,
+   unlike step 1's position-based `push`).
+3. **Buoyancy** (`step_coupled`'s step "6.6"), implemented directly rather than emerging from the
+   density-constraint push: each ball samples the local fluid density using the fluid's own Poly6
+   kernel and neighbour grid (ball positions are the fixed boundary for the whole fluid sub-step,
+   as above), `ρ_eff = min(ρ_local, ρ0)` (clamped to rest density to avoid over-buoyancy from a
+   locally compacted pocket, and tapering smoothly to zero as a ball nears the free surface rather
+   than an on/off cutoff), and receives an Archimedes buoyant impulse `-ρ_eff·(π r²)·g_vec·dt`
+   acting through its centroid (no angular impulse). The reaction is split across the contributing
+   fluid particles, weighted by each one's share of `ρ_local`. This is now implemented, not a
+   deferred "v2" option: an earlier revision of this plan sampled the ball perimeter as
+   Akinci-style boundary particles contributing to the fluid's own density sum as a possible
+   future extension — that extension is unnecessary now that buoyancy is computed directly.
+4. Steps 1–2's angular impulses use the lever arm from the ball's centre to the contact point/fluid
+   particle (buoyancy contributes none, acting through the centroid). The accumulated per-ball
+   impulse is then clamped (`step_coupled`'s step "8") to `|impulse| ≤ F_CLAMP_G_MULTIPLE·m_b·g·dt`
+   (angular impulse clamped to that times `r_ball`), a pure numerical-stability backstop against a
+   transient large overlap. `F_CLAMP_G_MULTIPLE = 20` (`pbf.rs`) today, not the `3x` an earlier
+   revision needed: that tighter clamp compensated for balls having a 3D-sphere mass while the
+   fluid used a unit-depth 2D mass, so a coarse-grained ball could end up hundreds of times lighter
+   than a fluid particle. Now that balls are unit-depth discs too (ss3.2), the coupling forces
+   (overlap push, viscous drag, buoyancy) are dimensionally consistent and `20x` is a pure
+   stability backstop rather than a value shaping normal behaviour. Persistent clamping once the
+   charge has settled (`CouplingImpulses::clamp_hits`, surfaced in metrics) indicates a real
+   problem (e.g. an under-resolved fluid), not an expected steady state.
+5. The clamped impulse is applied as a direct velocity change in the ball solver's predict step
+   (`DemState::step_with_external_forces`, ss3.2 step 1). Balls then advance their one sub-step;
+   new positions/velocities become the moving boundary for the fluid's next sub-step.
 
 ### 3.5 Free surface & metrics (`surface.rs`, `metrics.rs`)
 - Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of
