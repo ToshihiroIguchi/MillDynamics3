@@ -78,11 +78,12 @@ pub fn step(
     dem_iterations: u32,
     pbf_iterations: u32,
     dt: f32,
-) -> crate::pbf::FluidStepStats {
-    let (impulses, stats) =
+) -> (crate::pbf::FluidStepStats, crate::dem::DemStepStats) {
+    let (impulses, fluid_stats) =
         fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
-    dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&impulses));
-    stats
+    let dem_stats =
+        dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&impulses));
+    (fluid_stats, dem_stats)
 }
 
 #[cfg(test)]

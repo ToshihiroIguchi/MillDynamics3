@@ -44,3 +44,27 @@ regression comparison during the physics-fixes work, not a statement that M6 is 
 Cumulative `drum_only_step` change from the original baseline: 12.4 ms -> 20.0 ms (+61%). Still the
 same order of magnitude and not yet alarming, but worth watching: the M6 performance pass (not yet
 done) will need to budget for the CG solve's iteration count, not just a fixed per-particle cost.
+
+## After Phase 3b (grinding instrumentation: power, collisions, dissipation)
+
+| Benchmark | Time | vs. Phase 2 |
+|---|---|---|
+| `dem_step/500_balls` | 0.55 ms | no material change |
+| `dem_step/1000_balls` | 1.43 ms | no material change (noisy run-to-run on this machine) |
+| `dem_step/2000_balls` | 2.55 ms | no material change |
+| `drum_only_step` | 17.7 ms | no material change |
+
+Measured back-to-back with a `git stash`/`stash pop` of the Phase 2 commit in the same session, to
+rule out cross-session machine-state noise (an earlier same-machine, different-session run of
+*this exact Phase 2 commit* showed `dem_step/500_balls` at 1.18 ms and `drum_only_step` at 16.5 ms
+-- more than 2x `dem_step`'s originally-recorded Phase 2 number above -- purely from ambient
+system load, not any code change). One real regression *was* found and fixed during this phase:
+an initial attempt at deterministic ordering for `dem.rs`'s per-substep contact bookkeeping
+(`ContactBook`) used the same `HashMap` -> `BTreeMap` swap as `grid.rs`'s fix, but `ContactBook`'s
+map is accumulated into (`.entry(key).or_insert(0.0) += ...`) inside step 3's hot solver loop
+(`dem_iterations` times per contact pair every sub-step), where `BTreeMap`'s `O(log n)` lookup
+cost is significant -- this alone roughly doubled `dem_step`. Fixed by keeping `ContactBook` a
+`HashMap` (that accumulation's result does not depend on iteration order -- see its module doc
+comment) and instead collecting + sorting its entries once per sub-step for the passes that *do*
+need deterministic order (friction/restitution/rolling-resistance, steps 5-7), which cost nothing
+measurable at this bench's ball counts.

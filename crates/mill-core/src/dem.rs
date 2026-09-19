@@ -21,8 +21,83 @@ use crate::rng::Rng;
 const GRAVITY: f32 = -9.81;
 /// Below this approach speed, a contact is treated as already-resting rather than a fresh impact,
 /// so restitution is not (re-)applied every sub-step (which would otherwise make resting contacts
-/// buzz indefinitely instead of settling). See docs/PLAN.md ss3.2 step 6.
+/// buzz indefinitely instead of settling). See docs/PLAN.md ss3.2 step 6. Also used (docs/PLAN.md
+/// ss3.5) as the threshold for counting a contact as a genuine "impact" for
+/// [`DemStepStats::collision_count`]/`impact_energy_histogram` -- the same physical event
+/// (restitution only fires on a fresh impact) drives both.
 const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
+
+/// Number of log-spaced bins in [`DemStepStats::impact_energy_histogram`].
+pub const IMPACT_ENERGY_HISTOGRAM_BINS: usize = 12;
+/// Lower edge (J per metre of mill depth) of the impact-energy histogram's range.
+pub const IMPACT_ENERGY_MIN_J: f32 = 1e-6;
+/// Upper edge (J per metre of mill depth) of the impact-energy histogram's range.
+pub const IMPACT_ENERGY_MAX_J: f32 = 1.0;
+
+/// Log-spaced bin edges (J per metre of mill depth), `IMPACT_ENERGY_HISTOGRAM_BINS + 1` values
+/// from [`IMPACT_ENERGY_MIN_J`] to [`IMPACT_ENERGY_MAX_J`], for labelling
+/// [`DemStepStats::impact_energy_histogram`] (e.g. in [`crate::metrics`]).
+pub fn impact_energy_bin_edges() -> [f32; IMPACT_ENERGY_HISTOGRAM_BINS + 1] {
+    let log_min = IMPACT_ENERGY_MIN_J.log10();
+    let log_max = IMPACT_ENERGY_MAX_J.log10();
+    let mut edges = [0.0f32; IMPACT_ENERGY_HISTOGRAM_BINS + 1];
+    for (i, edge) in edges.iter_mut().enumerate() {
+        let t = i as f32 / IMPACT_ENERGY_HISTOGRAM_BINS as f32;
+        *edge = 10f32.powf(log_min + t * (log_max - log_min));
+    }
+    edges
+}
+
+/// Histogram bin index for an impact energy `e` (J per metre of mill depth), log-spaced between
+/// [`IMPACT_ENERGY_MIN_J`] and [`IMPACT_ENERGY_MAX_J`] (values outside that range are clamped
+/// into the first/last bin, so every genuine impact is counted somewhere). `None` for a
+/// non-positive or non-finite `e` (not a real impact).
+fn impact_energy_bin(e: f32) -> Option<usize> {
+    if !e.is_finite() || e <= 0.0 {
+        return None;
+    }
+    let e_clamped = e.clamp(IMPACT_ENERGY_MIN_J, IMPACT_ENERGY_MAX_J);
+    let log_min = IMPACT_ENERGY_MIN_J.log10();
+    let log_max = IMPACT_ENERGY_MAX_J.log10();
+    let t = (e_clamped.log10() - log_min) / (log_max - log_min);
+    let idx = (t * IMPACT_ENERGY_HISTOGRAM_BINS as f32) as usize;
+    Some(idx.min(IMPACT_ENERGY_HISTOGRAM_BINS - 1))
+}
+
+/// Per-sub-step DEM solver diagnostics (docs/PLAN.md ss3.5), returned by
+/// [`DemState::step_with_external_forces`]. Everything here is a *per-metre-of-mill-depth*
+/// quantity, consistent with this crate's unit-depth disc convention ([`ball_mass`]); a caller
+/// wanting an absolute value for a real 3D mill multiplies by the mill's axial length.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DemStepStats {
+    /// Work (J) done against the drum wall's friction this sub-step -- the rate of this
+    /// (`wall_work_j / dt`) is the mill's instantaneous power draw. Derived from the friction
+    /// step's tangential impulse at each ball-wall contact dotted with the wall's own velocity
+    /// there (the wall's *normal* impulse does no work: the wall's velocity is purely tangential,
+    /// see [`crate::geometry::Drum::wall_velocity`]).
+    pub wall_work_j: f32,
+    /// Number of contacts this sub-step whose pre-solve approach speed exceeded
+    /// [`RESTITUTION_VELOCITY_THRESHOLD`] (i.e. a genuine fresh impact, ball-ball and ball-wall
+    /// combined) -- the same criterion the restitution step (docs/PLAN.md ss3.2 step 6) uses to
+    /// decide whether to apply restitution at all.
+    pub collision_count: u32,
+    /// Count of impacts this sub-step per log-spaced energy bin (see [`impact_energy_bin_edges`]),
+    /// `E = 0.5 * m_reduced * v_n_pre^2` (`m_reduced = mass/2` ball-ball, `mass` ball-wall).
+    pub impact_energy_histogram: [u32; IMPACT_ENERGY_HISTOGRAM_BINS],
+    /// Kinetic energy (J) removed by this sub-step's contact solve as a whole: total ball KE
+    /// right after the predict step (gravity + external forces, before any contact correction)
+    /// minus final KE. A simple, robust net-dissipation estimate -- it does not attribute the
+    /// loss to any particular mechanism (friction, restitution `e < 1`, rolling resistance), but
+    /// requires no extra per-mechanism bookkeeping and cannot silently miss one.
+    pub dissipated_energy_j: f32,
+    /// Largest per-ball `|v| * dt / (2 * radius)` this sub-step: the fraction of a ball's own
+    /// diameter it moved in one sub-step. A rough tunnelling-risk indicator -- values approaching
+    /// or exceeding 1 mean a fast ball's motion this sub-step is comparable to (or larger than)
+    /// its own size, so the broad-phase/contact solve (docs/PLAN.md ss3.2, discrete per-sub-step)
+    /// could in principle miss a collision along the way. Diagnostic only in this pass; a
+    /// continuous (swept) collision guard is future work.
+    pub max_substep_displacement_over_diameter: f32,
+}
 
 /// Mass of one ball, modelled as a **unit-depth disc** (kg per metre of mill length):
 /// `rho * pi * r^2 * 1 m`. This is the same 2D slice convention the fluid uses
@@ -156,12 +231,54 @@ impl Balls {
 /// Persistent per-substep contact bookkeeping. Cleared and rebuilt every sub-step (see
 /// [`DemState::step`]); the accumulated normal impulse `lambda_n` from this sub-step's iterative
 /// solve is what friction/rolling-resistance/restitution are computed against afterwards.
+///
+/// **`HashMap`, with sorted iteration where it matters.** Unlike [`crate::grid::UniformGrid`]
+/// (whose fix this module doc comment cross-references), this map's *accumulation* itself
+/// (`.entry(key).or_insert(0.0) += d_lambda` in step 3's inner solve loop, run
+/// `dem_iterations` times per contact pair every sub-step) is hot enough that `BTreeMap`'s
+/// `O(log n)` lookup measurably regressed `cargo bench`'s `dem_step`/`drum_only_step` (roughly
+/// 2x at the default ball counts) -- and that accumulation does not actually need sorted order:
+/// each key's running sum only ever receives `+=` calls in the fixed order `ball_ball_pairs`
+/// already iterates (itself deterministic since `UniformGrid`'s fix), regardless of which
+/// internal hash bucket holds it. The real non-determinism risk is in the friction/restitution/
+/// rolling-resistance passes (steps 5-7) that iterate *across different keys* and mutate shared
+/// per-ball state as they go (a Gauss-Seidel-style sequential correction, where processing order
+/// changes the physical result, not just summation rounding) -- those passes use
+/// [`ContactBook::sorted_ball_ball`]/[`ContactBook::sorted_ball_wall`] instead of iterating the
+/// maps directly, giving deterministic order there at negligible cost (one sort of a
+/// per-sub-step-sized collection, not a per-lookup cost).
 #[derive(Default)]
 struct ContactBook {
     /// Ball-ball contacts: key (i, j) with i < j.
     ball_ball_lambda_n: HashMap<(u32, u32), f32>,
     /// Ball-wall contacts: key is the ball index.
     ball_wall_lambda_n: HashMap<u32, f32>,
+}
+
+impl ContactBook {
+    /// `ball_ball_lambda_n`'s entries as a `(i, j, lambda_n)` list sorted by `(i, j)`, for
+    /// deterministic iteration order (see this struct's doc comment).
+    fn sorted_ball_ball(&self) -> Vec<(u32, u32, f32)> {
+        let mut entries: Vec<(u32, u32, f32)> = self
+            .ball_ball_lambda_n
+            .iter()
+            .map(|(&(i, j), &lambda_n)| (i, j, lambda_n))
+            .collect();
+        entries.sort_unstable_by_key(|&(i, j, _)| (i, j));
+        entries
+    }
+
+    /// `ball_wall_lambda_n`'s entries as an `(i, lambda_n)` list sorted by `i`, for deterministic
+    /// iteration order (see this struct's doc comment).
+    fn sorted_ball_wall(&self) -> Vec<(u32, f32)> {
+        let mut entries: Vec<(u32, f32)> = self
+            .ball_wall_lambda_n
+            .iter()
+            .map(|(&i, &lambda_n)| (i, lambda_n))
+            .collect();
+        entries.sort_unstable_by_key(|&(i, _)| i);
+        entries
+    }
 }
 
 /// The ball population plus its XPBD solver state.
@@ -186,8 +303,8 @@ impl DemState {
         media: &MediaParams,
         iterations: u32,
         dt: f32,
-    ) {
-        self.step_with_external_forces(drum, drum_angle, media, iterations, dt, None);
+    ) -> DemStepStats {
+        self.step_with_external_forces(drum, drum_angle, media, iterations, dt, None)
     }
 
     /// As [`DemState::step`], but additionally applies `external` (fluid coupling impulses per
@@ -204,10 +321,10 @@ impl DemState {
         iterations: u32,
         dt: f32,
         external: Option<&crate::coupling::CouplingImpulses>,
-    ) {
+    ) -> DemStepStats {
         let balls = &mut self.balls;
         if balls.is_empty() || dt <= 0.0 {
-            return;
+            return DemStepStats::default();
         }
         let n = balls.len();
         let w = balls.inv_mass();
@@ -227,6 +344,16 @@ impl DemState {
             balls.x[i] += balls.v[i] * dt;
             balls.theta[i] += balls.omega[i] * dt;
         }
+        let ke_after_predict: f32 = balls
+            .v
+            .iter()
+            .map(|v| 0.5 * balls.mass * v.length_squared())
+            .sum();
+        let max_substep_displacement_over_diameter = balls
+            .v
+            .iter()
+            .map(|v| v.length() * dt / (2.0 * r).max(1e-12))
+            .fold(0.0f32, f32::max);
 
         // --- 2. Broad-phase (ball-ball candidates only; wall is checked directly per ball) ----
         let cell_size = (2.0 * r * 1.05).max(1e-6);
@@ -280,8 +407,14 @@ impl DemState {
             balls.omega[i] = angle_diff(balls.theta[i], theta0[i]) / dt;
         }
 
+        // Sorted once, reused by every pass below that iterates *across* contacts (steps 5-7) --
+        // see `ContactBook`'s doc comment for why this, rather than iterating the maps directly,
+        // is what keeps this solver deterministic without slowing down step 3's hot accumulation.
+        let ball_ball_contacts = book.sorted_ball_ball();
+        let ball_wall_contacts = book.sorted_ball_wall();
+
         // --- 5. Friction (single pass, Coulomb-clamped position correction) -------------------
-        for (&(i, j), &lambda_n) in &book.ball_ball_lambda_n {
+        for &(i, j, lambda_n) in &ball_ball_contacts {
             if lambda_n <= 0.0 {
                 continue;
             }
@@ -306,7 +439,8 @@ impl DemState {
             balls.theta[iu] -= r * w_rot * d_lambda_t;
             balls.theta[ju] -= r * w_rot * d_lambda_t;
         }
-        for (&i, &lambda_n) in &book.ball_wall_lambda_n {
+        let mut wall_work_j = 0.0f32;
+        for &(i, lambda_n) in &ball_wall_contacts {
             if lambda_n <= 0.0 {
                 continue;
             }
@@ -326,6 +460,13 @@ impl DemState {
 
             balls.x[iu] += w * d_lambda_t * t_hat;
             balls.theta[iu] -= r * w_rot * d_lambda_t;
+            // `d_lambda_t` is the tangential impulse (kg*m/s per metre of mill depth) the wall
+            // delivered to this ball; the ball's Newton's-third-law reaction against the wall,
+            // dotted with the wall's own velocity there, is the rate of work the drum's motor
+            // must supply to overcome it (docs/PLAN.md ss3.5's power-draw estimate) -- summed as
+            // work (impulse . velocity) rather than force (impulse/dt) . velocity * dt, the two
+            // being algebraically identical but the former not needing `dt` at all here.
+            wall_work_j += d_lambda_t * t_hat.dot(v_wall);
         }
         // Re-reconstruct velocities once more now that friction has adjusted positions/orientation.
         for i in 0..n {
@@ -334,7 +475,9 @@ impl DemState {
         }
 
         // --- 6. Restitution (single pass, using the pre-solve approach velocity) -------------
-        for (&(i, j), &lambda_n) in &book.ball_ball_lambda_n {
+        let mut collision_count = 0u32;
+        let mut impact_energy_histogram = [0u32; IMPACT_ENERGY_HISTOGRAM_BINS];
+        for &(i, j, lambda_n) in &ball_ball_contacts {
             if lambda_n <= 0.0 {
                 continue;
             }
@@ -347,6 +490,13 @@ impl DemState {
             if v_n_pre >= -RESTITUTION_VELOCITY_THRESHOLD {
                 continue;
             }
+            // A genuine fresh impact (docs/PLAN.md ss3.5): reduced mass `mass/2` for two equal
+            // masses colliding.
+            collision_count += 1;
+            let impact_energy_j = 0.5 * (balls.mass * 0.5) * v_n_pre * v_n_pre;
+            if let Some(bin) = impact_energy_bin(impact_energy_j) {
+                impact_energy_histogram[bin] += 1;
+            }
             let v_n_now = (balls.v[iu] - balls.v[ju]).dot(n_hat);
             let target = -media.restitution_ball_ball * v_n_pre;
             let delta_v_n = target - v_n_now;
@@ -358,7 +508,7 @@ impl DemState {
             balls.v[iu] += w * impulse * n_hat;
             balls.v[ju] -= w * impulse * n_hat;
         }
-        for (&i, &lambda_n) in &book.ball_wall_lambda_n {
+        for &(i, lambda_n) in &ball_wall_contacts {
             if lambda_n <= 0.0 {
                 continue;
             }
@@ -369,6 +519,12 @@ impl DemState {
             let v_n_pre = (v_pre[iu] - v_wall).dot(n_hat);
             if v_n_pre >= -RESTITUTION_VELOCITY_THRESHOLD {
                 continue;
+            }
+            // Wall has "infinite" mass, so the reduced mass of the pair is just the ball's own.
+            collision_count += 1;
+            let impact_energy_j = 0.5 * balls.mass * v_n_pre * v_n_pre;
+            if let Some(bin) = impact_energy_bin(impact_energy_j) {
+                impact_energy_histogram[bin] += 1;
             }
             let v_n_now = (balls.v[iu] - v_wall).dot(n_hat);
             let target = -media.restitution_ball_wall * v_n_pre;
@@ -382,11 +538,11 @@ impl DemState {
         // --- 7. Rolling resistance -------------------------------------------------------------
         if media.rolling_friction > 0.0 && balls.inertia > 0.0 {
             let mut total_lambda_n = vec![0.0f32; n];
-            for (&(i, j), &lambda_n) in &book.ball_ball_lambda_n {
+            for &(i, j, lambda_n) in &ball_ball_contacts {
                 total_lambda_n[i as usize] += lambda_n.max(0.0);
                 total_lambda_n[j as usize] += lambda_n.max(0.0);
             }
-            for (&i, &lambda_n) in &book.ball_wall_lambda_n {
+            for &(i, lambda_n) in &ball_wall_contacts {
                 total_lambda_n[i as usize] += lambda_n.max(0.0);
             }
             for (omega, &lambda_n) in balls.omega.iter_mut().zip(total_lambda_n.iter()) {
@@ -399,6 +555,19 @@ impl DemState {
                 let delta_omega = max_delta_omega.min(omega.abs());
                 *omega -= omega.signum() * delta_omega;
             }
+        }
+
+        let ke_final: f32 = balls
+            .v
+            .iter()
+            .map(|v| 0.5 * balls.mass * v.length_squared())
+            .sum();
+        DemStepStats {
+            wall_work_j,
+            collision_count,
+            impact_energy_histogram,
+            dissipated_energy_j: ke_after_predict - ke_final,
+            max_substep_displacement_over_diameter,
         }
     }
 }

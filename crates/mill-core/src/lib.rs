@@ -34,6 +34,13 @@ use pbf::FluidParticles;
 /// scale (docs/PLAN.md ss3.2/3.3).
 pub const FIXED_DT: f32 = 1.0 / 240.0;
 
+/// Time constant (s) for the exponential moving average [`Simulation`] applies to the per-sub-step
+/// grinding diagnostics (power draw, torque, collision rate, dissipated power, impact-energy
+/// histogram, docs/PLAN.md ss3.5). A single fixed 1/240 s sub-step is far too short/noisy to read
+/// directly; ~1 s smooths that out while still tracking a real change (e.g. a speed change)
+/// within about a second.
+const GRINDING_STATS_EMA_TAU_S: f32 = 1.0;
+
 /// The simulation instance. This is the single type the `mill-wasm` wrapper (and, indirectly, the
 /// web worker's fixed-step accumulator, docs/PLAN.md ss4.1) drives via [`Simulation::step`].
 pub struct Simulation {
@@ -48,6 +55,18 @@ pub struct Simulation {
     /// recently completed sub-step. `Default` (all zero) before the first [`Simulation::step`]
     /// call.
     fluid_stats: pbf::FluidStepStats,
+    /// EMA-smoothed grinding diagnostics (docs/PLAN.md ss3.5), updated every sub-step in
+    /// [`Simulation::step`] with time constant [`GRINDING_STATS_EMA_TAU_S`]. All zero before the
+    /// first sub-step.
+    power_draw_w: f32,
+    torque_nm: f32,
+    collision_rate_per_s: f32,
+    dissipated_power_w: f32,
+    impact_energy_counts_per_s: [f32; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
+    /// Largest [`dem::DemStepStats::max_substep_displacement_over_diameter`] seen since the last
+    /// call to [`Simulation::step`] (reset at the start of each call, not EMA-smoothed -- a
+    /// tunnelling-risk spike is exactly the kind of transient an average would hide).
+    max_substep_displacement_over_diameter: f32,
 }
 
 impl Simulation {
@@ -87,6 +106,12 @@ impl Simulation {
             dem,
             fluid,
             fluid_stats: pbf::FluidStepStats::default(),
+            power_draw_w: 0.0,
+            torque_nm: 0.0,
+            collision_rate_per_s: 0.0,
+            dissipated_power_w: 0.0,
+            impact_energy_counts_per_s: [0.0; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
+            max_substep_displacement_over_diameter: 0.0,
         })
     }
 
@@ -140,6 +165,43 @@ impl Simulation {
         self.fluid_stats.mean_shear_rate_per_s
     }
 
+    /// EMA-smoothed mill power draw (W per metre of mill depth): the rate of work the drum's
+    /// motor must supply against the charge's frictional resistance ([`dem::DemStepStats::wall_work_j`]).
+    pub fn power_draw_w(&self) -> f32 {
+        self.power_draw_w
+    }
+
+    /// EMA-smoothed drum torque (N*m per metre of mill depth), `power_draw_w / omega`. `0.0`
+    /// while the drum is not rotating (torque is undefined, not infinite, at `omega = 0`).
+    pub fn torque_nm(&self) -> f32 {
+        self.torque_nm
+    }
+
+    /// EMA-smoothed ball-ball + ball-wall collision rate (impacts per second per metre of mill
+    /// depth), see [`dem::DemStepStats::collision_count`].
+    pub fn collision_rate_per_s(&self) -> f32 {
+        self.collision_rate_per_s
+    }
+
+    /// EMA-smoothed net kinetic-energy dissipation rate (W per metre of mill depth) from the DEM
+    /// contact solve, see [`dem::DemStepStats::dissipated_energy_j`].
+    pub fn dissipated_power_w(&self) -> f32 {
+        self.dissipated_power_w
+    }
+
+    /// EMA-smoothed impact rate (impacts per second per metre of mill depth) in each log-spaced
+    /// energy bin (see [`dem::impact_energy_bin_edges`]).
+    pub fn impact_energy_counts_per_s(&self) -> &[f32; dem::IMPACT_ENERGY_HISTOGRAM_BINS] {
+        &self.impact_energy_counts_per_s
+    }
+
+    /// Largest [`dem::DemStepStats::max_substep_displacement_over_diameter`] over every sub-step
+    /// of the most recent [`Simulation::step`] call (not EMA-smoothed, see that field's struct
+    /// doc comment for why).
+    pub fn max_substep_displacement_over_diameter(&self) -> f32 {
+        self.max_substep_displacement_over_diameter
+    }
+
     /// Extracts the fluid's free-surface contour(s) at the current state (docs/PLAN.md ss3.5).
     /// Recomputed on demand each call -- callers should not call this more often than needed for
     /// rendering.
@@ -176,9 +238,10 @@ impl Simulation {
 
         let pbf_iterations = self.params.simulation.pbf_iterations;
 
+        self.max_substep_displacement_over_diameter = 0.0;
         for _ in 0..n_substeps {
             let drum = Drum::new(radius_m, omega, lifters);
-            self.fluid_stats = coupling::step(
+            let (fluid_stats, dem_stats) = coupling::step(
                 &mut self.dem,
                 &mut self.fluid,
                 &drum,
@@ -189,9 +252,48 @@ impl Simulation {
                 pbf_iterations,
                 sub_dt,
             );
+            self.fluid_stats = fluid_stats;
+            self.update_grinding_stats(&dem_stats, sub_dt, omega);
             self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
             self.sim_time += sub_dt as f64;
         }
+    }
+
+    /// Folds one sub-step's [`dem::DemStepStats`] into the EMA-smoothed grinding diagnostics
+    /// (time constant [`GRINDING_STATS_EMA_TAU_S`]), except
+    /// `max_substep_displacement_over_diameter`, which tracks this call's peak directly (see its
+    /// struct doc comment).
+    fn update_grinding_stats(&mut self, stats: &dem::DemStepStats, sub_dt: f32, omega: f32) {
+        let alpha = 1.0 - (-sub_dt / GRINDING_STATS_EMA_TAU_S).exp();
+
+        let power_instant = stats.wall_work_j / sub_dt;
+        self.power_draw_w += alpha * (power_instant - self.power_draw_w);
+
+        let torque_instant = if omega.abs() > 1e-6 {
+            power_instant / omega
+        } else {
+            0.0
+        };
+        self.torque_nm += alpha * (torque_instant - self.torque_nm);
+
+        let collision_rate_instant = stats.collision_count as f32 / sub_dt;
+        self.collision_rate_per_s += alpha * (collision_rate_instant - self.collision_rate_per_s);
+
+        let dissipated_power_instant = stats.dissipated_energy_j / sub_dt;
+        self.dissipated_power_w += alpha * (dissipated_power_instant - self.dissipated_power_w);
+
+        for (ema, &count) in self
+            .impact_energy_counts_per_s
+            .iter_mut()
+            .zip(&stats.impact_energy_histogram)
+        {
+            let instant = count as f32 / sub_dt;
+            *ema += alpha * (instant - *ema);
+        }
+
+        self.max_substep_displacement_over_diameter = self
+            .max_substep_displacement_over_diameter
+            .max(stats.max_substep_displacement_over_diameter);
     }
 }
 
@@ -328,6 +430,140 @@ mod tests {
         assert!(
             !surface.is_empty(),
             "expected at least one free-surface contour"
+        );
+    }
+
+    #[test]
+    fn steady_cascading_charge_has_a_plausible_power_energy_balance() {
+        // Power draw (work done against wall friction, docs/PLAN.md ss3.5) and net dissipation
+        // (kinetic energy removed by the contact solve) both being positive and finite is a
+        // basic sanity check on this instrumentation: energy flows in only through wall friction
+        // and gravity (net gravitational work is zero over a full toe-shoulder cycle once the
+        // charge's average height stops changing) and leaves only through dissipation, so both
+        // must be positive once the charge is genuinely cascading, and dissipation cannot run
+        // away to some absurd multiple of the input.
+        //
+        // This deliberately does *not* assert they are numerically close: the XPBD contact
+        // solver (docs/PLAN.md ss3.2) resolves many simultaneous, tightly-packed contacts in the
+        // toe with a modest fixed iteration count (`dem_iterations = 4`, not run to full
+        // convergence every sub-step) and treats any contact below
+        // `RESTITUTION_VELOCITY_THRESHOLD` as inelastic by construction (no compensating
+        // restitution impulse) -- both are well-known sources of extra *numerical* damping in
+        // position-based/iterative rigid-contact solvers, on top of the physical friction and
+        // restitution losses `wall_work_j` alone accounts for. Measured empirically at this
+        // project's defaults: dissipation runs roughly an order of magnitude above wall power
+        // draw, which is why the bound below is wide rather than a tight ratio.
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::PercentCritical,
+                speed_value: 70.0,
+                direction: Direction::CounterClockwise,
+            },
+            media: MediaParams {
+                ball_diameter_m: 0.02,
+                fill_fraction: 0.25,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+            slurry: params::SlurryParams {
+                enabled: false,
+                ..params::SlurryParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 150;
+        params.validate().unwrap();
+
+        let mut sim = Simulation::new(params).unwrap();
+        let dt = 1.0 / 60.0;
+        // Settle into steady cascading motion for several EMA time constants
+        // (GRINDING_STATS_EMA_TAU_S = 1 s) so the smoothed readings have converged.
+        for _ in 0..(6 * 60) {
+            sim.step(dt);
+        }
+
+        let power = sim.power_draw_w();
+        let dissipated = sim.dissipated_power_w();
+        assert!(
+            power > 0.0,
+            "expected positive power draw once cascading, got {power}"
+        );
+        assert!(
+            dissipated > 0.0,
+            "expected positive dissipation once cascading, got {dissipated}"
+        );
+        let ratio = power / dissipated;
+        assert!(
+            (0.01..1.0).contains(&ratio),
+            "power draw and dissipation should be positive and within a couple of orders of \
+             magnitude of each other, not disconnected or with dissipation *below* input power: \
+             power={power} dissipated={dissipated} ratio={ratio}"
+        );
+    }
+
+    #[test]
+    fn centrifuging_draws_less_power_than_cascading() {
+        // A well-known operational signature of centrifuging (the failure mode docs/PLAN.md
+        // ss3.2's cascading-vs-centrifuging distinction warns about): once the charge locks to
+        // the wall and co-rotates, the mill draws meaningfully less power than when it is
+        // actively cascading -- there is far less ongoing relative sliding at the wall to
+        // overcome, and none of the grinding action a real mill is run for. This qualitative
+        // ordering (rather than an absolute "power should approach zero" claim) is what real
+        // mill operators actually use to detect an over-speed centrifuging mill, and is more
+        // robust here than pinning down exactly how close settled centrifuging power gets to
+        // zero for this particular ball count/size/friction combination.
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, SpeedMode};
+
+        fn settled_power_draw(percent_critical: f32, fill_fraction: f32) -> f32 {
+            let mut params = Params {
+                mill: MillParams {
+                    diameter_m: 1.0,
+                    speed_mode: SpeedMode::PercentCritical,
+                    speed_value: percent_critical,
+                    direction: Direction::CounterClockwise,
+                },
+                media: MediaParams {
+                    ball_diameter_m: 0.02,
+                    fill_fraction,
+                    ..MediaParams::default()
+                },
+                lifters: LiftersParams {
+                    count: 0,
+                    ..LiftersParams::default()
+                },
+                slurry: params::SlurryParams {
+                    enabled: false,
+                    ..params::SlurryParams::default()
+                },
+                ..Params::default()
+            };
+            params.simulation.max_balls = 150;
+            params.validate().unwrap();
+
+            let mut sim = Simulation::new(params).unwrap();
+            let dt = 1.0 / 60.0;
+            for _ in 0..(8 * 60) {
+                sim.step(dt);
+            }
+            sim.power_draw_w()
+        }
+
+        let cascading_power = settled_power_draw(70.0, 0.25);
+        let centrifuging_power = settled_power_draw(130.0, 0.10);
+        assert!(
+            cascading_power > 0.0,
+            "expected positive power draw while cascading, got {cascading_power}"
+        );
+        assert!(
+            centrifuging_power < cascading_power,
+            "centrifuging should draw less power than cascading: \
+             cascading={cascading_power} centrifuging={centrifuging_power}"
         );
     }
 }
