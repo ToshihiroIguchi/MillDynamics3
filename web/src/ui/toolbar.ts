@@ -6,6 +6,8 @@ export interface ToolbarCallbacks {
   onStep(): void;
   onReset(): void;
   onOpenParams(): void;
+  onTogglePanel(): boolean; // returns the new "panel visible" state, reflected via aria-pressed
+  initialPanelVisible: boolean;
 }
 
 export function createToolbar(callbacks: ToolbarCallbacks): HTMLElement {
@@ -35,7 +37,15 @@ export function createToolbar(callbacks: ToolbarCallbacks): HTMLElement {
   paramsBtn.textContent = "Parameters";
   paramsBtn.addEventListener("click", () => callbacks.onOpenParams());
 
-  el.append(playPauseBtn, stepBtn, resetBtn, paramsBtn);
-  document.body.appendChild(el);
+  const panelBtn = document.createElement("button");
+  panelBtn.type = "button";
+  panelBtn.textContent = "Panel";
+  panelBtn.setAttribute("aria-pressed", String(callbacks.initialPanelVisible));
+  panelBtn.addEventListener("click", () => {
+    const visible = callbacks.onTogglePanel();
+    panelBtn.setAttribute("aria-pressed", String(visible));
+  });
+
+  el.append(playPauseBtn, stepBtn, resetBtn, paramsBtn, panelBtn);
   return el;
 }

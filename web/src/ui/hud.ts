@@ -22,7 +22,6 @@ function millOf(params: ParamsJson | null): { diameter_m: number; speed_mode: st
 export function createHud(): Hud {
   const el = document.createElement("div");
   el.className = "hud";
-  document.body.appendChild(el);
 
   return {
     el,

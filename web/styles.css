@@ -12,12 +12,52 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
+.app {
+  display: flex;
+  height: 100vh;
+}
+
+.scene-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
 #scene {
   display: block;
+  position: absolute;
+  inset: 0;
+}
+
+.metrics-panel {
+  width: 340px;
+  flex: none;
+  overflow-y: auto;
+  border-left: 1px solid #3a4048;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  background: #12161c;
+}
+
+body.panel-collapsed .metrics-panel {
+  display: none;
+}
+
+@media (max-width: 800px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .metrics-panel {
+    width: auto;
+    height: 40vh;
+    border-left: 0;
+    border-top: 1px solid #3a4048;
+  }
 }
 
 .toolbar {
-  position: fixed;
+  position: absolute;
   top: 12px;
   left: 12px;
   display: flex;
@@ -39,8 +79,12 @@ body {
   background: #262d38;
 }
 
+.toolbar button[aria-pressed="false"] {
+  color: #9aa3b0;
+}
+
 .hud {
-  position: fixed;
+  position: absolute;
   bottom: 12px;
   left: 12px;
   z-index: 10;

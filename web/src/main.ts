@@ -11,13 +11,20 @@ const canvas = document.querySelector<HTMLCanvasElement>("#scene");
 if (!canvas) {
   throw new Error("Missing #scene canvas element");
 }
+const sceneWrapOrNull = document.querySelector<HTMLElement>(".scene-wrap");
+if (!sceneWrapOrNull) {
+  throw new Error("Missing .scene-wrap element");
+}
+const sceneWrap: HTMLElement = sceneWrapOrNull;
 const renderer = new CanvasRenderer(canvas);
 
-function resizeToViewport(): void {
-  renderer.resize(window.innerWidth, window.innerHeight);
+function resizeToWrap(): void {
+  const { clientWidth: w, clientHeight: h } = sceneWrap;
+  if (w <= 0 || h <= 0) return;
+  renderer.resize(w, h);
 }
-resizeToViewport();
-window.addEventListener("resize", resizeToViewport);
+resizeToWrap();
+new ResizeObserver(resizeToWrap).observe(sceneWrap);
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 
@@ -88,14 +95,49 @@ const paramsModal = createParamsModal((params) => {
   send({ type: "init", params });
 });
 
-createToolbar({
+const PANEL_STORAGE_KEY = "milldynamics.panel";
+
+function readPanelVisiblePref(): boolean {
+  try {
+    const raw = localStorage.getItem(PANEL_STORAGE_KEY);
+    if (raw === null) return true;
+    return JSON.parse(raw) === true;
+  } catch {
+    return true;
+  }
+}
+
+function setPanelCollapsed(collapsed: boolean): void {
+  document.body.classList.toggle("panel-collapsed", collapsed);
+}
+
+const initialPanelVisible = readPanelVisiblePref();
+setPanelCollapsed(!initialPanelVisible);
+
+function togglePanel(): boolean {
+  const wasCollapsed = document.body.classList.contains("panel-collapsed");
+  const nowVisible = wasCollapsed;
+  setPanelCollapsed(!nowVisible);
+  try {
+    localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify(nowVisible));
+  } catch {
+    // ignore (private browsing / disabled storage)
+  }
+  return nowVisible;
+}
+
+const toolbarEl = createToolbar({
   onTogglePlay: togglePlay,
   onStep: () => send({ type: "step" }),
   onReset: () => send({ type: "init", params: state.params ?? undefined }),
   onOpenParams: () => paramsModal.open(state.params ?? {}),
+  onTogglePanel: togglePanel,
+  initialPanelVisible,
 });
+sceneWrap.appendChild(toolbarEl);
 
 const hud = createHud();
+sceneWrap.appendChild(hud.el);
 
 window.addEventListener("keydown", (event) => {
   if (event.code === "Space" && !(event.target instanceof HTMLElement && event.target.closest("dialog"))) {
