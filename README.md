@@ -55,7 +55,7 @@ cargo bench -p mill-core
 cd web
 npm run lint
 npm run test
-npm run e2e
+npm run e2e  # requires scripts/build-wasm.sh (or .ps1 on Windows) to have been run first
 ```
 
 ## Notes

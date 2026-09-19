@@ -70,6 +70,8 @@ jobs:
 
       - run: npm ci
         working-directory: web
+      - run: npm run test
+        working-directory: web
       - run: npm run lint
         working-directory: web
       - run: npm run build
