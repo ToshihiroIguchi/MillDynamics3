@@ -326,12 +326,12 @@ impl Default for SimulationParams {
     fn default() -> Self {
         Self {
             resolution: 40,
-            substeps: 4,
+            substeps: 8,
             pbf_iterations: 3,
-            dem_iterations: 4,
+            dem_iterations: 2,
             time_scale: 1.0,
             frame_budget_ms: 12.0,
-            max_balls: 2000,
+            max_balls: 600,
             seed: 1,
         }
     }
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn effective_media_coarse_grains_when_true_count_is_large() {
         // Default scenario: D = 1 m, d = 10 mm, J = 0.30 => several thousand true discs, above
-        // max_balls (2000), so coarse-graining must kick in.
+        // max_balls (600), so coarse-graining must kick in.
         let params = Params::default();
         let n_true = params.true_ball_count();
         assert!(n_true > params.simulation.max_balls as f32);

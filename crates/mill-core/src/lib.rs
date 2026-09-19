@@ -262,39 +262,81 @@ impl Simulation {
         m
     }
 
+    /// The fixed sub-step size (s) this simulation's `simulation.substeps` implies at the
+    /// project's nominal 60 Hz target frame rate: `1 / (60 * substeps)`. [`FIXED_DT`] is this
+    /// value at the default `substeps = 4`; this method gives the actual value for whatever
+    /// `substeps` this instance's params currently specify. A caller driving a fixed-sub-step
+    /// accumulator loop (docs/PLAN.md ss4.1: "run `step_fixed` until sim time catches up with
+    /// wall time, capped by a frame budget") should use this rather than hard-coding
+    /// [`FIXED_DT`], since it stays correct if `substeps` is changed from the default.
+    pub fn fixed_sub_dt(&self) -> f32 {
+        1.0 / (60.0 * self.params.simulation.substeps.max(1) as f32)
+    }
+
+    /// Advances the simulation by exactly one fixed sub-step ([`Simulation::fixed_sub_dt`]).
+    /// Unlike [`Simulation::step`], this does **not** reset
+    /// [`Simulation::max_substep_displacement_over_diameter`]/[`Simulation::coupling_clamp_hits`]
+    /// -- a caller running several `step_fixed` calls in a row to catch up with wall time within
+    /// one rendered frame (docs/PLAN.md ss4.1) should call [`Simulation::reset_frame_stats`] once
+    /// at the start of that frame instead, so those "peak/any-hit this frame" diagnostics
+    /// (see their own doc comments for why) cover the whole frame rather than just its last
+    /// sub-step.
+    pub fn step_fixed(&mut self) {
+        let sub_dt = self.fixed_sub_dt();
+        self.advance_one_sub_step(sub_dt);
+    }
+
+    /// Resets the per-frame diagnostics [`Simulation::max_substep_displacement_over_diameter`]
+    /// and [`Simulation::coupling_clamp_hits`] to zero. [`Simulation::step`] does this itself
+    /// once per call; a caller instead driving [`Simulation::step_fixed`] in an accumulator loop
+    /// (docs/PLAN.md ss4.1) should call this once per rendered frame, before that frame's
+    /// `step_fixed` calls, so the two calling conventions report the same "since the last
+    /// [`Simulation::metrics`]-worthy checkpoint" semantics.
+    pub fn reset_frame_stats(&mut self) {
+        self.max_substep_displacement_over_diameter = 0.0;
+        self.coupling_clamp_hits = 0;
+    }
+
     /// Advances the simulation by `dt` seconds of simulation time, split into
     /// `simulation.substeps` fixed sub-steps (docs/PLAN.md ss3.2/4.1).
     pub fn step(&mut self, dt: f32) {
+        let n_substeps = self.params.simulation.substeps.max(1);
+        let sub_dt = dt / n_substeps as f32;
+
+        self.reset_frame_stats();
+        for _ in 0..n_substeps {
+            self.advance_one_sub_step(sub_dt);
+        }
+    }
+
+    /// The shared per-sub-step advance both [`Simulation::step`] and [`Simulation::step_fixed`]
+    /// are built from: one call to [`coupling::step`] at sub-step size `sub_dt`, folding its
+    /// diagnostics into this instance's accumulated/EMA-smoothed state and advancing
+    /// `drum_angle`/`sim_time`.
+    fn advance_one_sub_step(&mut self, sub_dt: f32) {
         let omega = self.params.mill.omega();
         let radius_m = self.params.mill.radius_m();
         let lifters = self.params.lifters;
-        let n_substeps = self.params.simulation.substeps.max(1);
         let dem_iterations = self.params.simulation.dem_iterations;
-        let sub_dt = dt / n_substeps as f32;
-
         let pbf_iterations = self.params.simulation.pbf_iterations;
 
-        self.max_substep_displacement_over_diameter = 0.0;
-        self.coupling_clamp_hits = 0;
-        for _ in 0..n_substeps {
-            let drum = Drum::new(radius_m, omega, lifters);
-            let (fluid_stats, dem_stats) = coupling::step(
-                &mut self.dem,
-                &mut self.fluid,
-                &drum,
-                self.drum_angle,
-                &self.params.media,
-                &self.params.slurry,
-                dem_iterations,
-                pbf_iterations,
-                sub_dt,
-            );
-            self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
-            self.fluid_stats = fluid_stats;
-            self.update_grinding_stats(&dem_stats, sub_dt, omega);
-            self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
-            self.sim_time += sub_dt as f64;
-        }
+        let drum = Drum::new(radius_m, omega, lifters);
+        let (fluid_stats, dem_stats) = coupling::step(
+            &mut self.dem,
+            &mut self.fluid,
+            &drum,
+            self.drum_angle,
+            &self.params.media,
+            &self.params.slurry,
+            dem_iterations,
+            pbf_iterations,
+            sub_dt,
+        );
+        self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
+        self.fluid_stats = fluid_stats;
+        self.update_grinding_stats(&dem_stats, sub_dt, omega);
+        self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
+        self.sim_time += sub_dt as f64;
     }
 
     /// Folds one sub-step's [`dem::DemStepStats`] into the EMA-smoothed grinding diagnostics
@@ -345,6 +387,53 @@ mod tests {
         let mut params = Params::default();
         params.mill.diameter_m = -1.0;
         assert!(Simulation::new(params).is_err());
+    }
+
+    #[test]
+    fn fixed_sub_dt_matches_60hz_over_substeps() {
+        let mut params = Params::default();
+        params.simulation.substeps = 8;
+        let sim = Simulation::new(params).unwrap();
+        assert!((sim.fixed_sub_dt() - 1.0 / 480.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step_fixed_called_substeps_times_matches_one_step_call_at_1x() {
+        // `step(1/60)` (a nominal 60 Hz frame at 1x time scale) must advance the simulation
+        // identically to calling `step_fixed()` `substeps` times -- the two calling conventions
+        // (docs/PLAN.md ss4.1) are meant to be equivalent at that specific `dt`, not just
+        // similar, so a worker migrating from one to the other doesn't change simulation
+        // behaviour.
+        let mut params = Params::default();
+        params.media.fill_fraction = 0.0; // isolate kinematics from ball/fluid dynamics
+        params.slurry.enabled = false;
+        let n_substeps = params.simulation.substeps;
+
+        let mut via_step = Simulation::new(params).unwrap();
+        via_step.step(1.0 / 60.0);
+
+        let mut via_fixed = Simulation::new(params).unwrap();
+        via_fixed.reset_frame_stats();
+        for _ in 0..n_substeps {
+            via_fixed.step_fixed();
+        }
+
+        assert!((via_step.sim_time() - via_fixed.sim_time()).abs() < 1e-9);
+        assert!((via_step.drum_angle() - via_fixed.drum_angle()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reset_frame_stats_zeroes_the_per_frame_diagnostics() {
+        let mut params = Params::default();
+        params.simulation.max_balls = 100;
+        let mut sim = Simulation::new(params).unwrap();
+        for _ in 0..30 {
+            sim.step_fixed();
+        }
+        assert!(sim.max_substep_displacement_over_diameter() > 0.0);
+        sim.reset_frame_stats();
+        assert_eq!(sim.max_substep_displacement_over_diameter(), 0.0);
+        assert_eq!(sim.coupling_clamp_hits(), 0);
     }
 
     #[test]
