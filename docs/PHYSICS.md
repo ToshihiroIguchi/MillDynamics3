@@ -39,12 +39,20 @@ and `docs/PARAMETERS.md` for the UI-facing parameter list.
   before any pass that iterates *across* contacts and mutates shared state sequentially (friction,
   restitution, rolling resistance), which is where non-deterministic order would actually change
   the physical result.
-- Fixed sub-step: `crate::FIXED_DT = 1/240 s` (`lib.rs`), shared by the ball solver and the PBF
-  fluid solver. `Simulation::step(dt)` splits a caller-supplied `dt` into `simulation.substeps`
-  equal sub-steps (`sub_dt = dt / substeps`, not literally `FIXED_DT` unless `dt` is exactly
-  `substeps / 60`; the "1/240 s at 1x time scale" figure assumes the nominal 60 Hz frame rate the
-  UI targets). `simulation.dem_iterations` and `simulation.pbf_iterations` control the respective
-  solvers' per-substep Gauss-Seidel/Jacobi iteration counts.
+- Fixed sub-step: `crate::FIXED_DT = 1/240 s` (`lib.rs`) is the sub-step size at the *default*
+  `substeps = 4`; `Simulation::fixed_sub_dt() = 1 / (60 * substeps)` is the general form for
+  whatever `substeps` an instance's params actually specify. Two ways to advance a `Simulation`:
+  `step(dt)` splits a caller-supplied `dt` into `substeps` equal sub-steps
+  (`sub_dt = dt / substeps`) and is what the native test suite/benches use; `step_fixed()` advances
+  exactly one `fixed_sub_dt()`-sized sub-step, for a caller (the `web/` worker) running its own
+  fixed-sub-step accumulator loop against wall-clock time (docs/PLAN.md ss4.1) — the two are
+  equivalent when `step(dt)` is called with `dt == substeps * fixed_sub_dt()` (i.e. one nominal
+  frame at 1x time scale), see `tests::step_fixed_called_substeps_times_matches_one_step_call_at_1x`.
+  A `step_fixed()` caller should call `reset_frame_stats()` once per frame instead of relying on
+  `step`'s own internal reset, so `max_substep_displacement_over_diameter`/`coupling_clamp_hits`
+  (both "since the last check" diagnostics, see ss8) still cover the whole frame. `simulation.
+  dem_iterations` and `simulation.pbf_iterations` control the respective solvers' per-substep
+  Gauss-Seidel/Jacobi iteration counts.
 
 ---
 
@@ -143,48 +151,90 @@ position/velocity corrections on top of the converged contact solve.
 
 Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
 
+0. **Sanitize.** Any incoming non-finite `x`/`v` (which can only have entered from outside this
+   struct, e.g. a corrupted `external` impulse) is reset to `(Vec2::ZERO, Vec2::ZERO)` before
+   anything else runs, mirroring the fluid solver's own step-0 guard (ss5.2).
 1. **Predict.** For each ball: `v.y += GRAVITY * dt`; if external (fluid coupling) impulses are
    supplied (`Option<&CouplingImpulses>`), `v += impulse * inv_mass` and `omega += angular_impulse *
    inv_inertia` are applied here too — as a direct velocity change, with **no extra `* dt`** (see
    ss6 for why). Then `x += v * dt`, `theta += omega * dt`. Pre-predict velocity (`v_pre`) and
    pre-step position/orientation (`x0`, `theta0`) are saved for later steps.
 2. **Broad-phase.** A `UniformGrid` is built over the predicted ball positions with cell size
-   `2 * r * 1.05`; `for_each_candidate_pair` enumerates ball-ball candidate pairs once, reused
-   across all solver iterations this sub-step. Ball-wall contact is checked directly per ball
-   (no broad-phase needed: one `Drum::sdf_world` query per ball).
-3. **Solve non-penetration** (`dem_iterations` Gauss-Seidel passes, zero compliance):
-   - Ball-ball: `C = |x_i - x_j| - (r_i + r_j)`; if `C < 0`, `d_lambda = -C / (w_i + w_j)` (`w =
-     1/mass`), apply `x_i += w_i * d_lambda * n_hat`, `x_j -= w_j * d_lambda * n_hat`, accumulate
-     `lambda_n` for that `(i, j)` pair in `ContactBook`.
-   - Ball-wall/lifter: `C = drum.sdf_world(x_i) - r_i`; if `C < 0`, `d_lambda = -C / w_i` (wall has
-     `w_wall = 0`, infinite mass), apply `x_i += w_i * d_lambda * n_hat`, accumulate `lambda_n` for
-     ball `i`.
+   `max(2*r*1.05, 2*r + max_ball_speed*dt)` — a fixed 5% pad, or the largest predicted
+   per-sub-step displacement if that's bigger. `for_each_candidate_pair` enumerates ball-ball
+   candidate pairs once, reused across all solver iterations this sub-step. Ball-wall contact is
+   checked directly per ball (no broad-phase needed: one `Drum::sdf_world` query per ball). The
+   displacement margin doesn't make this a continuous/swept check (ss9 still applies) — it only
+   keeps a fast-moving pair from being lost between sub-steps, so step 3's now-bounded recovery
+   below gets a chance to act on it before the overlap becomes severe.
+3. **Solve non-penetration** (`dem_iterations` Gauss-Seidel passes, zero compliance, with a
+   **bounded recovery rate**):
+   - Ball-ball: `C = |x_i - x_j| - (r_i + r_j)`; if `C < 0`, `C_eff = max(C, -MAX_RECOVERY_FRACTION
+     * 2r)` (`MAX_RECOVERY_FRACTION = 0.2`), `d_lambda = -C_eff / (w_i + w_j)` (`w = 1/mass`), apply
+     `x_i += w_i * d_lambda * n_hat`, `x_j -= w_j * d_lambda * n_hat`, accumulate `lambda_n`
+     (computed from the *capped* `C_eff`, so a partially-recovered contact correctly carries less
+     normal force this sub-step) for that `(i, j)` pair in `ContactBook`.
+   - Ball-wall/lifter: `C = drum.sdf_world(x_i) - r_i`; same `C_eff` cap; if `C < 0`,
+     `d_lambda = -C_eff / w_i` (wall has `w_wall = 0`, infinite mass), apply
+     `x_i += w_i * d_lambda * n_hat`, accumulate `lambda_n` for ball `i`.
+   - **Why the cap.** Recovering a very deep overlap in full, in one iteration, hands step 4 a
+     position delta that becomes an unphysically large separation velocity (`Δx/dt`) — the DEM
+     half of the fluidised-charge energy-injection bug (ss9/git history). At `dem_iterations = 4`
+     the cap still allows recovering up to `0.8` diameters of overlap per sub-step, so ordinary
+     small overlaps are unaffected; it only throttles the pathological case.
 4. **Reconstruct velocities**: `v = (x - x0) / dt`, `omega = angle_diff(theta, theta0) / dt`.
-5. **Friction** (one pass, Coulomb-clamped position correction — not a persistent tangential
-   spring), iterating contacts in a deterministic sorted order:
+5. **Friction** (Coulomb-clamped position correction, iterating contacts in a deterministic sorted
+   order, with `v`/`omega` kept in sync *per contact* rather than reconstructed once at the end):
    - Ball-ball: `v_t = (v_i - v_j).dot(t_hat) - r*omega_i - r*omega_j`; the raw correction that
      would fully cancel `v_t` this sub-step is `raw = -v_t * dt / w_sum_t` (`w_sum_t = w_i + w_j +
      r^2*w_rot_i + r^2*w_rot_j`), clamped to `[-mu*lambda_n, +mu*lambda_n]`
      (`media.friction_ball_ball`) and applied as a position correction (linear on `x`, rotational on
-     `theta`, both scaled by the respective inverse mass/inertia).
-   - Ball-wall: same form, with the wall's own `wall_velocity` substituted for the "other body"'s
-     velocity and no wall-side rotational term; `media.friction_ball_wall` is the clamp coefficient.
-     The tangential impulse `d_lambda_t` dotted with the wall's velocity there gives the work done
-     against wall friction this contact (`wall_work_j`, summed over all ball-wall contacts) — the
-     wall's *normal* impulse does no work since the wall's velocity is purely tangential.
-   - Velocities are reconstructed a second time from the friction-corrected positions/orientations.
-6. **Restitution** (one pass, using the *pre-solve* approach velocity `v_pre`), applied only to
-   contacts whose pre-solve normal approach speed exceeded `RESTITUTION_VELOCITY_THRESHOLD = 0.02`
-   m/s (below this, a contact is treated as already-resting so restitution does not re-fire every
-   sub-step and cause a resting contact to buzz):
-   - Ball-ball: `v_n_pre = (v_pre_i - v_pre_j).dot(n_hat)`; if approaching faster than the
-     threshold, the target post-solve separating speed is `-e * v_n_pre`
-     (`e = media.restitution_ball_ball`), applied as a normal-velocity impulse split by inverse
-     mass. Counted as one collision in `DemStepStats::collision_count`, with impact energy `E = 0.5
-     * (mass/2) * v_n_pre^2` (reduced mass `mass/2` for two equal masses) binned into
-     `impact_energy_histogram`.
-   - Ball-wall: same but with the wall's "infinite mass" (reduced mass is just the ball's own,
-     `E = 0.5 * mass * v_n_pre^2`), `e = media.restitution_ball_wall`.
+     `theta`, both scaled by the respective inverse mass/inertia) — **and immediately as the
+     matching velocity/`omega` change too** (`dv = w*d_lambda_t*t_hat/dt`,
+     `domega = -r*w_rot*d_lambda_t/dt`), so a *later* contact touching an already-corrected ball
+     computes its own `v_t` against the true current state, not a stale one. Each individual
+     contact's correction is provably non-energy-increasing given the `v`/`omega` it's computed
+     against (a standard "reduce relative velocity toward zero" impulse); without the per-contact
+     sync, a ball touching more than one contact (the common case under gravity load) could have a
+     later contact's correction computed against data that didn't yet reflect an earlier one from
+     the same pass, breaking that guarantee by a few percent of the local kinetic energy per
+     sub-step — found via the energy-balance regression test in ss9/git history.
+   - Ball-wall: same form (including the immediate velocity sync), with the wall's own
+     `wall_velocity` substituted for the "other body"'s velocity and no wall-side rotational term;
+     `media.friction_ball_wall` is the clamp coefficient. The tangential *position* multiplier
+     `d_lambda_t` (not itself an impulse — see ss6's impulse-vs-force distinction) divided by `dt`
+     gives the actual tangential impulse the wall delivered; dotted with the wall's velocity there,
+     that gives the work done against wall friction this contact (`wall_work_j`, summed over all
+     ball-wall contacts) — the wall's *normal* impulse does no work since the wall's velocity is
+     purely tangential. An earlier version omitted the `/ dt` here and under-reported power draw by
+     a factor of `dt` (240x at this project's default sub-step) relative to `dissipated_energy_j`.
+   - Velocities are reconstructed a second time from the total position/orientation change once
+     more (redundant with the per-contact sync above in exact arithmetic; kept as a cheap
+     self-healing resync against float summation-order drift, same as step 4).
+6. **Restitution** (bidirectional, using the *pre-solve* approach velocity `v_pre` to choose the
+   target, applied to *every* contact regardless of approach speed):
+   - Ball-ball: `v_n_pre = (v_pre_i - v_pre_j).dot(n_hat)`. If `v_n_pre` is more negative than
+     `-RESTITUTION_VELOCITY_THRESHOLD` (`0.02` m/s) it's a fresh impact — restitution `e =
+     media.restitution_ball_ball` applies and this contact is counted in
+     `DemStepStats::collision_count`, with impact energy `E = 0.5 * (mass/2) * v_n_pre^2` (reduced
+     mass `mass/2` for two equal masses) binned into `impact_energy_histogram`. Otherwise it's a
+     resting/sliding contact and `e = 0`. Either way the target relative normal velocity is
+     `target = max(0, -e * v_n_pre)`, and the *actual* current relative normal velocity `v_n_now`
+     is driven to that target by an impulse split by inverse mass — **in both directions**, not
+     only when `v_n_now` falls short of `target`.
+   - Ball-wall: same, with the wall's "infinite mass" (reduced mass is just the ball's own,
+     `E = 0.5 * mass * v_n_pre^2` for a fresh impact), `e = media.restitution_ball_wall`.
+   - **Why bidirectional.** Step 3's depenetration recovers overlap by moving positions; step 4
+     turns that raw position change into velocity with no regard for how much separation speed is
+     physically justified. An earlier version of this pass only ever *added* separation velocity
+     when `v_n_now` fell short of `target` (bailing out otherwise), so it could never remove
+     velocity step 3 had over-manufactured — letting a deep-overlap recovery inject essentially
+     unbounded velocity into the charge instead of being capped by the very restitution law meant
+     to bound it. This was the other half of the DEM side of the fluidised-charge energy-injection
+     bug (the depenetration cap in step 3 is the first half); together they make the solver
+     provably unable to increase the ball population's total mechanical energy beyond what the
+     wall's own friction work supplies (`dem::tests::total_energy_never_increases_in_a_still_drum`,
+     `steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies` in `lib.rs`).
 7. **Rolling resistance**: for each ball with nonzero `omega` and nonzero accumulated normal
    impulse (`total_lambda_n`, summed over its ball-ball and ball-wall contacts this sub-step), the
    angular deceleration is capped at `max_delta_omega = media.rolling_friction *
@@ -328,14 +378,31 @@ visibly unstable (balls flung out of the charge) at this project's default sub-s
 After the density-constraint solve, any fluid particle within `contact_radius = balls.radius + 0.25
 * h` of a ball centre is pushed out along the connecting normal by `push_mag = min(contact_radius -
 dist, 0.5 * balls.radius)` — capped at half the ball's radius so a particle deeply embedded in the
-contact zone cannot produce an outsized single-substep correction. This position correction becomes
-a velocity via the later reconstruction (`Δv = push/dt`), so the fluid particle's own momentum
-change is `mass * push / dt`; the ball's Newton's-third-law reaction impulse is the exact opposite,
-`-(mass * push) / dt`, applied at the contact point (`lever = n_hat * balls.radius`) for the angular
-component. The grid used to find a ball's nearby fluid particles here is sized to cover this step's
-`contact_radius` exactly (it used to default to `2 * balls.radius`, which was smaller than
-`contact_radius` at this project's defaults and silently missed real neighbours — regression test:
+contact zone cannot produce an outsized single-substep *position* correction. The grid used to find
+a ball's nearby fluid particles here is sized to cover this step's `contact_radius` exactly (it
+used to default to `2 * balls.radius`, which was smaller than `contact_radius` at this project's
+defaults and silently missed real neighbours — regression test:
 `pbf::tests::coupling_finds_ball_neighbours_beyond_two_radii`).
+
+**The momentum exchanged is bounded separately from the position correction.** The full push
+implies a velocity of `push_mag / dt` once step 5 reconstructs velocity from position — unbounded
+in momentum as `dt` shrinks or as particles pile up against a ball, since the position cap alone
+doesn't limit it. Instead, the actual momentum exchanged is `impulse_mag = mass * min(push_mag/dt,
+arrest_speed)`, where `arrest_speed = max(0, -(v_i - v_surface).dot(n_hat))` is how much of the
+particle's velocity *toward* the ball's surface (`v_surface = balls.v + balls.omega x lever`) this
+contact actually needs to arrest — zero for a particle already moving away, or at rest relative to
+the ball. The ball's Newton's-third-law reaction is `-impulse_mag * n_hat` (angular component via
+`lever = n_hat * balls.radius`); the part of the position push beyond `impulse_mag` (a purely
+geometric correction, position without momentum) is tracked separately and subtracted back out of
+the fluid particle's own velocity right after step 5's reconstruction, so it never shows up as
+implicit fluid speed.
+
+This split fixes one contributor to the coupling half of the fluidised-charge energy-injection bug:
+before it, a purely resting/settled overlap (particle not actually approaching the ball,
+`arrest_speed = 0`) still exchanged the full `mass * push / dt` every sub-step it persisted, behind
+a stability clamp (ss6.4) permissive enough to let it through at this project's default parameters.
+This mechanism alone was not the dominant one, though — see ss6.2 for the fix that turned out to
+matter most for the reported symptom (a still-drum coupled charge failing to settle at all).
 
 ### 6.2 Viscous no-slip drag (pbf.rs step 6.5)
 
@@ -373,6 +440,36 @@ balls.mass`, `dt << tau`) the corrected formula reduces analytically to ordinary
 `impulse ~= 4*pi*mu*(v_fluid - v_ball)*dt`, independent of the ball/fluid mass ratio -- verified
 directly by `pbf::tests::ball_drag_matches_two_dimensional_stokes_scaling`.
 
+**Balls are processed sequentially (Gauss-Seidel), not Jacobi.** `self.v` is updated immediately
+after each ball's contribution, not accumulated into a separate array and applied once after every
+ball has been visited. At this project's coupling resolution `h_c` easily spans several
+neighbouring balls' worth of a packed charge, so a fluid particle commonly sits within more than
+one ball's entrainment radius at once; computing every ball's `v_bar` against the same stale fluid
+state and only summing the results afterwards let several individually-bounded (`a_lin <= 1`)
+corrections stack on the same fluid particle well beyond what any single ball's own bound was meant
+to allow. Sequential application means each ball after the first already sees the fluid's
+up-to-date state, so its own relaxation is bounded against reality rather than against a snapshot
+every other overlapping ball is also independently correcting.
+
+**The angular reaction's exact-conservation normalizer needs a relative, not absolute, threshold.**
+The tangential field distributing the ball's angular reaction back to the fluid with zero net
+linear momentum is scaled by `c_rot = -i_b * dw_b / s`, where
+`s = sum_i mass*phi_i^2*(|r_i|^2 - cross2(r_i, p_bar))` is a geometric normalizer that can land
+anywhere from comparable to its own positive-definite part (`sum_i mass*phi_i^2*|r_i|^2`) down to
+many orders of magnitude smaller, essentially at random, whenever the entrained neighbour count is
+small (routine at this project's fine coupling resolution relative to a ball's size — 2-4 fluid
+neighbours per ball is typical, not an edge case). Guarding this division with a fixed absolute
+epsilon (`|s| > 1e-9`) let a modest torque get divided by an almost-cancelled denominator and
+amplified by 2-4 orders of magnitude (`c_rot` observed in the hundreds to ~13000, in a *stationary*
+drum with no rotation at all to drive it) -- this dominated the reported fluidised-charge symptom
+for the coupled (slurry-enabled) case: with the overlap-push and Gauss-Seidel fixes above alone, a
+ball+slurry charge released in a still drum still failed to settle (`v_rms ~2.5` m/s, fluid pinned
+at its speed clamp, ss5.2 step 11). The fix compares `|s|` against a *fraction* of its own
+positive-definite part instead (`|s| > 0.1 * sum_i mass*phi_i^2*|r_i|^2`), which correctly detects
+near-total cancellation regardless of scale; when it fails, the rotational reaction (both `dw_b` and
+its fluid-side redistribution) is skipped for that ball this sub-step, same as the pre-existing
+degenerate case. Regression test: `coupling::tests::a_coupled_charge_in_a_still_drum_settles_with_slurry_on`.
+
 ### 6.3 Buoyancy (pbf.rs step 6.6)
 
 Balls are typically sub-resolution relative to the fluid spacing and do not contribute to the
@@ -402,19 +499,25 @@ The accumulated per-ball impulse this sub-step is clamped to
 (angular impulse clamped to that magnitude times `balls.radius`). `pbf.rs`'s doc comment on
 `F_CLAMP_G_MULTIPLE` records that this constant used to be `3.0`, tuned down purely to survive an
 earlier 3D-sphere-vs-2D-disc mass mismatch between balls and fluid particles, then `20.0` once both
-were unit-depth discs with dimensionally consistent masses. It is now `60.0`: step 6.2's corrected
-drag term is legitimately larger (though still `a_lin <= 1` bounded) than the overlap-push
-mechanism (ss6.1) this clamp was originally sized against, once `beta` saturates (`mu` above
-roughly 10 Pa*s at this project's ball sizes) -- a velocity-matching relaxation's natural impulse
-scale doesn't shrink with `dt` the way the position-capped overlap-push impulse does, so a clamp
-tuned only against the latter clips physically legitimate no-slip corrections at the former's
-scale. Residual clamp rate at the project's default sub-step rate is ~6-8% of ball-substeps at 50
-and 200 Pa*s (`coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`),
-attributable to ss6.1's sub-resolution overlap-push spikes, not step 6.2's drag -- persistent
-clamping still indicates a real problem, just a rarer one than before this fix. `clamp_hits` (count
-of balls clamped this sub-step) and `fluid_momentum_change` (sum of fluid momentum change from
-every mechanism above, for a Newton's-third-law cross-check against `sum(impulses)` when no clamp
-fired) are both tracked in `CouplingImpulses` purely as diagnostics.
+were unit-depth discs with dimensionally consistent masses. It is `60.0` specifically because of
+step 6.2's drag term, which is legitimately larger (though still `a_lin <= 1` bounded) than the
+overlap-push mechanism (ss6.1) once `beta` saturates (`mu` above roughly 10 Pa*s at this project's
+ball sizes) -- a velocity-matching relaxation's natural impulse scale doesn't shrink with `dt` the
+way a position-capped correction does, so a clamp tuned only against the latter would clip
+physically legitimate no-slip corrections at the former's scale. This is unaffected by ss6.1's
+overlap-push fix: that fix bounds the *momentum* the overlap push can exchange by the same kind of
+physical argument the clamp exists to backstop, so it doesn't change how large a legitimate drag
+correction can be -- lowering the clamp to match ss6.1's now-much-smaller contribution was tried and
+confirmed wrong (it broke `pbf::tests::ball_drag_never_overshoots_the_local_fluid_velocity`, a
+scenario with no overlap-push contribution at all). Residual clamp rate at the project's default
+sub-step rate is ~5.5-6.5% of ball-substeps at 50 and 200 Pa*s
+(`coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`, tightened
+from an earlier `<15%` bound to `<10%` now that ss6.1's contribution is negligible), now
+attributable almost entirely to step 6.2's drag, not ss6.1's overlap push -- persistent clamping
+still indicates a real problem, just a rarer one than before either fix. `clamp_hits` (count of
+balls clamped this sub-step) and `fluid_momentum_change` (sum of fluid momentum change from every
+mechanism above, for a Newton's-third-law cross-check against `sum(impulses)` when no clamp fired)
+are both tracked in `CouplingImpulses` purely as diagnostics.
 
 ---
 
@@ -521,17 +624,26 @@ state after calling `compute`:
 
 ## 9. Known limitations
 
-- **Tunnelling / continuous-collision guard is diagnostic only.** `DemStepStats::
-  max_substep_displacement_over_diameter = |v| * dt / (2*radius)` (the fraction of a ball's own
-  diameter it moved in one sub-step) is computed every sub-step and surfaced through
+- **Tunnelling / continuous-collision guard is diagnostic, with a partial mitigation.**
+  `DemStepStats::max_substep_displacement_over_diameter = |v| * dt / (2*radius)` (the fraction of
+  a ball's own diameter it moved in one sub-step) is computed every sub-step and surfaced through
   `Simulation::max_substep_displacement_over_diameter` and `metrics::Metrics::
-  max_substep_displacement_over_diameter`, but **there is no actual swept/continuous-collision
-  correction implemented**, and the DEM broad-phase cell size (`2 * r * 1.05`, `dem.rs` step 2)
-  includes no relative-displacement margin. A fast ball's motion within a single discrete sub-step
-  can therefore, in principle, skip past a collision the broad-phase would otherwise have caught.
-  This is expected to read non-trivially high (observed ~0.85 at default parameters) during normal
-  cascading, not only in pathological cases — it is a live risk indicator, not evidence of a bug,
-  and not yet mitigated by any correction in the solver.
+  max_substep_displacement_over_diameter`. There is still **no actual swept/continuous-collision
+  correction** — the broad-phase (`dem.rs` step 2) now includes a per-sub-step displacement margin
+  (ss4.2) so a fast pair isn't *lost* between sub-steps, and step 3's recovery is now
+  rate-limited (`MAX_RECOVERY_FRACTION`, ss4.2) so a deep overlap decays over several sub-steps
+  instead of becoming a single unphysical velocity spike (ss6's restitution fix removes any excess
+  regardless) — but a ball can still, in principle, pass fully through another within one discrete
+  sub-step without either ever registering as a candidate pair at all. This was observed at
+  ~0.85-0.86 at this project's *former* default parameters (`max_balls = 2000`, `substeps = 4`) —
+  already at the point where tunnelling risk is a live, not merely theoretical, concern, and
+  plausibly connected to the fluidised-charge energy-injection bug this crate's history documents
+  (a solver already at its tunnelling limit gives the (now-fixed) unbounded depenetration/coupling
+  mechanisms above the largest overlaps to react to). The current defaults (`max_balls = 600`,
+  `substeps = 8`, see `docs/PARAMETERS.md`) bring the typical ratio to roughly `0.16` at the
+  default mill speed -- comfortably under 1, though this is a UI-configurable parameter, not a
+  solver-enforced bound, so a user can still push it back into risky territory (larger `max_balls`,
+  fewer `substeps`, faster rotation, smaller media).
 - **`s_corr` artificial pressure is implemented but disabled** (`S_CORR_K = 0.0` in `pbf.rs`) — see
   ss5.2. Revisit only if visual clustering artefacts are observed; no working non-zero `k` was found
   for this project's SI parameter scale.
