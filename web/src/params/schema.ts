@@ -81,6 +81,7 @@ export const SCHEMA: FieldSchema[] = [
   // Media
   { path: "media.ball_diameter_m", group: "Media", label: "Ball diameter", unit: "mm", type: "number", min: 0.5, max: 200, step: 0.1, displayScale: 1000 },
   { path: "media.fill_fraction", group: "Media", label: "Fill fraction (J)", type: "number", min: 0, max: 0.9, step: 0.01 },
+  { path: "media.packing_fraction_2d", group: "Media", label: "2D packing fraction", type: "number", min: 0.5, max: 0.907, step: 0.001 },
   { path: "media.density_kg_m3", group: "Media", label: "Media density", unit: "kg/m3", type: "number", min: 100, max: 20000, step: 100 },
   { path: "media.restitution_ball_ball", group: "Media", label: "Restitution (ball-ball)", type: "number", min: 0, max: 1, step: 0.01 },
   { path: "media.restitution_ball_wall", group: "Media", label: "Restitution (ball-wall)", type: "number", min: 0, max: 1, step: 0.01 },

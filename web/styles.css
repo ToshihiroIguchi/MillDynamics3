@@ -156,6 +156,24 @@ dialog.params-modal legend {
 .params-derived {
   font-size: 12px;
   color: #9aa3b0;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 2px 12px;
+  margin: 8px 0;
+}
+
+.params-derived dt {
+  color: #9aa3b0;
+}
+
+.params-derived dd {
+  margin: 0;
+  color: #e6e9ef;
+  text-align: right;
+}
+
+.params-derived dd.is-warn {
+  color: #e8a33d;
 }
 
 .params-footer {

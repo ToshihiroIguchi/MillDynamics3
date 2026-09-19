@@ -4,8 +4,21 @@
 // schema.ts's v1 simplification note).
 
 import type { ParamsJson } from "../protocol";
-import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
+import {
+  criticalSpeedRpm,
+  effectiveMedia,
+  fluidParticleCountEstimate,
+  percentCriticalOf,
+  rpmOf,
+  substepDisplacementOverDiameter,
+  trueBallCount,
+} from "../params/derived";
 import { fromDisplayValue, GROUPS, getPath, SCHEMA, toDisplayValue, withPath } from "../params/schema";
+
+// pbf.rs's default fluid lattice resolution (crates/mill-core/src/params.rs
+// SimulationParams::default). Not exposed in SCHEMA (out of scope for this modal), so it's
+// hardcoded here purely as a static estimate input for the "Est. fluid particles" readout.
+const DEFAULT_FLUID_RESOLUTION = 40;
 
 export interface ParamsModal {
   /** Opens the modal, pre-filled from `params`. */
@@ -71,7 +84,7 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
     form.appendChild(fieldset);
   }
 
-  const derived = document.createElement("p");
+  const derived = document.createElement("dl");
   derived.className = "params-derived";
   form.appendChild(derived);
 
@@ -79,16 +92,75 @@ export function createParamsModal(onApply: (params: ParamsJson) => void): Params
     const diameterInput = inputs.get("mill.diameter_m");
     const modeInput = inputs.get("mill.speed_mode");
     const valueInput = inputs.get("mill.speed_value");
-    if (!diameterInput || !modeInput || !valueInput) return;
+    const ballDiameterInput = inputs.get("media.ball_diameter_m");
+    const mediaFillInput = inputs.get("media.fill_fraction");
+    const packingFractionInput = inputs.get("media.packing_fraction_2d");
+    const mediaDensityInput = inputs.get("media.density_kg_m3");
+    const maxBallsInput = inputs.get("simulation.max_balls");
+    const substepsInput = inputs.get("simulation.substeps");
+    const timeScaleInput = inputs.get("simulation.time_scale");
+    const slurryFillInput = inputs.get("slurry.fill_fraction");
+    if (
+      !diameterInput ||
+      !modeInput ||
+      !valueInput ||
+      !ballDiameterInput ||
+      !mediaFillInput ||
+      !packingFractionInput ||
+      !mediaDensityInput ||
+      !maxBallsInput ||
+      !substepsInput ||
+      !timeScaleInput ||
+      !slurryFillInput
+    ) {
+      derived.replaceChildren();
+      return;
+    }
     const diameterM = Number(diameterInput.value);
     const mill = { diameter_m: diameterM, speed_mode: modeInput.value, speed_value: Number(valueInput.value) };
     if (!(diameterM > 0)) {
-      derived.textContent = "";
+      derived.replaceChildren();
       return;
     }
-    derived.textContent =
-      `Critical speed: ${criticalSpeedRpm(diameterM).toFixed(1)} rpm — ` +
-      `current: ${rpmOf(mill).toFixed(1)} rpm (${percentCriticalOf(mill).toFixed(0)}% Nc)`;
+
+    const ballDiameterField = SCHEMA.find((f) => f.path === "media.ball_diameter_m");
+    const ballDiameterM = ballDiameterField ? fromDisplayValue(ballDiameterField, Number(ballDiameterInput.value)) : Number(ballDiameterInput.value);
+    const media = {
+      ball_diameter_m: ballDiameterM,
+      fill_fraction: Number(mediaFillInput.value),
+      packing_fraction_2d: Number(packingFractionInput.value),
+      density_kg_m3: Number(mediaDensityInput.value),
+    };
+    const maxBalls = Number(maxBallsInput.value);
+    const substeps = Number(substepsInput.value);
+    const timeScale = Number(timeScaleInput.value);
+    const slurryFill = Number(slurryFillInput.value);
+
+    const nTrue = trueBallCount(diameterM, media);
+    const eff = effectiveMedia(diameterM, media, maxBalls);
+    const fluidCount = fluidParticleCountEstimate(diameterM / 2, DEFAULT_FLUID_RESOLUTION, slurryFill);
+    const substepDisp = substepDisplacementOverDiameter(mill, timeScale, substeps, eff.diameterM);
+
+    const rows: [string, string, boolean?][] = [
+      ["Critical speed (Nc)", `${criticalSpeedRpm(diameterM).toFixed(1)} rpm`],
+      ["Current speed", `${rpmOf(mill).toFixed(1)} rpm (${percentCriticalOf(mill).toFixed(0)}% Nc)`],
+      ["True ball count (N_true)", nTrue.toFixed(0)],
+      ["Simulated balls (N_sim)", String(eff.ballCount)],
+      ["Coarse-graining (k)", eff.scaleFactor.toFixed(3)],
+      ["Effective ball diameter", `${(eff.diameterM * 1000).toFixed(2)} mm`],
+      ["Est. fluid particles", String(fluidCount)],
+      ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.5],
+    ];
+
+    derived.replaceChildren();
+    for (const [label, value, warn] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      dd.classList.toggle("is-warn", Boolean(warn));
+      derived.append(dt, dd);
+    }
   }
 
   const footer = document.createElement("div");
