@@ -472,25 +472,26 @@ mod tests {
     }
 
     #[test]
-    fn steady_cascading_charge_has_a_plausible_power_energy_balance() {
-        // Power draw (work done against wall friction, docs/PLAN.md ss3.5) and net dissipation
-        // (kinetic energy removed by the contact solve) both being positive and finite is a
-        // basic sanity check on this instrumentation: energy flows in only through wall friction
-        // and gravity (net gravitational work is zero over a full toe-shoulder cycle once the
-        // charge's average height stops changing) and leaves only through dissipation, so both
-        // must be positive once the charge is genuinely cascading, and dissipation cannot run
-        // away to some absurd multiple of the input.
+    fn steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies() {
+        // Replaces a looser "power draw and dissipation are within a couple of orders of
+        // magnitude of each other" check (see git history) with the actual invariant this
+        // crate's energy accounting must satisfy: total mechanical energy (KE + gravitational
+        // PE) can only *increase* by as much as the wall's motor supplies via friction
+        // (`dem::DemStepStats::wall_work_j`, the same quantity the "Power draw" metric is an EMA
+        // of) -- every other mechanism in the contact solve (Coulomb friction, restitution
+        // `e < 1`, rolling friction, and step 3's bounded depenetration recovery, see
+        // `dem::MAX_RECOVERY_FRACTION`) is dissipative and can only remove mechanical energy,
+        // never add it. Checked every sub-step, not just at the end, and against `DemState`
+        // directly (bypassing `Simulation`'s EMA-smoothed `power_draw_w`/`dissipated_power_w`,
+        // whose smoothing and net-KE-change definitions respectively make them unsuitable for an
+        // exact per-sub-step accounting check like this one).
         //
-        // This deliberately does *not* assert they are numerically close: the XPBD contact
-        // solver (docs/PLAN.md ss3.2) resolves many simultaneous, tightly-packed contacts in the
-        // toe with a modest fixed iteration count (`dem_iterations = 4`, not run to full
-        // convergence every sub-step) and treats any contact below
-        // `RESTITUTION_VELOCITY_THRESHOLD` as inelastic by construction (no compensating
-        // restitution impulse) -- both are well-known sources of extra *numerical* damping in
-        // position-based/iterative rigid-contact solvers, on top of the physical friction and
-        // restitution losses `wall_work_j` alone accounts for. Measured empirically at this
-        // project's defaults: dissipation runs roughly an order of magnitude above wall power
-        // draw, which is why the bound below is wide rather than a tight ratio.
+        // This is the direct regression test for this project's fluidised-charge
+        // energy-injection bug (docs/PHYSICS.md): before the fix, this invariant was violated by
+        // orders of magnitude on essentially every sub-step (step 3's uncapped depenetration
+        // recovery, turned into velocity by step 4, with nothing removing the excess).
+        use crate::dem::DemState;
+        use crate::geometry::Drum;
         use crate::params::{Direction, LiftersParams, MediaParams, MillParams, SpeedMode};
 
         let mut params = Params {
@@ -509,39 +510,82 @@ mod tests {
                 count: 0,
                 ..LiftersParams::default()
             },
-            slurry: params::SlurryParams {
-                enabled: false,
-                ..params::SlurryParams::default()
-            },
             ..Params::default()
         };
         params.simulation.max_balls = 150;
         params.validate().unwrap();
 
-        let mut sim = Simulation::new(params).unwrap();
-        let dt = 1.0 / 60.0;
-        // Settle into steady cascading motion for several EMA time constants
-        // (GRINDING_STATS_EMA_TAU_S = 1 s) so the smoothed readings have converged.
-        for _ in 0..(6 * 60) {
-            sim.step(dt);
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let omega = params.mill.omega();
+        let mut dem = DemState::new(&effective, radius_m, params.simulation.seed);
+        let dt = 1.0 / 240.0;
+        let mut drum_angle = 0.0f32;
+
+        let mechanical_energy_j = |dem: &DemState| -> f32 {
+            let ke: f32 = dem
+                .balls
+                .v
+                .iter()
+                .map(|v| 0.5 * dem.balls.mass * v.length_squared())
+                .sum();
+            let pe: f32 = dem
+                .balls
+                .x
+                .iter()
+                .map(|p| dem.balls.mass * 9.81 * p.y)
+                .sum();
+            ke + pe
+        };
+
+        // Settling phase (not checked): the fresh lattice's initial fall/pile-up is not
+        // representative of the invariant this test cares about.
+        for _ in 0..(3 * 240) {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            dem.step(
+                &drum,
+                drum_angle,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
         }
 
-        let power = sim.power_draw_w();
-        let dissipated = sim.dissipated_power_w();
+        // Measurement phase: the invariant, checked every sub-step.
+        let mut e_prev = mechanical_energy_j(&dem);
+        let mut cumulative_wall_work_j = 0.0f32;
+        // A tiny slack for floating-point summation order, not a physical allowance: measured
+        // empirically, the invariant holds with wide margin (worst observed
+        // `delta_e - wall_work_j` is comfortably negative, never positive) at this project's
+        // defaults.
+        let tolerance_j = 1e-3 * dem.balls.mass * (omega * radius_m).powi(2).max(1.0);
+        for _ in 0..(5 * 240) {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            let stats = dem.step(
+                &drum,
+                drum_angle,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+            cumulative_wall_work_j += stats.wall_work_j;
+
+            let e_now = mechanical_energy_j(&dem);
+            let delta_e = e_now - e_prev;
+            assert!(
+                delta_e <= stats.wall_work_j + tolerance_j,
+                "mechanical energy increased more than the wall's own work this sub-step \
+                 (energy injected from nowhere): delta_e={delta_e} wall_work_j={}",
+                stats.wall_work_j
+            );
+            e_prev = e_now;
+        }
+
         assert!(
-            power > 0.0,
-            "expected positive power draw once cascading, got {power}"
-        );
-        assert!(
-            dissipated > 0.0,
-            "expected positive dissipation once cascading, got {dissipated}"
-        );
-        let ratio = power / dissipated;
-        assert!(
-            (0.01..1.0).contains(&ratio),
-            "power draw and dissipation should be positive and within a couple of orders of \
-             magnitude of each other, not disconnected or with dissipation *below* input power: \
-             power={power} dissipated={dissipated} ratio={ratio}"
+            cumulative_wall_work_j > 0.0,
+            "expected the wall to do positive net work while cascading, got {cumulative_wall_work_j}"
         );
     }
 

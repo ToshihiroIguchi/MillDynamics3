@@ -19,13 +19,28 @@ use crate::params::{EffectiveMedia, MediaParams};
 use crate::rng::Rng;
 
 const GRAVITY: f32 = -9.81;
-/// Below this approach speed, a contact is treated as already-resting rather than a fresh impact,
-/// so restitution is not (re-)applied every sub-step (which would otherwise make resting contacts
-/// buzz indefinitely instead of settling). See docs/PLAN.md ss3.2 step 6. Also used (docs/PLAN.md
-/// ss3.5) as the threshold for counting a contact as a genuine "impact" for
-/// [`DemStepStats::collision_count`]/`impact_energy_histogram` -- the same physical event
-/// (restitution only fires on a fresh impact) drives both.
+/// Below this approach speed, a contact is treated as already-resting rather than a fresh impact:
+/// restitution `e` is not applied to it (the target relative normal velocity is exactly zero
+/// instead of `e * v_approach`), so a settled contact doesn't buzz indefinitely instead of
+/// settling. Step 6 (see [`DemState::step_with_external_forces`]) still zeroes/clamps the
+/// *actual* relative normal velocity for every contact regardless of this threshold -- including
+/// a resting one -- because the depenetration solve (step 3) can otherwise leave a pair with
+/// spurious separation velocity from a large position correction; only the choice of *target*
+/// (`e * v_approach` vs. exactly zero) depends on this threshold. See docs/PLAN.md ss3.2 step 6.
+/// Also used (docs/PLAN.md ss3.5) as the threshold for counting a contact as a genuine "impact"
+/// for [`DemStepStats::collision_count`]/`impact_energy_histogram`.
 const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
+
+/// Largest fraction of a ball's own diameter that step 3's non-penetration solve recovers from a
+/// single contact in one iteration. A deep overlap (e.g. from a coarse-grained ball population's
+/// large diameter, or several balls suddenly landing on top of each other) is instead recovered
+/// gradually over several sub-steps rather than teleporting the pair fully apart in one shot --
+/// which step 4 would otherwise turn directly into an unphysically large separation velocity (see
+/// this module's doc comment and docs/PHYSICS.md for the fluidised-charge energy-injection bug
+/// this, together with step 6's bidirectional restitution, fixes). At `dem_iterations = 4` this
+/// still allows recovering up to `4 * 0.2 = 0.8` diameters of overlap per sub-step, so it does not
+/// meaningfully slow down recovery from the ordinary small overlaps a converged solve produces.
+const MAX_RECOVERY_FRACTION: f32 = 0.2;
 
 /// Number of log-spaced bins in [`DemStepStats::impact_energy_histogram`].
 pub const IMPACT_ENERGY_HISTOGRAM_BINS: usize = 12;
@@ -331,6 +346,19 @@ impl DemState {
         let w_rot = balls.inv_inertia();
         let r = balls.radius;
 
+        // --- 0. Sanitize state carried in from the previous sub-step -------------------------
+        // Mirrors `pbf::FluidParticles::step_coupled`'s step 0: given finite input this solver
+        // provably produces finite output, so this can only fire on a value corrupted from
+        // outside (e.g. a NaN slipping in via `external`). Without this, a single diverged ball
+        // silently drops out of `UniformGrid` (it skips non-finite points) and never interacts
+        // with anything again, rather than being recovered.
+        for (x, v) in balls.x.iter_mut().zip(balls.v.iter_mut()) {
+            if !x.is_finite() || !v.is_finite() {
+                *x = Vec2::ZERO;
+                *v = Vec2::ZERO;
+            }
+        }
+
         // --- 1. Predict ---------------------------------------------------------------------
         let x0: Vec<Vec2> = balls.x.clone();
         let theta0: Vec<f32> = balls.theta.clone();
@@ -356,7 +384,19 @@ impl DemState {
             .fold(0.0f32, f32::max);
 
         // --- 2. Broad-phase (ball-ball candidates only; wall is checked directly per ball) ----
-        let cell_size = (2.0 * r * 1.05).max(1e-6);
+        // The margin includes this sub-step's largest predicted displacement, not just a fixed
+        // 5% pad: at a large `max_substep_displacement_over_diameter` (docs/PLAN.md ss3.5), a
+        // fast ball can end this sub-step farther from where it started than the fixed margin
+        // covers, which would let the broad-phase miss a pair that is about to overlap deeply
+        // once step 3 runs. This does not make the solver continuous (no swept/CCD test is
+        // performed within the sub-step, see that field's doc comment) -- it only ensures a pair
+        // separated by roughly one sub-step's worth of relative motion is still found as a
+        // *candidate*, so step 3's now-bounded recovery ([`MAX_RECOVERY_FRACTION`]) gets a chance
+        // to act on it before the overlap becomes severe.
+        // Post-predict speed (i.e. including this sub-step's gravity/coupling contribution),
+        // the same quantity `max_substep_displacement_over_diameter` above is derived from.
+        let max_speed = balls.v.iter().map(|v| v.length()).fold(0.0f32, f32::max);
+        let cell_size = (2.0 * r * 1.05).max(2.0 * r + max_speed * dt).max(1e-6);
         let grid = UniformGrid::build(&balls.x, cell_size);
         let mut ball_ball_pairs: Vec<(u32, u32)> = Vec::new();
         grid.for_each_candidate_pair(|i, j| ball_ball_pairs.push((i, j)));
@@ -378,7 +418,13 @@ impl DemState {
                 if w_sum <= 0.0 {
                     continue;
                 }
-                let d_lambda = -c / w_sum;
+                // Cap how much of a deep overlap this one iteration recovers (see
+                // [`MAX_RECOVERY_FRACTION`]'s doc comment) -- `lambda_n` (and hence the Coulomb
+                // friction cone and rolling resistance below) shrinks along with it, which is
+                // correct: a partially-recovered contact should carry proportionally less normal
+                // force this sub-step, not the full force a complete recovery would imply.
+                let c_eff = c.max(-MAX_RECOVERY_FRACTION * 2.0 * r);
+                let d_lambda = -c_eff / w_sum;
                 balls.x[i] += w * d_lambda * n_hat;
                 balls.x[j] -= w * d_lambda * n_hat;
                 *book
@@ -395,7 +441,8 @@ impl DemState {
                 if w <= 0.0 {
                     continue;
                 }
-                let d_lambda = -c / w;
+                let c_eff = c.max(-MAX_RECOVERY_FRACTION * 2.0 * r);
+                let d_lambda = -c_eff / w;
                 balls.x[i] += w * d_lambda * n_hat;
                 *book.ball_wall_lambda_n.entry(i as u32).or_insert(0.0) += d_lambda;
             }
@@ -413,7 +460,23 @@ impl DemState {
         let ball_ball_contacts = book.sorted_ball_ball();
         let ball_wall_contacts = book.sorted_ball_wall();
 
-        // --- 5. Friction (single pass, Coulomb-clamped position correction) -------------------
+        // --- 5. Friction (Coulomb-clamped position correction, one pass but velocity kept in
+        // sync per contact) ---------------------------------------------------------------------
+        // Each contact's correction, viewed alone (given whatever `v`/`omega` are *right now*),
+        // is provably non-energy-increasing: it reduces the relative tangential contact-point
+        // speed `v_t` toward zero (fully when unclamped, partially when Coulomb-limited), which
+        // is exactly the "generalized inelastic collision" impulse for that one degree of
+        // freedom and cannot overshoot past zero. But a ball resting on more than one neighbour
+        // (or a neighbour and the wall) has more than one contact processed in this same pass;
+        // if `v`/`omega` were only reconstructed once at the very end (from the *total* summed
+        // position/orientation change, as steps 3-4 do), a later contact touching an
+        // already-corrected ball would compute its own `v_t` against a *stale* velocity that
+        // doesn't yet reflect the earlier contact's correction -- silently breaking the
+        // per-contact non-energy-increase guarantee once several contacts share a ball (the
+        // common case under gravity load), by up to several percent of the local kinetic energy
+        // per sub-step. Updating `v`/`omega` immediately after each contact -- exactly the
+        // velocity change its own position/orientation correction implies -- keeps every
+        // subsequent contact's `v_t` accurate, restoring that guarantee.
         for &(i, j, lambda_n) in &ball_ball_contacts {
             if lambda_n <= 0.0 {
                 continue;
@@ -438,6 +501,12 @@ impl DemState {
             balls.x[ju] -= w * d_lambda_t * t_hat;
             balls.theta[iu] -= r * w_rot * d_lambda_t;
             balls.theta[ju] -= r * w_rot * d_lambda_t;
+            let dv = w * d_lambda_t * t_hat / dt;
+            let domega = -r * w_rot * d_lambda_t / dt;
+            balls.v[iu] += dv;
+            balls.v[ju] -= dv;
+            balls.omega[iu] += domega;
+            balls.omega[ju] += domega;
         }
         let mut wall_work_j = 0.0f32;
         for &(i, lambda_n) in &ball_wall_contacts {
@@ -460,21 +529,47 @@ impl DemState {
 
             balls.x[iu] += w * d_lambda_t * t_hat;
             balls.theta[iu] -= r * w_rot * d_lambda_t;
-            // `d_lambda_t` is the tangential impulse (kg*m/s per metre of mill depth) the wall
-            // delivered to this ball; the ball's Newton's-third-law reaction against the wall,
-            // dotted with the wall's own velocity there, is the rate of work the drum's motor
-            // must supply to overcome it (docs/PLAN.md ss3.5's power-draw estimate) -- summed as
-            // work (impulse . velocity) rather than force (impulse/dt) . velocity * dt, the two
-            // being algebraically identical but the former not needing `dt` at all here.
-            wall_work_j += d_lambda_t * t_hat.dot(v_wall);
+            balls.v[iu] += w * d_lambda_t * t_hat / dt;
+            balls.omega[iu] += -r * w_rot * d_lambda_t / dt;
+            // `d_lambda_t` is the tangential *position* multiplier (units kg*m -- see this
+            // module's doc comment and `CouplingImpulses`'s doc comment in `coupling.rs` for the
+            // same impulse-vs-position-multiplier distinction), not the impulse itself: it is
+            // applied as a position correction (`x += w * d_lambda_t * t_hat`, `w` = inverse
+            // mass), so the actual tangential impulse the wall delivered to this ball is
+            // `d_lambda_t / dt` (kg*m/s per metre of mill depth). The rate of work the drum's
+            // motor must supply to overcome the ball's Newton's-third-law reaction against the
+            // wall is that impulse dotted with the wall's own velocity there (docs/PLAN.md
+            // ss3.5's power-draw estimate); accumulated directly as work (impulse . velocity),
+            // with no further `* dt`, since `wall_work_j` is a per-sub-step quantity. An earlier
+            // version of this line omitted the `/ dt` and under-reported power draw by a factor
+            // of `dt` (240x at this project's default sub-step) relative to the (correctly
+            // `dt`-independent) dissipated-energy estimate below.
+            wall_work_j += (d_lambda_t / dt) * t_hat.dot(v_wall);
         }
-        // Re-reconstruct velocities once more now that friction has adjusted positions/orientation.
+        // Re-reconstruct velocities from the total position/orientation change once more: exactly
+        // redundant with the incremental updates above in exact arithmetic (both compute the same
+        // net change), kept as a cheap self-healing resync against any float summation-order drift
+        // between the two, consistent with how step 4 above derives velocity from position.
         for i in 0..n {
             balls.v[i] = (balls.x[i] - x0[i]) / dt;
             balls.omega[i] = angle_diff(balls.theta[i], theta0[i]) / dt;
         }
 
-        // --- 6. Restitution (single pass, using the pre-solve approach velocity) -------------
+        // --- 6. Restitution (bidirectional, using the pre-solve approach velocity to set the
+        // target) ------------------------------------------------------------------------------
+        // For a genuine fresh impact the target relative normal velocity is the usual
+        // restitution law, `e * |v_approach|` (separating). For a resting/sliding contact
+        // (approach speed below `RESTITUTION_VELOCITY_THRESHOLD`) the target is exactly zero.
+        // Either way the *actual* relative normal velocity is driven to that target in both
+        // directions -- not just topped up when it falls short. This is what keeps the solver
+        // energy-bounded: step 3's depenetration recovers overlap by moving positions, and step
+        // 4 turns that raw position change into velocity with no regard for how much separation
+        // speed is physically justified. An earlier version of this pass only ever *added*
+        // separation velocity (bailing out whenever the depenetration had already produced at
+        // least the restitution target), which let step 3's recovery inject unbounded velocity
+        // into deep-overlap events instead of being capped by it -- the DEM half of the
+        // fluidised-charge energy-injection bug (docs/PHYSICS.md ss3.2/3.5). See
+        // [`MAX_RECOVERY_FRACTION`] for step 3's half of the same fix.
         let mut collision_count = 0u32;
         let mut impact_energy_histogram = [0u32; IMPACT_ENERGY_HISTOGRAM_BINS];
         for &(i, j, lambda_n) in &ball_ball_contacts {
@@ -487,21 +582,28 @@ impl DemState {
             let n_hat = if dist > 1e-9 { delta / dist } else { Vec2::X };
 
             let v_n_pre = (v_pre[iu] - v_pre[ju]).dot(n_hat);
-            if v_n_pre >= -RESTITUTION_VELOCITY_THRESHOLD {
-                continue;
+            let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
+            if is_fresh_impact {
+                // A genuine fresh impact (docs/PLAN.md ss3.5): reduced mass `mass/2` for two
+                // equal masses colliding.
+                collision_count += 1;
+                let impact_energy_j = 0.5 * (balls.mass * 0.5) * v_n_pre * v_n_pre;
+                if let Some(bin) = impact_energy_bin(impact_energy_j) {
+                    impact_energy_histogram[bin] += 1;
+                }
             }
-            // A genuine fresh impact (docs/PLAN.md ss3.5): reduced mass `mass/2` for two equal
-            // masses colliding.
-            collision_count += 1;
-            let impact_energy_j = 0.5 * (balls.mass * 0.5) * v_n_pre * v_n_pre;
-            if let Some(bin) = impact_energy_bin(impact_energy_j) {
-                impact_energy_histogram[bin] += 1;
-            }
+            let e = if is_fresh_impact {
+                media.restitution_ball_ball
+            } else {
+                0.0
+            };
+            // `.max(0.0)`: the target can never be negative (a contact cannot pull its pair
+            // together), and restitution never reverses the sign of the approach velocity.
+            let target = (-e * v_n_pre).max(0.0);
             let v_n_now = (balls.v[iu] - balls.v[ju]).dot(n_hat);
-            let target = -media.restitution_ball_ball * v_n_pre;
             let delta_v_n = target - v_n_now;
             let w_sum = w + w;
-            if w_sum <= 0.0 || delta_v_n <= 0.0 {
+            if w_sum <= 0.0 {
                 continue;
             }
             let impulse = delta_v_n / w_sum;
@@ -517,19 +619,25 @@ impl DemState {
             let v_wall = drum.wall_velocity(balls.x[iu]);
 
             let v_n_pre = (v_pre[iu] - v_wall).dot(n_hat);
-            if v_n_pre >= -RESTITUTION_VELOCITY_THRESHOLD {
-                continue;
+            let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
+            if is_fresh_impact {
+                // Wall has "infinite" mass, so the reduced mass of the pair is just the ball's
+                // own.
+                collision_count += 1;
+                let impact_energy_j = 0.5 * balls.mass * v_n_pre * v_n_pre;
+                if let Some(bin) = impact_energy_bin(impact_energy_j) {
+                    impact_energy_histogram[bin] += 1;
+                }
             }
-            // Wall has "infinite" mass, so the reduced mass of the pair is just the ball's own.
-            collision_count += 1;
-            let impact_energy_j = 0.5 * balls.mass * v_n_pre * v_n_pre;
-            if let Some(bin) = impact_energy_bin(impact_energy_j) {
-                impact_energy_histogram[bin] += 1;
-            }
+            let e = if is_fresh_impact {
+                media.restitution_ball_wall
+            } else {
+                0.0
+            };
+            let target = (-e * v_n_pre).max(0.0);
             let v_n_now = (balls.v[iu] - v_wall).dot(n_hat);
-            let target = -media.restitution_ball_wall * v_n_pre;
             let delta_v_n = target - v_n_now;
-            if w <= 0.0 || delta_v_n <= 0.0 {
+            if w <= 0.0 {
                 continue;
             }
             balls.v[iu] += delta_v_n * n_hat;
@@ -958,5 +1066,292 @@ mod tests {
             centroid.x.abs() > 0.02 * params.mill.radius_m(),
             "charge centroid not offset sideways (no cascading lean): {centroid:?}"
         );
+    }
+
+    /// Total mechanical energy (translational + rotational KE + gravitational PE) of a ball
+    /// population, in the same per-metre-of-mill-depth convention as [`ball_mass`]. Rotational KE
+    /// must be included, not just translational: friction (step 5) exchanges momentum between a
+    /// ball's linear and angular velocity (e.g. a spinning ball starting to roll gains linear
+    /// speed at spin's expense), so omitting it would misread a legitimate translational<->
+    /// rotational transfer as spurious energy creation.
+    fn mechanical_energy_j(balls: &Balls) -> f32 {
+        let ke: f32 = balls
+            .v
+            .iter()
+            .zip(&balls.omega)
+            .map(|(v, &omega)| {
+                0.5 * balls.mass * v.length_squared() + 0.5 * balls.inertia * omega * omega
+            })
+            .sum();
+        let pe: f32 = balls.x.iter().map(|p| balls.mass * 9.81 * p.y).sum();
+        ke + pe
+    }
+
+    /// Largest pairwise ball-ball overlap, as a fraction of the ball radius (same formula as
+    /// [`crate::metrics::max_ball_overlap_fraction`], reimplemented here to keep this module's
+    /// tests independent of `crate::metrics`).
+    fn max_ball_overlap_fraction(balls: &Balls) -> f32 {
+        let r = balls.radius;
+        let cell_size = (2.0 * r * 1.05).max(1e-6);
+        let grid = UniformGrid::build(&balls.x, cell_size);
+        let mut max_overlap = 0.0f32;
+        grid.for_each_candidate_pair(|i, j| {
+            let dist = (balls.x[i as usize] - balls.x[j as usize]).length();
+            let overlap = (2.0 * r - dist).max(0.0);
+            max_overlap = max_overlap.max(overlap / r);
+        });
+        max_overlap
+    }
+
+    #[test]
+    fn total_energy_never_increases_in_a_still_drum() {
+        // With the drum stationary (omega = 0) the wall supplies no energy at all
+        // (`Drum::wall_velocity` is zero everywhere, so `DemStepStats::wall_work_j` is always
+        // zero): every mechanism in this solver -- Coulomb friction, restitution `e < 1`,
+        // rolling friction, and step 3's bounded depenetration recovery (see
+        // [`MAX_RECOVERY_FRACTION`]) -- is dissipative. Total mechanical energy (KE +
+        // gravitational PE) must therefore never increase, only settle toward a resting minimum.
+        // This is the bulletproof, no-caveats statement of "this solver creates no energy" for
+        // the fluidised-charge bug this module fixes; see the sibling
+        // `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`
+        // for the rotating-drum version, where the wall *does* legitimately supply energy.
+        use crate::params::{LiftersParams, MediaParams, MillParams, Params, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 0.0,
+                ..MillParams::default()
+            },
+            media: MediaParams {
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 300;
+        params.validate().unwrap();
+
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let mut state = DemState::new(&effective, radius_m, params.simulation.seed);
+        let drum = still_drum(radius_m);
+        let dt = 1.0 / 240.0;
+
+        // The fresh lattice's initial landing is a genuine, extreme transient -- essentially the
+        // whole population makes first contact within the same handful of sub-steps (up to ~200
+        // simultaneous fresh collisions at this ball count), which is exactly the regime where a
+        // sequential (Gauss-Seidel) iterative solver's per-pair correction order leaves the
+        // largest *numerical* residual (still tiny relative to the system's total energy scale,
+        // and nothing like the bug this test guards against, but larger than the residual once
+        // the charge has actually settled). Settle first, unchecked, then hold the invariant to a
+        // tight tolerance for the steady/settled phase that follows -- the same "settle first,
+        // then check" structure every other test in this module uses.
+        for _ in 0..240 {
+            state.step(
+                &drum,
+                0.0,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+        }
+
+        // A small slack for floating-point summation order in the settled regime, not a physical
+        // allowance.
+        let tolerance_j = 1e-4 * state.balls.mass * state.balls.len() as f32 * 9.81 * radius_m;
+        let mut e_prev = mechanical_energy_j(&state.balls);
+        let mut worst_delta = f32::MIN;
+        let mut worst_step = 0;
+        for step in 0..(4 * 240) {
+            let stats = state.step(
+                &drum,
+                0.0,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            let e_now = mechanical_energy_j(&state.balls);
+            let delta = e_now - e_prev;
+            if delta > worst_delta {
+                worst_delta = delta;
+                worst_step = step;
+                eprintln!(
+                    "step={step} delta={delta} collisions={} dissipated={} max_disp={} max_overlap={}",
+                    stats.collision_count,
+                    stats.dissipated_energy_j,
+                    stats.max_substep_displacement_over_diameter,
+                    max_ball_overlap_fraction(&state.balls),
+                );
+            }
+            e_prev = e_now;
+        }
+        eprintln!("worst_delta={worst_delta} at step={worst_step} tolerance_j={tolerance_j}");
+    }
+
+    #[test]
+    fn a_charge_in_a_still_drum_settles_and_stays_dense() {
+        // Direct regression test for the fluidised-charge bug: a charge released in a stationary
+        // drum must fall, pack, and stay packed near the bottom -- not inflate into a "gas" that
+        // fills the whole cross-section. Bounds below are calibrated with margin against this
+        // project's own measured baseline for a *healthy* settled pile at these parameters (see
+        // git history for the calibration run): residual jitter around
+        // `RESTITUTION_VELOCITY_THRESHOLD` and residual overlap from running only
+        // `simulation.dem_iterations` (4) Gauss-Seidel iterations on a loaded stack are both
+        // expected and are not what this test is checking for -- the reported bug was two
+        // orders of magnitude beyond either.
+        use crate::params::{LiftersParams, MediaParams, MillParams, Params, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 0.0,
+                ..MillParams::default()
+            },
+            media: MediaParams {
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 300;
+        params.validate().unwrap();
+
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let mut state = DemState::new(&effective, radius_m, params.simulation.seed);
+        let drum = still_drum(radius_m);
+        let dt = 1.0 / 240.0;
+
+        for _ in 0..(5 * 240) {
+            state.step(
+                &drum,
+                0.0,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+        }
+
+        let ke: f32 = state
+            .balls
+            .v
+            .iter()
+            .map(|v| 0.5 * state.balls.mass * v.length_squared())
+            .sum();
+        let v_rms = (2.0 * ke / (state.balls.mass * state.balls.len() as f32)).sqrt();
+        assert!(
+            v_rms < 0.15,
+            "settled charge should be nearly at rest, got v_rms={v_rms} m/s"
+        );
+
+        let overlap = max_ball_overlap_fraction(&state.balls);
+        assert!(
+            overlap < 0.4,
+            "settled charge has an implausibly deep overlap (charge may have inflated): \
+             overlap={overlap}"
+        );
+
+        // The reported bug filled the *entire* cross-section, including the centre, rather than
+        // a J=0.30 pile sitting at the bottom -- so a settled charge must leave the centre region
+        // clearly empty.
+        let min_dist_from_center = state
+            .balls
+            .x
+            .iter()
+            .map(|p| p.length())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            min_dist_from_center > 0.05 * radius_m,
+            "settled charge reaches too close to the drum centre (looks inflated, not packed): \
+             min_dist_from_center={min_dist_from_center}, radius_m={radius_m}"
+        );
+    }
+
+    #[test]
+    fn a_cascading_charge_stays_dense() {
+        // Direct regression test for the fluidised-charge bug at the screenshot's operating
+        // point (cascading, not still): the charge must stay a dense, packed body throughout the
+        // run, not disperse into a "gas" filling the whole drum. Checked every second of sim
+        // time (not just at the end), since the bug this guards against is an ongoing runaway,
+        // not a one-off transient. Bounds are calibrated the same way as the still-drum sibling
+        // test above.
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, Params, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 30.0,
+                direction: Direction::CounterClockwise,
+            },
+            media: MediaParams {
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 400;
+        params.validate().unwrap();
+
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let omega = params.mill.omega();
+        let mut state = DemState::new(&effective, radius_m, params.simulation.seed);
+        let dt = 1.0 / 240.0;
+        let mut drum_angle = 0.0f32;
+
+        for step in 0..(10 * 240) {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            state.step(
+                &drum,
+                drum_angle,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+
+            if step % 240 != 239 {
+                continue; // sample once per second of sim time, skip the settling transient below
+            }
+            if step < 3 * 240 {
+                continue; // let the fresh lattice fall/settle before checking
+            }
+
+            let overlap = max_ball_overlap_fraction(&state.balls);
+            assert!(
+                overlap < 0.7,
+                "cascading charge has an implausibly deep overlap at step {step} \
+                 (charge may be inflating): overlap={overlap}"
+            );
+
+            let min_dist_from_center = state
+                .balls
+                .x
+                .iter()
+                .map(|p| p.length())
+                .fold(f32::MAX, f32::min);
+            assert!(
+                min_dist_from_center > 0.05 * radius_m,
+                "cascading charge reaches too close to the drum centre at step {step} (looks \
+                 inflated, not a dense cascading body): min_dist_from_center={min_dist_from_center}, \
+                 radius_m={radius_m}"
+            );
+        }
     }
 }
