@@ -52,9 +52,9 @@ This reference documents every user-facing simulation parameter. The table data 
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
-| `simulation.substeps` | Sub-steps / frame | — | 4 | 1–16 | 1 | Fixed sub-steps per rendered frame at 1× time scale. Nominal PBF step rate is `substeps × 60` Hz before frame-budget throttling. |
-| `simulation.dem_iterations` | Ball solver iterations | — | 4 | 1–20 | 1 | XPBD non-penetration solver iterations per sub-step for the ball population. Trades contact-resolution accuracy for cost rather than stability. |
-| `simulation.max_balls` | Max balls (coarse-graining target) | — | 2000 | 10–50000 | 10 | Target upper bound on simulated ball particles. If the true media population exceeds this, coarse-graining applies transparent particle scaling to preserve total charge mass and footprint area. See `docs/PLAN.md` ss3.2. |
+| `simulation.substeps` | Sub-steps / frame | — | 8 | 1–16 | 1 | Fixed sub-steps per rendered frame at 1× time scale. Nominal PBF step rate is `substeps × 60` Hz before frame-budget throttling. |
+| `simulation.dem_iterations` | Ball solver iterations | — | 2 | 1–20 | 1 | XPBD non-penetration solver iterations per sub-step for the ball population. Trades contact-resolution accuracy for cost rather than stability. Halved (from 4) alongside doubling `substeps` (from 4) to keep DEM cost per rendered frame roughly flat while approximately halving the tunnelling-risk ratio `max_substep_displacement_over_diameter`; see `docs/PHYSICS.md` ss9. |
+| `simulation.max_balls` | Max balls (coarse-graining target) | — | 600 | 10–50000 | 10 | Target upper bound on simulated ball particles. If the true media population exceeds this, coarse-graining applies transparent particle scaling to preserve total charge mass and footprint area. See `docs/PLAN.md` ss3.2. |
 | `simulation.time_scale` | Time scale | — | 1.0 | 0.1–5 | 0.1 | Wall-clock-to-simulation-time multiplier requested by the user. Achieved rate is reported back and may be lower depending on frame budget. |
 | `simulation.seed` | Random seed | — | 1 | 0–1,000,000,000 | 1 | Random number seed for reproducible initial ball configuration. All runs with identical `Params` and `seed` are deterministic. |
 

@@ -76,15 +76,18 @@ export function fluidParticleCountEstimate(radiusM: number, resolution: number, 
  * ball's own velocity, dominated by rotation and cascading, not just rim speed); the live
  * `Metrics.max_substep_displacement_over_diameter` (surfaced in the metrics panel) is the
  * authoritative value once the sim is running.
+ *
+ * `subDt` here mirrors `worker.ts`'s `sim.fixedSubDt()`: a *constant* `1 / (60 * substeps)`,
+ * independent of `time_scale` and of the actual wall-clock frame rate. `time_scale` only controls
+ * how much simulated time the worker's accumulator loop tries to catch up per unit of wall-clock
+ * time -- it does not change the size of any individual sub-step -- so it plays no part in this
+ * formula (an earlier version of this function multiplied `subDt` by `timeScale`, mirroring the
+ * worker's old, buggy `wallDt * timeScale` sub-step sizing; that has since been fixed on both
+ * sides).
  */
-export function substepDisplacementOverDiameter(
-  mill: MillLike,
-  timeScale: number,
-  substeps: number,
-  effectiveDiameterM: number,
-): number {
+export function substepDisplacementOverDiameter(mill: MillLike, substeps: number, effectiveDiameterM: number): number {
   const omega = (rpmOf(mill) * 2 * Math.PI) / 60;
   const rimSpeedMS = omega * (mill.diameter_m / 2);
-  const subDt = timeScale / 60 / Math.max(1, substeps);
+  const subDt = 1 / (60 * Math.max(1, substeps));
   return effectiveDiameterM > 0 ? (rimSpeedMS * subDt) / effectiveDiameterM : 0;
 }

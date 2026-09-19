@@ -11,7 +11,8 @@ import {
 
 // Mirrors mill-core's defaults (crates/mill-core/src/params.rs): MillParams::diameter_m = 1.0,
 // MediaParams::ball_diameter_m = 0.010, fill_fraction = 0.30, packing_fraction_2d = 0.82,
-// SimulationParams::max_balls = 2000.
+// SimulationParams::max_balls = 600 (the `maxBalls` args passed explicitly below, 2000/5000,
+// pre-date that default change and are unaffected by it).
 const diameterM = 1.0;
 const media: MediaLike = { ball_diameter_m: 0.010, fill_fraction: 0.3, packing_fraction_2d: 0.82, density_kg_m3: 6000 };
 
@@ -55,13 +56,19 @@ describe("substepDisplacementOverDiameter", () => {
   const mill: MillLike = { diameter_m: 1.0, speed_mode: "rpm", speed_value: 30 };
 
   it("returns a finite, order-of-magnitude-sane positive value for normal inputs", () => {
-    const result = substepDisplacementOverDiameter(mill, 1, 4, 0.01109);
+    const result = substepDisplacementOverDiameter(mill, 4, 0.01109);
     expect(result).toBeGreaterThan(0);
     expect(result).toBeLessThan(10);
   });
 
   it("returns exactly 0 for a degenerate zero effective diameter", () => {
-    expect(substepDisplacementOverDiameter(mill, 1, 4, 0)).toBe(0);
+    expect(substepDisplacementOverDiameter(mill, 4, 0)).toBe(0);
+  });
+
+  it("halves when substeps doubles, since subDt is now fixed and independent of time_scale", () => {
+    const base = substepDisplacementOverDiameter(mill, 4, 0.01109);
+    const doubled = substepDisplacementOverDiameter(mill, 8, 0.01109);
+    expect(doubled).toBeCloseTo(base / 2, 10);
   });
 });
 

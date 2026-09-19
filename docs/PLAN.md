@@ -182,8 +182,10 @@ The true (uncoarsened) media population is `N_true = J·k_p·(π R²) / (π r_tr
 and `k_p` is `media.packing_fraction_2d` (2D areal packing fraction of the settled disc charge,
 default 0.82, range `[0.5, 0.907]`, the hexagonal upper bound `π/(2√3) ≈ 0.907`) — this refines an
 earlier `N_real = J·(π R²)/(π r_true²)` formula that implicitly assumed a 100 %-solid footprint. At
-the current defaults (D = 1 m, d = 10 mm, J = 0.30, `k_p` = 0.82), `N_true ≈ 2460`, just above
-`simulation.max_balls` (default 2000, chosen to meet the M6 "≥1.0x real time" target); at smaller
+the current defaults (D = 1 m, d = 10 mm, J = 0.30, `k_p` = 0.82), `N_true ≈ 2460`, well above
+`simulation.max_balls` (default 600, chosen to keep the fixed-sub-step tunnelling-risk ratio
+`max_substep_displacement_over_diameter` in the solver's stable regime at the default `substeps`/
+`dem_iterations`; see docs/PHYSICS.md ss9); at smaller
 media (e.g. d = 2 mm) `N_true` reaches the tens of thousands — far above what a single-threaded
 WASM solver can step in real time even with the unconditionally-stable XPBD approach below (the
 cost is per-contact, not per-substep). Rather than exposing this as a raw performance cliff, the
@@ -384,12 +386,21 @@ how the rest of the solver already applies position/velocity corrections directl
 - SharedArrayBuffer + wasm threads are *not* required (Vite dev server would need COOP/COEP); listed as future work.
 - Params: `SetParams { params, reset: boolean }`. Hot-swappable (no reset): rpm, viscosity, time scale, substeps/iters,
   no-slip factors, display options. Everything else (geometry, fill, ball sizes, resolution, seed, lifters) triggers `reset`.
-- **v1 implementation status**: `simulation.time_scale` is wired end-to-end (`worker.ts` scales
-  `wallDt` by it before calling `Simulation::step`, and reports the achieved ratio back for the
-  HUD), but the hot-swappable `SetParams`/no-reset split above and the budget_ms catch-up loop are
-  not yet implemented — v1 (`ui/paramsPanel.ts`, `schema.ts`) always sends a full `init` (reset) on
-  Apply, and `worker.ts` steps by exactly `wallDt * time_scale` per frame (clamped to
-  `MAX_FRAME_DT`) rather than looping fixed sub-steps up to a frame budget. Land with M5.
+- **v1 implementation status**: the fixed-sub-step, frame-budget-capped accumulator loop described
+  above is now implemented. `mill-core` exposes `Simulation::fixed_sub_dt()` (the constant
+  `1 / (60 * substeps)` sub-step size, independent of wall-clock frame rate and of `time_scale`),
+  `Simulation::step_fixed()` (advances by exactly one fixed sub-step) and
+  `Simulation::reset_frame_stats()` (resets the per-frame diagnostics `step_fixed()` itself doesn't
+  reset), with matching `mill-wasm`/`mill_wasm.d.ts` bindings `fixedSubDt()`/`stepFixed()`/
+  `resetFrameStats()`. `worker.ts` accumulates `pendingSimTime += wallDt * time_scale` per
+  `requestFrame` (and, for the manual Step button, `(1/60) * time_scale` per press) and drains it in
+  `fixedSubDt()`-sized chunks via `stepFixed()`, bounded by `frame_budget_ms` of wall-clock work per
+  call, with a runaway cap so a chronic backlog (huge `time_scale`, or a machine too slow to keep
+  up) is dropped rather than queued for a later catch-up burst. `achievedTimeScale` is now a real
+  measurement (`stepsRun * fixedSubDt() / wallDt`), not algebraically pinned to `time_scale`. The
+  hot-swappable `SetParams`/no-reset split above is the one piece of this section still not
+  implemented — v1 (`ui/paramsPanel.ts`, `schema.ts`) always sends a full `init` (reset) on Apply.
+  Land with M5.
 
 ### 4.2 Rendering (`render/canvas.ts`, Canvas 2D, DPR-aware)
 Layers per frame: background → drum interior disc → lifters (rotated by drumAngle) → slurry surface polygon (fill, alpha 0.55)
@@ -422,7 +433,7 @@ rate (`FIXED_DT` x `substeps`), estimated cost.
 | Media | ball diameter 10 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
 | Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 50 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
 | Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
-| Simulation | resolution 40 (particles across R); substeps 4; PBF iterations 3; DEM (XPBD) iterations 4; max balls 2000; time scale 1.0; frame budget 12 ms; seed 1 |
+| Simulation | resolution 40 (particles across R); substeps 8; PBF iterations 3; DEM (XPBD) iterations 2; max balls 600; time scale 1.0; frame budget 12 ms; seed 1 |
 | Display | show fluid particles / surface polygon / dye / toe-shoulder / free-surface line / spin marker / velocity vectors; ball colour by speed |
 
 ### 4.4 Toolbar & HUD
@@ -519,4 +530,4 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 | 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
 | Rust toolchain on Windows (MSVC linker) | Check in M0; fall back to GNU toolchain with rtools gcc; wasm target needs no linker |
 | Lifter SDF gradient numeric noise at corners | Round corners with small radius in SDF; test resting stability |
-| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | **Resolved, implemented** (`Params::effective_media`, ss3.2): coarse-graining is applied automatically whenever the true ball count exceeds `simulation.max_balls` (default 2000), substituting fewer, larger, lighter balls that preserve total media mass and fill fraction. The effective diameter, coarse-graining factor, and simulated vs. true ball count are always shown explicitly in the parameters modal's derived-values panel (ss4.3) — never applied silently. |
+| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | **Resolved, implemented** (`Params::effective_media`, ss3.2): coarse-graining is applied automatically whenever the true ball count exceeds `simulation.max_balls` (default 600), substituting fewer, larger, lighter balls that preserve total media mass and fill fraction. The effective diameter, coarse-graining factor, and simulated vs. true ball count are always shown explicitly in the parameters modal's derived-values panel (ss4.3) — never applied silently. |

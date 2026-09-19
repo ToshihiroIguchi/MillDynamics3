@@ -210,7 +210,6 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const mediaDensityInput = inputs.get("media.density_kg_m3");
     const maxBallsInput = inputs.get("simulation.max_balls");
     const substepsInput = inputs.get("simulation.substeps");
-    const timeScaleInput = inputs.get("simulation.time_scale");
     const slurryFillInput = inputs.get("slurry.fill_fraction");
     if (
       !diameterInput ||
@@ -222,7 +221,6 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       !mediaDensityInput ||
       !maxBallsInput ||
       !substepsInput ||
-      !timeScaleInput ||
       !slurryFillInput
     ) {
       derived.replaceChildren();
@@ -248,13 +246,20 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     };
     const maxBalls = Number(maxBallsInput.value);
     const substeps = Number(substepsInput.value);
-    const timeScale = Number(timeScaleInput.value);
     const slurryFill = Number(slurryFillInput.value);
 
     const nTrue = trueBallCount(diameterM, media);
     const eff = effectiveMedia(diameterM, media, maxBalls);
     const fluidCount = fluidParticleCountEstimate(diameterM / 2, DEFAULT_FLUID_RESOLUTION, slurryFill);
-    const substepDisp = substepDisplacementOverDiameter(mill, timeScale, substeps, eff.diameterM);
+    const substepDisp = substepDisplacementOverDiameter(mill, substeps, eff.diameterM);
+    // Mirrors pbf.rs's `dx = drum_radius_m / resolution`, same dx used internally by
+    // fluidParticleCountEstimate above. A ratio > 1 means a single fluid particle is wider than a
+    // ball -- the "unresolved ball<->fluid coupling" regime (docs/PHYSICS.md ss6) where the
+    // coupling's per-particle taper weighting is a poor approximation (many fluid particles
+    // overlapping one ball, or one fluid particle spanning several balls); this was part of the
+    // fluidised-charge bug's root cause.
+    const fluidDxM = diameterM / 2 / DEFAULT_FLUID_RESOLUTION;
+    const fluidSpacingVsBall = eff.diameterM > 0 ? fluidDxM / eff.diameterM : 0;
 
     const rows: [string, string, boolean?][] = [
       ["Critical speed (Nc)", `${criticalSpeedRpm(diameterM).toFixed(1)} rpm`],
@@ -263,8 +268,9 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       ["Simulated balls (N_sim)", String(eff.ballCount)],
       ["Coarse-graining (k)", eff.scaleFactor.toFixed(3)],
       ["Effective ball diameter", `${(eff.diameterM * 1000).toFixed(2)} mm`],
+      ["Fluid spacing vs ball diameter", fluidSpacingVsBall.toFixed(2), fluidSpacingVsBall > 1.0],
       ["Est. fluid particles", String(fluidCount)],
-      ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.5],
+      ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.3],
     ];
 
     derived.replaceChildren();
