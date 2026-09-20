@@ -375,14 +375,15 @@ visibly unstable (balls flung out of the charge) at this project's default sub-s
 
 ### 6.1 Overlap projection (pbf.rs step 3.5)
 
-After the density-constraint solve, any fluid particle within `contact_radius = balls.radius + 0.25
-* h` of a ball centre is pushed out along the connecting normal by `push_mag = min(contact_radius -
-dist, 0.5 * balls.radius)` — capped at half the ball's radius so a particle deeply embedded in the
-contact zone cannot produce an outsized single-substep *position* correction. The grid used to find
-a ball's nearby fluid particles here is sized to cover this step's `contact_radius` exactly (it
-used to default to `2 * balls.radius`, which was smaller than `contact_radius` at this project's
-defaults and silently missed real neighbours — regression test:
-`pbf::tests::coupling_finds_ball_neighbours_beyond_two_radii`).
+After the density-constraint solve, any fluid particle within `contact_radius = balls.radius +
+ADHESION_CONTACT_MARGIN * h` (`ADHESION_CONTACT_MARGIN = 0.05`, previously `0.25` — see ss6.1a for
+why it shrank) of a ball centre is pushed out along the connecting normal by `push_mag =
+min(contact_radius - dist, 0.5 * balls.radius)` — capped at half the ball's radius so a particle
+deeply embedded in the contact zone cannot produce an outsized single-substep *position* correction.
+The grid used to find a ball's nearby fluid particles here is sized to cover the wider of this step's
+`contact_radius` and ss6.1a's `adhesion_radius` (it used to default to `2 * balls.radius`, which was
+smaller than `contact_radius` at this project's defaults and silently missed real neighbours —
+regression test: `pbf::tests::coupling_finds_ball_neighbours_beyond_two_radii`).
 
 **The momentum exchanged is bounded separately from the position correction.** The full push
 implies a velocity of `push_mag / dt` once step 5 reconstructs velocity from position — unbounded
@@ -403,6 +404,73 @@ before it, a purely resting/settled overlap (particle not actually approaching t
 a stability clamp (ss6.4) permissive enough to let it through at this project's default parameters.
 This mechanism alone was not the dominant one, though — see ss6.2 for the fix that turned out to
 matter most for the reported symptom (a still-drum coupled charge failing to settle at all).
+
+### 6.1a Ball<->slurry adhesion / media wettability (pbf.rs step 3.6)
+
+ss6.1's overlap projection only ever pushes fluid *away* from a ball's surface — nothing pulled it
+back, a geometric 180 degree (fully non-wetting) contact angle baked into the discretisation
+regardless of any parameter. `slurry.wettability` (`[0, 1]`, default `0.6`) adds the missing
+attraction: for a fluid particle in the shell `(shell_start, adhesion_radius]` just outside
+`contact_radius`,
+
+```
+shell_start     = contact_radius + ADHESION_SHELL_DEAD_ZONE * h   (ADHESION_SHELL_DEAD_ZONE = 1e-3)
+adhesion_radius = contact_radius + ADHESION_RANGE_FACTOR * h      (ADHESION_RANGE_FACTOR = 1.0)
+accel_mag       = wettability * ADHESION_ACCEL_FACTOR * |GRAVITY| (ADHESION_ACCEL_FACTOR = 2.0)
+```
+
+`shell_start` (not `contact_radius` itself) is where the shell begins: ss6.1's push lands an
+overlapping particle *exactly* at `contact_radius`, and without this small dead zone, ordinary
+floating-point rounding in that push could leave the particle a hair past `contact_radius`, which
+this step's smooth taper (zero in the limit, but not exactly zero a few ULPs off the boundary) would
+then treat as genuine shell membership — caught by
+`coupling::tests::an_approaching_overlapping_fluid_particle_gives_the_ball_the_opposite_reaction`'s
+momentum-conservation check, which has no tolerance for a second mechanism sneaking in.
+
+Each shell particle gets a smooth bump weight `taper = 1 - (2t - 1)^2`, `t = (dist - shell_start) /
+(adhesion_radius - shell_start)` (zero at both edges), producing a taper-weighted mean pull direction
+`pull_dir` (toward the weighted-mean fluid side) and a coverage fraction `coverage = min(1,
+sum(taper))` — a fully-surrounded ball (symmetric coverage, `dir_bar ~= 0`) has no net direction to
+pull and is skipped, same as a fully-entrained ball feeling no net drag in ss6.2.
+
+**The ball's own velocity response is relaxed by the contributing fluid mass, exactly like ss6.2's
+`a_lin`.** At this project's coupling resolution a ball's shell typically holds only one or two
+sub-resolution fluid particles, so `m_contrib = particle_mass * sum(taper)` is routinely orders of
+magnitude below `balls.mass`. Applying the target closing velocity `accel_mag * coverage * dt`
+straight to the ball and letting the exact-conservation split recoil it back onto that tiny fluid
+mass gives the fluid an unphysical velocity spike (the same mass-ratio amplification ss6.2 already
+had to fix for viscous drag) — masked, not caught, by the fluid speed clamp (ss6.4) absorbing the
+excess on the fluid side only, which broke momentum conservation. The fix mirrors ss6.2 exactly:
+
+```
+attach = m_contrib / (balls.mass + m_contrib)          <= 1, -> 0 as m_contrib -> 0
+dv_b   = pull_dir * (accel_mag * coverage * dt * attach)
+```
+
+`coupling.impulses[b] += balls.mass * dv_b` (plus the matching angular term via `lever = pull_dir *
+balls.radius`); each contributing particle `j` absorbs `dv_j = -(balls.mass * frac_j / mass) * dv_b`
+(`frac_j = taper_j / sum(taper)`), so the fluid side's total momentum change is exactly `-balls.mass *
+dv_b` regardless of `m_contrib`, `balls.mass`, or how many particles share the shell — regression
+test: `coupling::tests::adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`.
+
+**Balls are processed sequentially (Gauss-Seidel), not Jacobi**, for the identical reason as ss6.2: a
+fluid particle can sit in more than one ball's shell at once at this project's coupling resolution,
+and computing every ball's pull against the same stale fluid snapshot would let their individually-
+bounded reactions stack.
+
+**Applied as a deferred velocity delta, not directly to `self.v`.** Unlike ss6.1's push (a position
+correction whose *excess* velocity is tracked and subtracted back out), step 3.6 moves no position at
+all — it is a pure velocity kick. Applying it to `self.v` in place at step 3.6's point in the
+pipeline would be silently discarded by ss5.2 step 5's velocity reconstruction (`v = (x - x0) / dt`,
+driven only by position deltas, which runs immediately after). Step 3.6's contribution is instead
+accumulated separately and added back into `self.v` right after that reconstruction (and after ss6.1's
+excess subtraction), the same "defer past the reconstruction" pattern ss6.1 already uses for its own
+excess term.
+
+**Deliberately not a true Young's-equation contact angle.** That needs a matching fluid-fluid
+cohesion term, which this crate does not (re-)implement (`S_CORR_K` stays `0`, ss5.2 step 3's
+artificial-pressure term) — an explicit scope cut, not an oversight. `wettability` only fixes the
+more basic defect: slurry previously could not cling to media at all, regardless of any parameter.
 
 ### 6.2 Viscous no-slip drag (pbf.rs step 6.5)
 

@@ -103,6 +103,7 @@ export const SCHEMA: FieldSchema[] = [
   // constraint (the form uses novalidate and its own JS range check -- see ui/paramsPanel.ts).
   { path: "slurry.viscosity_pa_s", group: "Slurry", label: "Viscosity", unit: "Pa·s", type: "number", min: 0, max: 200, step: 0.1 },
   { path: "slurry.wall_no_slip", group: "Slurry", label: "Wall no-slip (β)", type: "number", min: 0, max: 1, step: 0.05 },
+  { path: "slurry.wettability", group: "Slurry", label: "Wettability", type: "number", min: 0, max: 1, step: 0.05 },
   {
     path: "slurry.dye_pattern",
     group: "Slurry",
