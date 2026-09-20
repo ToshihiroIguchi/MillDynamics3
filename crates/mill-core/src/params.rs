@@ -209,15 +209,42 @@ pub struct SlurryParams {
     pub wall_no_slip: f32,
     /// No-slip blend factor at ball surfaces, in [0, 1] (1 = full no-slip).
     pub ball_no_slip: f32,
-    /// Ball<->slurry wettability, in [0, 1]. `0` = non-wetting (fluid is only ever pushed off a
-    /// ball's surface, never pulled toward it -- the pre-fix behaviour, equivalent to a 180 degree
-    /// contact angle). `1` = strongly wetting. Scales the adhesion term in
-    /// [`crate::pbf::FluidParticles::step_coupled`] step 3.6; see that step's doc comment. Does not
-    /// model a true Young's-equation contact angle (that needs a matching fluid-fluid cohesion term,
-    /// which this crate does not implement -- see docs/PHYSICS.md ss6.1a), only whether fluid clings
-    /// to media at all.
+    /// Ball<->slurry wettability, in [0, 1]. `0` = non-wetting (fluid is never pulled toward a
+    /// ball's surface, only ever pushed off it -- a 180 degree contact angle). `1` = strongly
+    /// wetting. Scales [`crate::pbf::FluidParticles::step_coupled`]'s Akinci-style boundary-
+    /// adhesion term. Together with `surface_tension_n_m` this gives a genuine (if empirically
+    /// calibrated, not first-principles-derived -- see that term's own doc comment) contact angle:
+    /// wetting pulls fluid onto media, cohesion holds the resulting film together against gravity,
+    /// and the two compete exactly as they do physically. Before `surface_tension_n_m` existed,
+    /// wettability alone could only fix whether fluid clings to media at all, not how (see
+    /// docs/PHYSICS.md ss6.1a's history).
     pub wettability: f32,
+    /// Fluid-fluid surface tension (N/m), driving an Akinci-style pairwise cohesion force. `0`
+    /// disables it. Real water is ~0.072 N/m (this field's suggested default); like the wider SPH
+    /// surface-tension literature this coefficient is a calibrated proportionality to the physical
+    /// value, not a first-principles unit conversion -- see [`crate::pbf`]'s
+    /// `REFERENCE_SURFACE_TENSION_N_M`/`COHESION_ACCEL_FACTOR` doc comments for why no such
+    /// conversion exists even in the original method (Akinci, Akinci & Teschner, "Versatile
+    /// Surface Tension and Adhesion for SPH Fluids", 2013). Replaces the disabled `S_CORR_K`
+    /// artificial-pressure term as this solver's only fluid-fluid attraction.
+    ///
+    /// `#[serde(default = ...)]`, not a bare `#[serde(default)]`: an older client's JSON
+    /// (predating this field, e.g. the web UI before it exposes a control for this) must not
+    /// silently deserialize to `0.0` (cohesion off) while `wettability` still defaults to a
+    /// positive value -- that specific combination is exactly the "adhesion with nothing holding
+    /// the resulting film together" imbalance this field exists to fix (see `wettability`'s doc
+    /// comment). Falling back to this struct's own intended default (`0.072`) instead keeps an
+    /// older client's behaviour physically coherent until it is updated to send the field itself.
+    #[serde(default = "default_surface_tension_n_m")]
+    pub surface_tension_n_m: f32,
     pub dye_pattern: DyePattern,
+}
+
+/// `#[serde(default = ...)]` target for [`SlurryParams::surface_tension_n_m`] -- see that field's
+/// doc comment for why this must match `SlurryParams::default()`'s own value rather than `f32`'s
+/// bare `0.0`.
+fn default_surface_tension_n_m() -> f32 {
+    0.072
 }
 
 impl Default for SlurryParams {
@@ -232,9 +259,12 @@ impl Default for SlurryParams {
             wall_no_slip: 1.0,
             ball_no_slip: 1.0,
             // Real mineral slurries wet ceramic/steel grinding media reasonably well; 0.6 gives a
-            // visible clinging film without dominating the momentum budget (see step 3.6's ADHESION_
-            // ACCEL_FACTOR, scaled by gravity, for the bound).
+            // visible clinging film without dominating the momentum budget (see pbf.rs's
+            // ADHESION_ACCEL_FACTOR, scaled by gravity, for the bound).
             wettability: 0.6,
+            // Real water's surface tension; see this field's doc comment for why the mapping into
+            // this solver's internal cohesion strength is calibrated, not derived.
+            surface_tension_n_m: default_surface_tension_n_m(),
             dye_pattern: DyePattern::LeftRight,
         }
     }
@@ -253,6 +283,9 @@ impl SlurryParams {
         }
         if !(self.yield_stress_pa >= 0.0 && self.yield_stress_pa.is_finite()) {
             return Err("slurry.yield_stress_pa must be >= 0".into());
+        }
+        if !(self.surface_tension_n_m >= 0.0 && self.surface_tension_n_m.is_finite()) {
+            return Err("slurry.surface_tension_n_m must be >= 0".into());
         }
         for (name, b) in [
             ("wall_no_slip", self.wall_no_slip),

@@ -130,17 +130,32 @@ verified by `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_on
 
 ---
 
-## Not a metrics-panel number, but related: the airborne slurry clump
+## Not a metrics-panel number, but related: the airborne slurry clump and the wetting film
 
-Not a displayed metric, but the other concrete defect an external review reported: a ball flying
-through the air (cataracting) could keep a small cluster of slurry particles glued to it
-indefinitely. This was a real bug in `slurry.wettability`'s adhesion term (`docs/PHYSICS.md` §6.1a)
-— nothing tested whether a fluid particle in a ball's attraction shell was actually near any bulk
-liquid, only whether it happened to be within a (too-wide) geometric range. Fixed by gating
-adhesion on each particle's own local SPH density (`adhesion_wetness`); see `docs/PHYSICS.md` §6.1a
-for the mechanism and `coupling::tests::an_airborne_ball_does_not_carry_a_floating_slurry_clump`
-for the regression test. `slurry.wettability` still works normally for a ball actually at or under
-a slurry surface — only its effect on a ball with no real slurry nearby changed.
+Not a displayed metric, but two concrete defects external reviews reported, both traced back to
+the same root cause: the old shell-based adhesion mechanism had no fluid-fluid cohesion
+counterpart, so it could only ever be tuned to trade one defect for the other.
+
+- **A ball flying through the air (cataracting) could keep a small cluster of slurry particles
+  glued to it indefinitely.** Caused by the old mechanism's shell reaching too far from the
+  surface (up to ~2.6 ball radii at this project's typical coupling resolution) with nothing
+  testing whether there was any actual bulk liquid there.
+- **After a density-based gate was added to fix the clump defect, wetting itself visibly
+  weakened.** The gate suppressed adhesion for any particle whose local SPH density read low --
+  which is exactly what a genuine thin wetting film reads as, being sub-resolution relative to the
+  fluid's own kernel radius `h` at this project's coupling resolution. The two defects were not
+  independently fixable with a single ball<->fluid-only coefficient: strengthening the pull to
+  restore wetting reintroduced the floating-clump defect, and weakening it to suppress the clump
+  starved the film.
+
+Both are now fixed together by replacing the mechanism entirely with an Akinci-style pairwise
+cohesion (`slurry.surface_tension_n_m`, new) and adhesion (`slurry.wettability`) pair
+(`docs/PHYSICS.md` §6.1a): adhesion's range is capped at `2 * balls.radius` regardless of `h`
+(fixing the clump defect geometrically, not via a density gate that also suppresses real films),
+and cohesion gives the slurry a genuine, separately-tunable attraction that holds a pulled-on film
+together against gravity instead of relying on adhesion alone to do both jobs. Regression tests:
+`coupling::tests::adhesion_range_is_capped_at_twice_the_ball_radius_regardless_of_fluid_resolution`,
+`pbf::tests::cohesion_pulls_two_isolated_fluid_particles_together_only_when_surface_tension_is_positive`.
 
 ---
 
