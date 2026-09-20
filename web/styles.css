@@ -124,6 +124,14 @@ body.params-collapsed .params-panel {
   pointer-events: none;
 }
 
+/* Unmissable, not a subtle number: this simulator is not running at real time right now (see
+   ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). */
+.hud-slow-motion {
+  color: #ffd27a;
+  background: rgba(64, 40, 12, 0.85);
+  font-weight: 600;
+}
+
 .params-form {
   padding: 0 12px 12px;
 }
@@ -214,6 +222,16 @@ body.params-collapsed .params-panel {
 }
 
 .params-warn[hidden] {
+  display: none;
+}
+
+.params-note {
+  color: #8fa0b7;
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.params-note[hidden] {
   display: none;
 }
 

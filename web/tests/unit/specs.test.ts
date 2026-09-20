@@ -1,12 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { METRIC_GROUPS, METRIC_SPECS, type MetricContext, type MetricGroupName } from "../../src/metrics/specs";
 
-const CONTEXT_ONLY_IDS = new Set(["sim_time", "fps", "achieved_speed", "rpm", "percent_critical", "critical_speed_rpm"]);
+const CONTEXT_ONLY_IDS = new Set([
+  "sim_time",
+  "fps",
+  "achieved_speed",
+  "substeps_achieved_per_s",
+  "substeps_required_per_s",
+  "rpm",
+  "percent_critical",
+  "critical_speed_rpm",
+]);
 
 const CONTEXT_ONLY_EXPECTED: Record<string, number> = {
   sim_time: 1.5,
   fps: 60,
   achieved_speed: 1,
+  substeps_achieved_per_s: 480,
+  substeps_required_per_s: 480,
   rpm: 30,
   percent_critical: 71,
   critical_speed_rpm: 42.3,
@@ -17,6 +28,8 @@ const baseCtx: MetricContext = {
   simTime: 1.5,
   fps: 60,
   achievedTimeScale: 1,
+  subStepsPerSecondAchieved: 480,
+  subStepsPerSecondRequired: 480,
   rpm: 30,
   percentCritical: 71,
   criticalSpeedRpm: 42.3,

@@ -19,6 +19,15 @@ function millOf(params: ParamsJson | null): { diameter_m: number; speed_mode: st
   return { diameter_m: mill.diameter_m, speed_mode: mill.speed_mode, speed_value: mill.speed_value };
 }
 
+/**
+ * Threshold, as a fraction of `1.0x`, below which the achieved rate reads as "SLOW MOTION" rather
+ * than "REAL TIME". Not exactly `1.0`: `achievedTimeScale` is itself noisy frame-to-frame (a
+ * single frame's `stepsRun` is an integer count of a possibly-large `fixedSubDt()`, see
+ * worker.ts), so requiring *exactly* `>= 1.0` would flicker between states on an otherwise-healthy
+ * run. `0.98` absorbs that noise without hiding a real, sustained shortfall.
+ */
+const REAL_TIME_THRESHOLD = 0.98;
+
 export function createHud(): Hud {
   const el = document.createElement("div");
   el.className = "hud";
@@ -28,11 +37,19 @@ export function createHud(): Hud {
     update(state, fps) {
       const mill = millOf(state.params);
       const ballCount = state.ballPositions.length / 2;
-      const lines = [`t = ${state.simTime.toFixed(1)} s`, `balls: ${ballCount}`, `fps: ${fps.toFixed(0)}`, `speed: ${state.achievedTimeScale.toFixed(2)}x`];
+      const isRealTime = state.achievedTimeScale >= REAL_TIME_THRESHOLD;
+      // Deliberately not a subtle number: a simulator whose physics runs slower than the clock
+      // it's being watched against must say so plainly, not bury it in a "speed: 0.12x" figure
+      // easy to read as a setting rather than a shortfall (docs/PERF.md).
+      const speedLine = isRealTime
+        ? `REAL TIME (${state.achievedTimeScale.toFixed(2)}x)`
+        : `SLOW MOTION ${state.achievedTimeScale.toFixed(2)}x -- ${state.subStepsPerSecondAchieved.toFixed(0)}/${state.subStepsPerSecondRequired.toFixed(0)} sub-steps/s`;
+      const lines = [`t = ${state.simTime.toFixed(1)} s`, `balls: ${ballCount}`, `fps: ${fps.toFixed(0)}`, speedLine];
       if (mill) {
         lines.splice(1, 0, `${rpmOf(mill).toFixed(1)} rpm (${percentCriticalOf(mill).toFixed(0)}% Nc, Nc=${criticalSpeedRpm(mill.diameter_m).toFixed(1)})`);
       }
       el.textContent = lines.join("  |  ");
+      el.classList.toggle("hud-slow-motion", !isRealTime);
     },
   };
 }

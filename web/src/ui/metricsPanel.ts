@@ -207,6 +207,8 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       simTime: state.simTime,
       fps,
       achievedTimeScale: state.achievedTimeScale,
+      subStepsPerSecondAchieved: state.subStepsPerSecondAchieved,
+      subStepsPerSecondRequired: state.subStepsPerSecondRequired,
       rpm: mill ? rpmOf(mill) : null,
       percentCritical: mill ? percentCriticalOf(mill) : null,
       criticalSpeedRpm: mill ? criticalSpeedRpm(mill.diameter_m) : null,

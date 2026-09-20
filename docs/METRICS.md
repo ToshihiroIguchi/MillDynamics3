@@ -165,9 +165,26 @@ These were also raised by the same review and are documented project scope decis
 
 - **Monodisperse media** (no ball size distribution) — `docs/PHYSICS.md` §9, reserved for a future
   milestone (M7).
-- **Real-time performance** — the M6 SIMD/wasm-opt/neighbour-list-reuse pass has not been done yet;
-  `Achieved speed` reading well under `1.0x` (commonly 0.2-0.5x at default parameters) is the known,
-  current state, not a regression. See `docs/PERF.md`.
 - **2D cross-section only** — every value in this crate is per metre of unit mill depth; no axial
   transport, end-wall friction, or 3D particle shape. A deliberate, project-wide scope decision.
-- **Parameter changes reset the simulation** — by design; not a bug to fix.
+
+Two items from the same review turned out to be real, not deliberate, and are fixed as of this pass
+rather than staying deferred:
+
+- **Real-time performance** — the full M6 SIMD/wasm-opt/neighbour-list-reuse pass still has not been
+  done, but `Achieved speed` reading well under `1.0x` (0.12x measured) was compounded by two real,
+  independently-fixed problems, not solely "M6 not done yet": the worker recomputed
+  `fluidSurface()`/`metricsJson()` unconditionally every rendered frame regardless of render rate
+  (now throttled to ~15 Hz, `web/src/worker.ts`), and the default ball/fluid particle counts were
+  tuned for fidelity, not speed. The default "Realtime" quality preset now reaches ~1.0-1.1x; see
+  `docs/PARAMETERS.md`'s quality-preset table and `docs/PERF.md` for the full measured breakdown and
+  the two coarser-grained alternatives (Balanced, Accuracy) that trade that speed back for fidelity.
+  The HUD (`web/src/ui/hud.ts`) now reports achieved speed unmissably ("SLOW MOTION") whenever it
+  falls behind, rather than a number easy to read as a setting.
+- **Parameter changes reset the simulation** — the "by design" framing in an earlier version of this
+  document was inaccurate: `Simulation::set_params` (a live, no-reset apply path) and the `setParams`
+  worker message it backs both already existed but were never wired to the Apply button. They are
+  now (`web/src/main.ts`, `web/src/params/schema.ts`'s `paramsChangeRequiresReset`); a field only
+  resets the simulation when it actually needs to (baked into the ball/fluid population or fluid
+  lattice at seed time -- drum/media geometry, `slurry.enabled`/`fill_fraction`/`density_kg_m3`,
+  `simulation.max_balls`/`resolution`/`seed`), and the console names which field triggered a reset.

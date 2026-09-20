@@ -17,9 +17,11 @@
 // fixed `subDt`-sized chunks (bounded by `frame_budget_ms` of wall-clock work per call) via
 // `sim.stepFixed()`.
 
-import init, { Simulation, setPanicHook } from "./wasm/mill_wasm.js";
+import init, { defaultParamsJson, Simulation, setPanicHook } from "./wasm/mill_wasm.js";
 import type { Metrics } from "./metrics/types";
+import { QUALITY_PRESETS } from "./params/presets";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
+import { withPath } from "./params/schema";
 
 interface WorkerScope {
   onmessage: ((event: MessageEvent<MainToWorkerMessage>) => void) | null;
@@ -54,31 +56,61 @@ function post(message: WorkerToMainMessage, transfer: Transferable[] = []): void
   scope.postMessage(message, transfer);
 }
 
-function buildFrame(sim: Simulation, achievedTimeScale: number): FrameMessage {
-  return {
+/**
+ * Minimum wall-clock interval (ms) between `fluidSurface()`/`metricsJson()` recomputations --
+ * both are expensive relative to a render frame (marching squares over a 128x128 grid; a full
+ * toe/shoulder/pool/mixing-index pass over every ball and fluid particle) and neither needs to be
+ * fresher than this to look smooth or read correctly: the free-surface *outline* barely moves
+ * frame-to-frame at typical sim speeds, and the metrics panel already throttles its own DOM paint
+ * to 100 ms (ui/metricsPanel.ts). Before this, both ran unconditionally every rendered frame --
+ * one contributor to the achieved-time-scale shortfall the HUD reports (ui/hud.ts).
+ */
+const SLOW_UPDATE_INTERVAL_MS = 1000 / 15;
+let lastSlowUpdateMs = Number.NEGATIVE_INFINITY;
+
+function buildFrame(
+  sim: Simulation,
+  achievedTimeScale: number,
+  subStepsPerSecondAchieved: number,
+  subStepsPerSecondRequired: number,
+): FrameMessage {
+  const frame: FrameMessage = {
     type: "frame",
     drumAngle: sim.drumAngle(),
     simTime: sim.simTime(),
     achievedTimeScale,
+    subStepsPerSecondAchieved,
+    subStepsPerSecondRequired,
     ballPositions: sim.ballPositions(),
     ballOrientations: sim.ballOrientations(),
     ballRadiusM: sim.ballRadiusM(),
     fluidPositions: sim.fluidPositions(),
     fluidDye: sim.fluidDye(),
-    fluidSurface: sim.fluidSurface(),
-    metrics: JSON.parse(sim.metricsJson()) as Metrics,
   };
+  const now = performance.now();
+  if (now - lastSlowUpdateMs >= SLOW_UPDATE_INTERVAL_MS) {
+    lastSlowUpdateMs = now;
+    frame.fluidSurface = sim.fluidSurface();
+    frame.metrics = JSON.parse(sim.metricsJson()) as Metrics;
+  }
+  return frame;
 }
 
-function postFrame(sim: Simulation, achievedTimeScale: number): void {
-  const frame = buildFrame(sim, achievedTimeScale);
-  post(frame, [
+function postFrame(
+  sim: Simulation,
+  achievedTimeScale: number,
+  subStepsPerSecondAchieved: number,
+  subStepsPerSecondRequired: number,
+): void {
+  const frame = buildFrame(sim, achievedTimeScale, subStepsPerSecondAchieved, subStepsPerSecondRequired);
+  const transfer: Transferable[] = [
     frame.ballPositions.buffer,
     frame.ballOrientations.buffer,
     frame.fluidPositions.buffer,
     frame.fluidDye.buffer,
-    frame.fluidSurface.buffer,
-  ]);
+  ];
+  if (frame.fluidSurface) transfer.push(frame.fluidSurface.buffer);
+  post(frame, transfer);
 }
 
 /**
@@ -116,22 +148,55 @@ function drainPendingSimTime(sim: Simulation, subDt: number): number {
   return stepsRun;
 }
 
+/** Re-reads the two params fields the worker itself caches in plain JS locals (not read through
+ * wasm on every `stepFixed()` the way the Rust-side solver reads its own params) -- needed after
+ * both `boot()` and a hot `setParams`, since the latter would otherwise leave a stale `timeScale`/
+ * `frameBudgetMs` driving `drainPendingSimTime`'s catch-up math even though `sim`'s own params.rs
+ * state already reflects the change. */
+function syncCachedParams(params: ParamsJson): void {
+  const simulation = params.simulation as { time_scale?: number; frame_budget_ms?: number } | undefined;
+  timeScale = simulation?.time_scale ?? 1;
+  frameBudgetMs = simulation?.frame_budget_ms ?? 12;
+}
+
+/** id of the preset (params/presets.ts) a fresh app load with no explicit params starts at -- see
+ * `boot()`'s use of it below. Not mill-core's own `SimulationParams::default()`
+ * (`max_balls = 600`, `resolution = 40`): that Default is deliberately left at this project's
+ * original, best-fidelity values since native tests/benches (docs/PERF.md) compare against it
+ * directly, but it achieves well under 1x real time (see docs/PERF.md, presets.ts's own doc
+ * comment) -- a poor first impression for a fresh page load with nothing else to compare against.
+ * "accuracy" here would reproduce that Default's own values; "realtime" is deliberately not that.
+ */
+const INITIAL_PRESET_ID = "realtime";
+
 async function boot(initialParams?: ParamsJson): Promise<void> {
   try {
     await init();
     setPanicHook();
-    const json = initialParams ? JSON.stringify(initialParams) : undefined;
+    let params = initialParams;
+    if (!params) {
+      const preset = QUALITY_PRESETS.find((p) => p.id === INITIAL_PRESET_ID);
+      const rustDefaults = JSON.parse(defaultParamsJson()) as ParamsJson;
+      params = preset
+        ? withPath(withPath(rustDefaults, "simulation.max_balls", preset.maxBalls), "simulation.resolution", preset.resolution)
+        : rustDefaults;
+    }
+    const json = JSON.stringify(params);
     sim = new Simulation(json);
-    const params = JSON.parse(sim.paramsJson()) as ParamsJson;
-    const simulation = params.simulation as { time_scale?: number; frame_budget_ms?: number } | undefined;
-    timeScale = simulation?.time_scale ?? 1;
-    frameBudgetMs = simulation?.frame_budget_ms ?? 12;
+    const effectiveParams = JSON.parse(sim.paramsJson()) as ParamsJson;
+    syncCachedParams(effectiveParams);
     pendingSimTime = 0;
-    post({ type: "ready", params });
+    // Force the very next `buildFrame` to recompute fluidSurface/metrics rather than skipping
+    // them per `SLOW_UPDATE_INTERVAL_MS` -- otherwise a reset that lands within that window of
+    // the previous simulation's last update would send `undefined` for both, leaving the old
+    // (now-replaced) simulation's stale surface/metrics on screen.
+    lastSlowUpdateMs = Number.NEGATIVE_INFINITY;
+    post({ type: "ready", params: effectiveParams });
     // Send an immediate snapshot so the drum/balls/slurry reflect the new params right away, even
     // while paused -- without this the canvas keeps showing the previous sim's frame until Play or
-    // Step is pressed.
-    postFrame(sim, 1);
+    // Step is pressed. No sub-steps actually ran, so report 0 achieved against the real
+    // requirement rather than claiming a fictitious 1x.
+    postFrame(sim, 1, 0, 1 / sim.fixedSubDt());
   } catch (err) {
     post({ type: "error", message: String(err) });
   }
@@ -147,6 +212,7 @@ scope.onmessage = (event) => {
       if (sim) {
         try {
           sim.setParams(JSON.stringify(msg.params));
+          syncCachedParams(msg.params);
         } catch (err) {
           post({ type: "error", message: String(err) });
         }
@@ -168,7 +234,7 @@ scope.onmessage = (event) => {
         const subDt = sim.fixedSubDt();
         const stepsRun = drainPendingSimTime(sim, subDt);
         const achievedTimeScale = (stepsRun * subDt) / nominalWallDt;
-        postFrame(sim, achievedTimeScale);
+        postFrame(sim, achievedTimeScale, stepsRun / nominalWallDt, 1 / subDt);
       }
       break;
     }
@@ -181,7 +247,8 @@ scope.onmessage = (event) => {
       const subDt = sim.fixedSubDt();
       const stepsRun = drainPendingSimTime(sim, subDt);
       const achievedTimeScale = msg.wallDt > 0 ? (stepsRun * subDt) / msg.wallDt : timeScale;
-      postFrame(sim, achievedTimeScale);
+      const achievedSubStepsPerSecond = msg.wallDt > 0 ? stepsRun / msg.wallDt : 0;
+      postFrame(sim, achievedTimeScale, achievedSubStepsPerSecond, 1 / subDt);
       break;
     }
   }

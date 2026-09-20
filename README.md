@@ -1,20 +1,27 @@
 # MillDynamics3
 
-A real-time, browser-based simulator of a tumbling ball mill cross-section: grinding media (balls)
+A browser-based simulator of a tumbling ball mill cross-section: grinding media (balls)
 modeled as position-based (XPBD) rigid discs, and a viscous slurry modeled with Position Based Fluids (PBF),
-coupled two-way with buoyancy, viscous drag, and anti-penetration forces. The simulation core is written in Rust
+coupled two-way with buoyancy, viscous drag, and Akinci-style cohesion/adhesion. The simulation core is written in Rust
 and compiled to WebAssembly; the frontend is a framework-free Vite + TypeScript app rendering to Canvas 2D.
+Runs at real time (>= 1.0x) at the default "Realtime" quality preset; two coarser-grained alternatives
+(Balanced, Accuracy) trade that speed for fidelity -- see `docs/PARAMETERS.md`'s quality-preset table and
+`docs/PERF.md` for the measured trade-off each one makes. The HUD always reports the actually-achieved
+speed, not just the setting, and reads unmissably ("SLOW MOTION") whenever it falls behind.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full design and milestone plan, and
 [`CLAUDE.md`](CLAUDE.md) for project conventions.
 
 ## Status
 
-Functional simulator with DEM ball solver (position-based rigid discs), PBF slurry solver with implicit
-Newtonian viscosity, two-way ball–fluid coupling, free-surface rendering, a live metrics panel (power draw,
-mixing index, collision energy histogram, CSV export), and a parameters modal. See `docs/PLAN.md` milestones
-M0–M7 for roadmap; the M6 real-time performance optimization pass (SIMD, wasm-opt, neighbour-list reuse) has
-not yet been done.
+Functional simulator with DEM ball solver (position-based rigid discs, wall/lifter continuous collision
+detection), PBF slurry solver with implicit Newtonian viscosity and Akinci-style cohesion/adhesion, two-way
+ball–fluid coupling, free-surface rendering, a live metrics panel (power draw, mixing index, collision
+energy histogram, CSV export), and a parameters panel with three quality presets. See `docs/PLAN.md`
+milestones M0–M7 for roadmap. The full M6 performance pass (SIMD, wasm-opt, neighbour-list reuse) has not
+yet been done; the "Realtime" preset instead reaches >= 1.0x by throttling the per-frame metrics/free-
+surface recomputation to well below render rate and reducing the default ball/fluid particle counts (see
+`docs/PERF.md`), not through the deeper algorithmic work M6 describes.
 
 ## Live demo
 
