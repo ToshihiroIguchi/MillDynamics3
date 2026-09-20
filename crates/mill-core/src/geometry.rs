@@ -112,6 +112,86 @@ impl Drum {
     pub fn wall_velocity(&self, p_world: Vec2) -> Vec2 {
         self.omega * Vec2::new(-p_world.y, p_world.x)
     }
+
+    /// Time of impact (a fraction `t` in `[0, 1]` of the sub-step) at which a disc of the given
+    /// `radius`, whose centre moves in a straight **world-space** line from `x0_world` to
+    /// `x1_world` while the drum itself rotates from `angle0` to `angle1`, first touches the
+    /// wall/lifter solid. `None` if it never touches within the sub-step.
+    ///
+    /// Sphere-traces the drum's own static, rotation-free local-frame [`Drum::sdf`] along the
+    /// ball's path re-expressed in the drum's *instantaneous* local frame at each traced `t` --
+    /// i.e. this accounts for the drum's own rotation during the sub-step (a lifter sweeping into
+    /// a resting ball is visible to this, unlike [`Drum::sdf_world`], which is a point query at
+    /// one fixed angle and cannot see the wall move). Advancing `t` by `d / local_speed_bound` is
+    /// a safe (never-overshooting) step because `sdf` is 1-Lipschitz in space and
+    /// `local_speed_bound` is a rigorous upper bound on `d(local(t))/dt`: writing
+    /// `local(t) = R(-angle(t)) * (x0 + t*(x1-x0))`, the product rule gives
+    /// `d(local)/dt = R(-angle(t))*(x1-x0) - angle'(t) * perp(local(t))`, whose magnitude is at
+    /// most `|x1-x0| + |angle1-angle0| * |x0 + t*(x1-x0)|` (rotation preserves length; `angle'(t)`
+    /// is exactly the constant `angle1-angle0` since [`Drum`] assumes constant `omega` within a
+    /// sub-step already) -- and `|x0 + t*(x1-x0)| <= |x0| + |x1-x0|` for any `t` in `[0, 1]`,
+    /// with no assumption that the ball stays within the drum.
+    ///
+    /// Returns `None` (not `Some(0.0)`) when the ball already touches or overlaps the wall at
+    /// `t = 0`: recovering an *existing* overlap -- including one this function itself produced
+    /// by clamping the previous sub-step's advance to first contact -- is the discrete
+    /// non-penetration solve's job (`dem.rs` step 3, with its own bounded-recovery policy), not
+    /// this continuous-collision guard's. Treating "already touching" as a crossing here would
+    /// report `t = 0` regardless of which way the ball is actually moving, freezing a ball that
+    /// is separating from the wall just as readily as one still closing on it. The `t = 0` guard
+    /// uses an exact `<= 0.0` test rather than the loop's own convergence tolerance below on
+    /// purpose: a looser tolerance at `t = 0` would let the loop's first iteration re-trigger the
+    /// exact freeze this guard exists to prevent, for any ball starting within that tolerance of
+    /// the surface (routine immediately after a clamped contact, not an edge case).
+    pub fn toi_swept(
+        &self,
+        x0_world: Vec2,
+        x1_world: Vec2,
+        angle0: f32,
+        angle1: f32,
+        radius: f32,
+    ) -> Option<f32> {
+        let local0 = rotate(x0_world, Vec2::from_angle(-angle0));
+        if self.sdf(local0) - radius <= 0.0 {
+            return None;
+        }
+
+        let path = x1_world - x0_world;
+        let path_len = path.length();
+        let dangle = angle1 - angle0;
+        let pos_bound = x0_world.length() + path_len;
+        let local_speed_bound = path_len + dangle.abs() * pos_bound;
+        if local_speed_bound < 1e-9 {
+            return None; // no relative motion, and the check above already ruled out t = 0 contact
+        }
+
+        // Exact `<= 0.0` throughout (not a loosened tolerance like `1e-6`): the guard above
+        // already established `d(0) > 0` strictly, so the very first iteration below cannot
+        // spuriously re-trigger at `t = 0` the way a looser per-iteration tolerance would.
+        let mut t = 0.0f32;
+        for _ in 0..32 {
+            let angle_t = angle0 + dangle * t;
+            let x_t = x0_world + path * t;
+            let local = rotate(x_t, Vec2::from_angle(-angle_t));
+            let d = self.sdf(local) - radius;
+            if d <= 0.0 {
+                return Some(t);
+            }
+            // `.max(1e-6)`: a minimum step-size floor so a `d` that is small-but-still-positive
+            // cannot stall the loop just short of the 32-iteration cap -- unrelated to (and not a
+            // reintroduction of) the stopping tolerance removed above.
+            let step_t = (d / local_speed_bound).max(1e-6);
+            t += step_t;
+            if t >= 1.0 {
+                return None;
+            }
+        }
+        // Ran out of iterations without a clean root: treat the last sample as contact rather
+        // than silently reporting "no contact" -- a false negative is the dangerous direction for
+        // a tunnelling guard, a false positive only costs one extra (harmless) depenetration pass
+        // in the discrete solve that follows.
+        Some(t.min(1.0))
+    }
 }
 
 /// Rotates a 2D vector by a unit vector representing `(cos, sin)` of the rotation angle.
@@ -127,10 +207,7 @@ fn rotate(v: Vec2, unit: Vec2) -> Vec2 {
 /// own frame (its centreline along `pt = 0`). The bar spans `pr` in `[r - height, r]` (base at the
 /// wall, top pointing inward) with tangential half-width `base_half` at the base and `top_half` at
 /// the top -- a possibly-degenerate trapezoid (`top_half == base_half` is a rectangle, `top_half ==
-/// 0` a triangle). The four vertices are wound counter-clockwise so each edge's left-hand normal
-/// (`(-dy, dx)` of the edge direction) points inward; distance to each edge's *line* (not
-/// segment) is exact on that edge and an approximation near corners, standard for a convex-SDF
-/// combined via `min`/`max`.
+/// 0` a triangle). The four vertices are wound counter-clockwise.
 fn lifter_cross_section_sdf(
     pr: f32,
     pt: f32,
@@ -146,20 +223,55 @@ fn lifter_cross_section_sdf(
         Vec2::new(r_top, top_half),
         Vec2::new(r_top, -top_half),
     ];
-    let p = Vec2::new(pr, pt);
-    let mut d = f32::MAX;
-    for i in 0..4 {
+    convex_polygon_sdf(Vec2::new(pr, pt), &verts)
+}
+
+/// Exact signed distance from `p` to a convex polygon with counter-clockwise-wound vertices,
+/// positive when `p` is inside.
+///
+/// A naive convex-SDF -- `min` over each edge's distance to that edge's *infinite* supporting
+/// line -- is exact for interior points (the nearest boundary point of an interior point is
+/// always a perpendicular foot on some edge) but only an *approximation* for exterior points
+/// whose nearest feature is a vertex, not an edge: the unclamped line distance for whichever edge
+/// happens to be nearest always comes out smaller in magnitude than the true Euclidean distance
+/// to that vertex (the line distance is one leg of the right triangle whose hypotenuse is the
+/// true distance). That under-estimate made the lifter's convex corners register contact
+/// *earlier* than geometrically correct -- not later -- which is also what inflated
+/// `max_ball_wall_overlap_fraction` under `lifters.count > 0` (docs/PHYSICS.md §9): the SDF itself
+/// was reporting less clearance than the ball truly had.
+///
+/// The fix: clamp each edge's closest-point projection to the segment itself (so a point beyond
+/// an edge's endpoint measures to that endpoint, not the infinite line through it), and determine
+/// the sign separately via a point-in-convex-polygon half-plane test. This is exact everywhere,
+/// interior or exterior, at the same O(vertex count) cost as the line-based version.
+fn convex_polygon_sdf(p: Vec2, verts: &[Vec2]) -> f32 {
+    let n = verts.len();
+    let mut min_dist_sq = f32::MAX;
+    let mut inside = true;
+    for i in 0..n {
         let a = verts[i];
-        let b = verts[(i + 1) % 4];
+        let b = verts[(i + 1) % n];
         let edge = b - a;
-        let len = edge.length();
-        if len < 1e-9 {
+        let to_p = p - a;
+        let len_sq = edge.length_squared();
+        if len_sq < 1e-12 {
             continue;
         }
-        let inward_normal = Vec2::new(-edge.y, edge.x) / len;
-        d = d.min((p - a).dot(inward_normal));
+        let t = (to_p.dot(edge) / len_sq).clamp(0.0, 1.0);
+        let closest = a + edge * t;
+        min_dist_sq = min_dist_sq.min((p - closest).length_squared());
+        // CCW winding => the inward half-plane is where the point is left of the edge.
+        let cross = edge.x * to_p.y - edge.y * to_p.x;
+        if cross < 0.0 {
+            inside = false;
+        }
     }
-    d
+    let dist = min_dist_sq.sqrt();
+    if inside {
+        dist
+    } else {
+        -dist
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +424,102 @@ mod tests {
             drum.sdf(p) > 0.0,
             "expected free space between lifters, got {}",
             drum.sdf(p)
+        );
+    }
+
+    #[test]
+    fn toi_swept_finds_the_wall_crossing_of_a_fast_straight_shot() {
+        // A ball fired straight at the (stationary, no-lifter) wall from well inside the drum,
+        // moving far enough in one sub-step that it would tunnel through the wall entirely
+        // without a swept test (docs/PHYSICS.md §9's former "no actual swept/continuous-
+        // collision correction" gap). The true crossing (ball surface first touches the wall) is
+        // where `|x(t)| = radius_m - ball_radius`.
+        let drum = smooth_drum(0.3, 0.0);
+        let ball_radius = 0.01;
+        let x0 = Vec2::new(0.0, 0.0);
+        let x1 = Vec2::new(0.5, 0.0); // would end up far outside the drum without clamping
+        let true_t = (drum.radius_m - ball_radius) / (x1.x - x0.x);
+        let t = drum
+            .toi_swept(x0, x1, 0.0, 0.0, ball_radius)
+            .expect("must find a wall crossing");
+        assert!((t - true_t).abs() < 1e-3, "expected toi={true_t}, got {t}");
+    }
+
+    #[test]
+    fn toi_swept_does_not_refreeze_a_ball_already_touching_the_wall() {
+        // A ball resting exactly at the wall at t=0 must not be reported as a "crossing",
+        // regardless of which way it is about to move: recovering an existing overlap is the
+        // discrete solver's job, not this guard's. This is the exact regression an earlier
+        // version of this function had -- treating "already touching" as `Some(0.0)` froze a
+        // ball at its previous position every sub-step it stayed near the wall (including a
+        // separating ball, not just an approaching one), because clamping to `t = 0` means "do
+        // not move at all this sub-step" and CCD re-ran that same freeze on the very next
+        // sub-step too, since the ball was still touching there as well.
+        let drum = smooth_drum(0.3, 0.0);
+        let ball_radius = 0.01;
+        let x0 = Vec2::new(drum.radius_m - ball_radius, 0.0); // exactly touching
+        let x1 = x0 + Vec2::new(0.001, 0.0); // moving slightly further into the wall
+        let t = drum.toi_swept(x0, x1, 0.0, 0.0, ball_radius);
+        assert!(
+            t.is_none(),
+            "expected no CCD crossing for an already-touching ball, got {t:?}"
+        );
+    }
+
+    #[test]
+    fn toi_swept_is_none_for_a_path_that_stays_inside() {
+        let drum = smooth_drum(0.3, 0.0);
+        let t = drum.toi_swept(Vec2::new(0.0, 0.0), Vec2::new(0.01, 0.0), 0.0, 0.0, 0.01);
+        assert!(t.is_none(), "expected no wall crossing, got {t:?}");
+    }
+
+    #[test]
+    fn toi_swept_catches_a_lifter_sweeping_into_a_resting_ball() {
+        // The ball does not move at all this sub-step (x0 == x1); only the drum rotates a lifter
+        // into it. `p = (0.29, 0.0)` is the same point `point_inside_a_lifter_is_solid` uses --
+        // solid when queried at drum_angle = 0. A check using only the entry angle (as the
+        // existing non-swept `drum.sdf_world(x, drum_angle)` narrow-phase does, evaluated once at
+        // the sub-step's starting angle) would see the lifter far away at `angle0 = -0.3` and
+        // report free space; the swept test must still catch the contact that exists by `t = 1`.
+        let drum = lifter_drum(0.3, 1);
+        let ball_radius = 0.002;
+        let p = Vec2::new(0.29, 0.0);
+        let angle0 = -0.3;
+        let angle1 = 0.0;
+
+        let (d_entry, _) = drum.sdf_world(p, angle0);
+        assert!(
+            d_entry - ball_radius > 0.0,
+            "test setup: must be free space at the entry angle, got clearance {}",
+            d_entry - ball_radius
+        );
+
+        let t = drum.toi_swept(p, p, angle0, angle1, ball_radius);
+        assert!(
+            t.is_some(),
+            "a lifter sweeping onto a resting ball's position must register a crossing"
+        );
+    }
+
+    #[test]
+    fn lifter_corner_sdf_is_exact_not_a_vertex_underestimate() {
+        // Regression for the exterior-corner SDF bug (second external review, finding "⑦"): the
+        // old "min over each edge's infinite line" formula under-estimated the true distance to
+        // a convex vertex. With this drum's default lifter geometry (height=0.02, base=0.03,
+        // top=0.02, so r_top = 0.28 and the tip's near-+y vertex is at (0.28, 0.01)), the old
+        // formula read 0.0121 m of clearance at the point checked below instead of the true
+        // 0.0141 m (Euclidean distance to that vertex) -- a ball there was treated as already
+        // closer to the lifter than it geometrically was. `lifter_drum` uses `phase_deg = 0.0`
+        // and this drum has a single lifter, so at `drum_angle = 0.0` the lifter's own
+        // (radial, tangential) frame coincides exactly with world (x, y).
+        let drum = lifter_drum(0.3, 1);
+        let p = Vec2::new(0.27, 0.02);
+        let vertex = Vec2::new(0.28, 0.01);
+        let true_dist = (p - vertex).length();
+        let (d, _) = drum.sdf_world(p, 0.0);
+        assert!(
+            (d - true_dist).abs() < 1e-4,
+            "expected exact corner distance {true_dist}, got {d} (old formula read ~0.0121)"
         );
     }
 
