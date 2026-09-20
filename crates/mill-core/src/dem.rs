@@ -43,6 +43,20 @@ const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
 /// a converged solve produces.
 const MAX_RECOVERY_FRACTION: f32 = 0.2;
 
+/// How far, as a fraction of the ball radius, to advance a CCD-clamped ball past its exact
+/// geometric time-of-impact, so the resulting state is a small genuine overlap rather than a bare
+/// `C = 0` touch -- see the call site in `step_with_external_forces` step 2.5 for why an exact
+/// touch would silently drop the contact from every later step (friction, restitution, rolling
+/// resistance all key off a *recorded*, `lambda_n > 0` contact). Expressed as a physical depth
+/// (`CCD_CONTACT_SKIN_FRACTION * r` metres) rather than a fraction of the sub-step's *remaining*
+/// time specifically so it stays well above `f32` precision at the ball's actual position
+/// magnitude regardless of how close to the sub-step's end the crossing lands -- a time-fraction
+/// skin degenerates when the crossing is found near `t = 1` (routine, not an edge case: it is
+/// exactly what "a ball just reaches the floor by the end of a sub-step" looks like), where even
+/// a generous fraction of the tiny remaining time can round away to nothing at typical world-space
+/// position magnitudes.
+const CCD_CONTACT_SKIN_FRACTION: f32 = 1e-2;
+
 /// Number of log-spaced bins in [`DemStepStats::impact_energy_histogram`].
 pub const IMPACT_ENERGY_HISTOGRAM_BINS: usize = 12;
 /// Lower edge (J per metre of mill depth) of the impact-energy histogram's range.
@@ -432,6 +446,79 @@ impl DemState {
         let grid = UniformGrid::build(&balls.x, cell_size);
         let mut ball_ball_pairs: Vec<(u32, u32)> = Vec::new();
         grid.for_each_candidate_pair(|i, j| ball_ball_pairs.push((i, j)));
+
+        // --- 2.5 Continuous collision detection against the wall/lifters (conservative
+        // advancement) -----------------------------------------------------------------------
+        // Clamp each ball's raw predicted advance to the time of first contact with the
+        // wall/lifters, so step 3's non-penetration solve below starts from an at-most-barely-
+        // touching state instead of repairing an already-tunnelled one. This is what closes the
+        // gap docs/PHYSICS.md §9 used to document as "no actual swept/continuous-collision
+        // correction" for the wall -- step 2's broad-phase margin above only keeps a fast
+        // ball-ball *candidate pair* from being lost, it never limited how far a ball could
+        // travel through solid geometry within one sub-step.
+        //
+        // **Wall/lifter only, deliberately not ball-ball too.** An earlier version of this step
+        // also ran `swept_disc_disc_toi` over every `ball_ball_pairs` candidate and took the same
+        // min-clamp -- and made a packed, lifters-enabled cataracting charge's
+        // `max_ball_wall_overlap_fraction` measurably *worse* (own regression test below), not
+        // better. In a dense granular bed a ball routinely has several simultaneous near-touching
+        // neighbours (ordinary jostling, not a tunnelling risk), and clamping its advance to the
+        // *minimum* time-of-impact across all of them independently froze far more of its motion
+        // than the discrete solver's own bounded-recovery pass (`MAX_RECOVERY_FRACTION`, already
+        // validated against exactly this many-simultaneous-overlap regime by the fluidised-charge
+        // fix this module's tests guard) -- balls piling up unable to settle properly is what
+        // pushed *more* of them hard into the wall, not fewer. The wall/lifter case does not have
+        // this failure mode: it is a single, well-defined rigid boundary, so a ball is clamped
+        // against at most one time-of-impact, not a combinatorial minimum over many neighbours.
+        //
+        // **Only engaged when the predicted end-of-step overlap is deeper than one bounded-
+        // recovery pass could safely absorb**, not on every predicted overlap. A ball sliding
+        // fast tangentially along the wall's *curved* boundary has a straight-line one-sub-step
+        // chord that dips slightly inside the true circular arc essentially every sub-step --
+        // ordinary discretisation, already the discrete solver's routine job to correct (exactly
+        // what step 3 below does every sub-step for every wall contact) -- not a tunnelling risk.
+        // Gating CCD on `MAX_RECOVERY_FRACTION` (the same bound that already tells the discrete
+        // solver how much overlap one pass can safely recover) means CCD only ever intervenes
+        // where that budget is genuinely exceeded, leaving the already-validated routine case
+        // alone. An earlier version of this step engaged CCD on *any* predicted crossing
+        // regardless of depth, which made this same regression test read *worse* than the
+        // pre-CCD baseline: balls sliding along a lifter face were repeatedly clamped to a sliver
+        // of their predicted advance by the curvature artefact above, crushing their reconstructed
+        // tangential velocity every sub-step and leaving them unable to move out of the way of
+        // the charge behind them.
+        let drum_angle_next = drum_angle + drum.omega * dt;
+        let mut toi = vec![1.0f32; n];
+        for i in 0..n {
+            let (d_end, _) = drum.sdf_world(balls.x[i], drum_angle);
+            let c_end = d_end - r;
+            if c_end >= -MAX_RECOVERY_FRACTION * 2.0 * r {
+                continue;
+            }
+            if let Some(t) = drum.toi_swept(x0[i], balls.x[i], drum_angle, drum_angle_next, r) {
+                toi[i] = toi[i].min(t);
+            }
+        }
+        for i in 0..n {
+            if toi[i] < 1.0 {
+                // Advance a hair past the exact crossing -- a fixed physical depth
+                // (`CCD_CONTACT_SKIN_FRACTION * r`), not exactly onto the surface. Stopping
+                // exactly at `C = 0` would make step 3's `if c >= 0.0 { continue; }` skip the
+                // contact entirely: no `lambda_n` gets recorded, so steps 5-7 (friction,
+                // restitution, rolling resistance) never see it either, and a ball clamped to a
+                // bare touch would silently fail to rebound instead of being depenetrated and
+                // restituted like any other contact next sub-step. A tiny genuine overlap here is
+                // deliberate and is exactly what those steps expect.
+                let path_len = (balls.x[i] - x0[i]).length();
+                let skin_depth = CCD_CONTACT_SKIN_FRACTION * r;
+                let t_skin = if path_len > 1e-9 {
+                    skin_depth / path_len
+                } else {
+                    1.0
+                };
+                let t_clamped = (toi[i] + t_skin).min(1.0);
+                balls.x[i] = x0[i] + (balls.x[i] - x0[i]) * t_clamped;
+            }
+        }
 
         let mut book = ContactBook::default();
 
@@ -1201,6 +1288,12 @@ mod tests {
             e_prev = e_now;
         }
         eprintln!("worst_delta={worst_delta} at step={worst_step} tolerance_j={tolerance_j}");
+        assert!(
+            worst_delta <= tolerance_j,
+            "mechanical energy increased by {worst_delta} J at step {worst_step} \
+             (tolerance {tolerance_j} J) in a still drum, which supplies no energy \
+             (wall_work_j is always zero at omega=0) -- every mechanism here must be dissipative"
+        );
     }
 
     #[test]
@@ -1362,6 +1455,89 @@ mod tests {
                  radius_m={radius_m}"
             );
         }
+    }
+
+    /// Largest ball-wall/lifter penetration depth as a fraction of the ball radius (same formula
+    /// as `crate::metrics::max_ball_wall_overlap_fraction`, reimplemented here for the same
+    /// reason as `max_ball_overlap_fraction` above).
+    fn max_ball_wall_overlap_fraction(balls: &Balls, drum: &Drum, drum_angle: f32) -> f32 {
+        let r = balls.radius;
+        let mut max_overlap = 0.0f32;
+        for &x in &balls.x {
+            let (d, _) = drum.sdf_world(x, drum_angle);
+            let overlap = (r - d).max(0.0);
+            max_overlap = max_overlap.max(overlap / r);
+        }
+        max_overlap
+    }
+
+    #[test]
+    fn a_cataracting_charge_with_lifters_never_tunnels_through_a_lifter() {
+        // Regression for the second external review's findings "①" and "⑦": with lifters
+        // enabled, a cataracting charge must never register a ball-wall/lifter overlap deep
+        // enough to mean the ball's *centre* has passed fully through the lifter solid
+        // (overlap >= 1.0, i.e. the centre itself is a full radius past the surface) -- that
+        // specific signature is true tunnelling through a discrete sub-step, as opposed to an
+        // ordinary shallow XPBD contact-convergence residual (which this project's docs already
+        // expect to read tens of percent, see docs/METRICS.md). This exact configuration
+        // (`lifters.count = 8`, default speed) is where the review measured its highest readings
+        // and, before this test, was not covered anywhere in this module -- every other DEM test
+        // here uses `lifters.count = 0`.
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, Params, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 30.0,
+                direction: Direction::CounterClockwise,
+            },
+            media: MediaParams {
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 8,
+                ..LiftersParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 400;
+        params.validate().unwrap();
+
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let omega = params.mill.omega();
+        let mut state = DemState::new(&effective, radius_m, params.simulation.seed);
+        let dt = 1.0 / 240.0;
+        let mut drum_angle = 0.0f32;
+        let mut worst_wall_overlap = 0.0f32;
+
+        for step in 0..(20 * 240) {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            state.step(
+                &drum,
+                drum_angle,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+
+            if step < 5 * 240 {
+                continue; // let the fresh lattice fall/settle into steady cataracting first
+            }
+            let drum_now = Drum::new(radius_m, omega, params.lifters);
+            let overlap = max_ball_wall_overlap_fraction(&state.balls, &drum_now, drum_angle);
+            worst_wall_overlap = worst_wall_overlap.max(overlap);
+            assert!(
+                overlap < 1.0,
+                "ball-wall overlap at step {step} reads {overlap} (>= 1.0 means a ball's centre \
+                 has passed fully through the lifter solid -- true tunnelling, not an XPBD \
+                 contact-convergence residual)"
+            );
+        }
+        eprintln!("worst_wall_overlap={worst_wall_overlap}");
     }
 
     #[test]
