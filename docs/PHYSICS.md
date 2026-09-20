@@ -312,16 +312,15 @@ solve. `s_corr` artificial pressure is implemented but disabled.
    - `lambda_i = -C_i / (sum_j |grad_W_ij/rest_density|^2 + grad_self^2 + EPSILON_RELAX)`,
      `EPSILON_RELAX = 200.0` (CFM-style relaxation against divide-by-zero for sparse
      neighbourhoods).
-   - `delta_p_i = 1/rest_density * sum_j (lambda_i + lambda_j + s_corr_ij) * grad_W_ij`, applied
-     directly to `x`.
-   - **`s_corr` is implemented but disabled** (`S_CORR_K = 0.0`, formula kept as `-k *
-     (W(r)/W(delta_q))^n` with `delta_q = 0.2h`, `n = 4`): at this project's real-SI scale
-     (`rest_density` ~1000-2000 kg/m^3, small `h`), the literature-default `k = 0.1` produced a
-     correction 10-30x larger than the density-constraint terms it's meant to gently supplement,
-     causing runaway dispersal instead of preventing clustering. Disabling it gives a stable
-     settled puddle at ~1% mean density error over 2 s of simulated time; several smaller `k`
-     values were tried without finding a stable working point. Documented in `pbf.rs` as revisit-if
-     visual clustering artefacts are observed, not resolved.
+   - `delta_p_i = 1/rest_density * sum_j (lambda_i + lambda_j) * grad_W_ij`, applied directly to
+     `x`. An earlier version added an artificial-pressure term (`s_corr`) here, the standard PBF
+     remedy for the tensile instability an *unclamped* density constraint produces; since this
+     constraint is one-sided (`C_i` clamped to `>= 0` above) that instability does not arise, and
+     `s_corr` was never found stable at this project's real-SI parameter scale (`rest_density`
+     ~1000-2000 kg/m^3) in the time available, so it was removed entirely rather than kept as a
+     disabled dead option. This solver's fluid-fluid attraction is now the explicit, separately
+     tunable cohesion term (ss6.1a step 3.6a, `slurry.surface_tension_n_m`), not an artefact of
+     this constraint.
 4. **Ball overlap projection** (coupling step 1 — see ss6.1).
 5. **Boundary projection** (position only): for any particle with `drum.sdf_world(x) = d < 0`,
    `x += -d * normal`; marks the particle `touched_wall` for the no-slip blend below.
@@ -400,14 +399,12 @@ visibly unstable (balls flung out of the charge) at this project's default sub-s
 ### 6.1 Overlap projection (pbf.rs step 3.5)
 
 After the density-constraint solve, any fluid particle within `contact_radius = balls.radius +
-ADHESION_CONTACT_MARGIN * h` (`ADHESION_CONTACT_MARGIN = 0.05`, previously `0.25` — see ss6.1a for
-why it shrank) of a ball centre is pushed out along the connecting normal by `push_mag =
-min(contact_radius - dist, 0.5 * balls.radius)` — capped at half the ball's radius so a particle
-deeply embedded in the contact zone cannot produce an outsized single-substep *position* correction.
-The grid used to find a ball's nearby fluid particles here is sized to cover the wider of this step's
-`contact_radius` and ss6.1a's `adhesion_radius` (it used to default to `2 * balls.radius`, which was
-smaller than `contact_radius` at this project's defaults and silently missed real neighbours —
-regression test: `pbf::tests::coupling_finds_ball_neighbours_beyond_two_radii`).
+OVERLAP_PUSH_MARGIN * h` (`OVERLAP_PUSH_MARGIN = 0.05`, previously `0.25`) of a ball centre is
+pushed out along the connecting normal by `push_mag = min(contact_radius - dist, 0.5 *
+balls.radius)` — capped at half the ball's radius so a particle deeply embedded in the contact zone
+cannot produce an outsized single-substep *position* correction. The grid used to find a ball's
+nearby fluid particles here is sized to cover `2 * balls.radius` or `contact_radius`, whichever is
+larger (regression test: `pbf::tests::coupling_finds_ball_neighbours_beyond_two_radii`).
 
 **The momentum exchanged is bounded separately from the position correction.** The full push
 implies a velocity of `push_mag / dt` once step 5 reconstructs velocity from position — unbounded
@@ -429,117 +426,107 @@ a stability clamp (ss6.4) permissive enough to let it through at this project's 
 This mechanism alone was not the dominant one, though — see ss6.2 for the fix that turned out to
 matter most for the reported symptom (a still-drum coupled charge failing to settle at all).
 
-### 6.1a Ball<->slurry adhesion / media wettability (pbf.rs step 3.6)
+### 6.1a Fluid-fluid cohesion and fluid-boundary adhesion (pbf.rs step 3.6)
 
-ss6.1's overlap projection only ever pushes fluid *away* from a ball's surface — nothing pulled it
-back, a geometric 180 degree (fully non-wetting) contact angle baked into the discretisation
-regardless of any parameter. `slurry.wettability` (`[0, 1]`, default `0.6`) adds the missing
-attraction: for a fluid particle in the shell `(shell_start, adhesion_radius]` just outside
-`contact_radius`,
+Replaced entirely (2026, "replace the fluid coupling with the Akinci formulation" milestone) by an
+Akinci-style pairwise-force pair, adapted to 2D: fluid-fluid **cohesion** (step 3.6a,
+`slurry.surface_tension_n_m`) and fluid-boundary **adhesion** (step 3.6b, `slurry.wettability`).
+Together these give the slurry a genuine contact angle -- cohesion holds a film together against
+gravity, adhesion pulls it onto media, and which one wins where is an emergent competition between
+two symmetric pairwise forces, not the single ball<->fluid-only knob (no fluid-fluid counterpart)
+the previous shell-based mechanism was. Source: Akinci, Akinci & Teschner, "Versatile Surface
+Tension and Adhesion for SPH Fluids", 2013.
 
-```
-shell_start     = contact_radius + ADHESION_SHELL_DEAD_ZONE * h   (ADHESION_SHELL_DEAD_ZONE = 1e-3)
-adhesion_radius = contact_radius
-                  + min(ADHESION_RANGE_FACTOR * h, ADHESION_RANGE_BALL_RADII * balls.radius)
-                                                    (ADHESION_RANGE_FACTOR = 1.0,
-                                                     ADHESION_RANGE_BALL_RADII = 0.5)
-accel_mag       = wettability * ADHESION_ACCEL_FACTOR * |GRAVITY| (ADHESION_ACCEL_FACTOR = 2.0)
-```
+**Kernels.** Both terms share `cohesion_kernel(r, h)`, the paper's eq. 2 cubic shape (zero at
+`r = 0` and `r = h`, peaking near `r ~= 0.6h`, slightly negative for `r < h/2` so two very close
+particles get a small locally-repulsive contribution instead of collapsing to coincidence),
+independently re-normalised for 2D (`2*pi * integral_0^h kernel(r) r dr == 1`, matching this
+module's other kernels' convention) rather than reusing the paper's 3D coefficient. Adhesion reuses
+just the outer half of that same shape (`r` in `(h/2, h)`), separately re-normalised over that
+restricted domain, instead of the paper's own fractional-power adhesion formula (`0.007 h^-3.25 *
+(-4r^2/h + 6r - 2h)^0.25`) -- that formula's non-integer exponents have no clean closed-form 2D
+re-derivation, and this kernel needs no property the simpler cubic shape lacks for this solver's
+purpose.
 
-`shell_start` (not `contact_radius` itself) is where the shell begins: ss6.1's push lands an
-overlapping particle *exactly* at `contact_radius`, and without this small dead zone, ordinary
-floating-point rounding in that push could leave the particle a hair past `contact_radius`, which
-this step's smooth taper (zero in the limit, but not exactly zero a few ULPs off the boundary) would
-then treat as genuine shell membership — caught by
-`coupling::tests::an_approaching_overlapping_fluid_particle_gives_the_ball_the_opposite_reaction`'s
-momentum-conservation check, which has no tolerance for a second mechanism sneaking in.
-
-Each shell particle gets a smooth bump weight `taper = 1 - (2t - 1)^2`, `t = (dist - shell_start) /
-(adhesion_radius - shell_start)` (zero at both edges), producing a taper-weighted mean pull direction
-`pull_dir` (toward the weighted-mean fluid side) and a coverage fraction `coverage = min(1,
-sum(taper))` — a fully-surrounded ball (symmetric coverage, `dir_bar ~= 0`) has no net direction to
-pull and is skipped, same as a fully-entrained ball feeling no net drag in ss6.2.
-
-**The ball's own velocity response is relaxed by the contributing fluid mass, exactly like ss6.2's
-`a_lin`.** At this project's coupling resolution a ball's shell typically holds only one or two
-sub-resolution fluid particles, so `m_contrib = particle_mass * sum(taper)` is routinely orders of
-magnitude below `balls.mass`. Applying the target closing velocity `accel_mag * coverage * dt`
-straight to the ball and letting the exact-conservation split recoil it back onto that tiny fluid
-mass gives the fluid an unphysical velocity spike (the same mass-ratio amplification ss6.2 already
-had to fix for viscous drag) — masked, not caught, by the fluid speed clamp (ss6.4) absorbing the
-excess on the fluid side only, which broke momentum conservation. The fix mirrors ss6.2 exactly:
+**3.6a Cohesion.** For each fluid particle, over its existing fluid-fluid neighbour list (step 2,
+no new broad-phase pass):
 
 ```
-attach = m_contrib / (balls.mass + m_contrib)          <= 1, -> 0 as m_contrib -> 0
-dv_b   = pull_dir * (accel_mag * coverage * dt * attach)
+pull_i        = sum_j (particle_mass * cohesion_kernel(r_ij, h) / rest_density) * n_hat_ij
+                                                          (n_hat_ij points from i toward j)
+cohesion_accel = (surface_tension_n_m / REFERENCE_SURFACE_TENSION_N_M)
+                 * COHESION_ACCEL_FACTOR * |GRAVITY|      (REFERENCE = 0.072 N/m, real water;
+                                                            COHESION_ACCEL_FACTOR = 2.0)
+v_i          += -cohesion_accel * pull_i * dt
 ```
 
-`coupling.impulses[b] += balls.mass * dv_b` (plus the matching angular term via `lever = pull_dir *
-balls.radius`); each contributing particle `j` absorbs `dv_j = -(balls.mass * frac_j / mass) * dv_b`
-(`frac_j = taper_j / sum(taper)`), so the fluid side's total momentum change is exactly `-balls.mass *
-dv_b` regardless of `m_contrib`, `balls.mass`, or how many particles share the shell — regression
-test: `coupling::tests::adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`.
+`particle_mass * kernel / rest_density` is dimensionless (kernel is normalised to `1/area`, so the
+product is a density, and dividing by `rest_density` cancels units) -- roughly 1 for a particle deep
+in bulk fluid and tapering to 0 near a free surface, which is what makes `cohesion_accel` a genuine
+peak-acceleration scale rather than needing its own separate normalisation. A fully interior
+particle has a (near-)symmetric neighbourhood, so the pairwise pulls cancel and it feels no net
+force; only a free-surface/thin-film particle, with an asymmetric neighbourhood, feels a net inward
+pull -- ordinary surface tension. `surface_tension_n_m` is a **calibrated proportionality to the
+physical value, not a first-principles unit conversion** -- the mapping from an SPH cohesion
+coefficient to a macroscopic N/m value is inherently resolution-dependent (a coarser or finer fluid
+lattice needs a different coefficient for the same emergent surface tension), a property of the
+method itself, not a shortcut this project's implementation takes. Regression test:
+`pbf::tests::cohesion_pulls_two_isolated_fluid_particles_together_only_when_surface_tension_is_positive`.
 
-**Balls are processed sequentially (Gauss-Seidel), not Jacobi**, for the identical reason as ss6.2: a
-fluid particle can sit in more than one ball's shell at once at this project's coupling resolution,
-and computing every ball's pull against the same stale fluid snapshot would let their individually-
-bounded reactions stack.
+**3.6b Adhesion.** Each ball's circumference is sampled into boundary particles
+(`ball_boundary_particles`: roughly `dx` arc-length spacing, at least 6 points, recomputed fresh
+every sub-step from the ball's current centre -- cheap, no state carried across sub-steps). The
+kernel's support radius is capped, `h_adhesion = h.min(2 * balls.radius)`, regardless of the
+fluid's own `h`: at this project's coupling resolution `h` can be several times the ball's own
+radius, and using it directly (as the shell mechanism this replaces did, before its own separate
+ball-radius-relative cap) let a distant fluid particle read as a floating clump rather than a
+clinging film -- see below for that mechanism's own history.
 
-**Applied as a deferred velocity delta, not directly to `self.v`.** Unlike ss6.1's push (a position
-correction whose *excess* velocity is tracked and subtracted back out), step 3.6 moves no position at
-all — it is a pure velocity kick. Applying it to `self.v` in place at step 3.6's point in the
-pipeline would be silently discarded by ss5.2 step 5's velocity reconstruction (`v = (x - x0) / dt`,
-driven only by position deltas, which runs immediately after). Step 3.6's contribution is instead
-accumulated separately and added back into `self.v` right after that reconstruction (and after ss6.1's
-excess subtraction), the same "defer past the reconstruction" pattern ss6.1 already uses for its own
-excess term.
-
-**Deliberately not a true Young's-equation contact angle.** That needs a matching fluid-fluid
-cohesion term, which this crate does not (re-)implement (`S_CORR_K` stays `0`, ss5.2 step 3's
-artificial-pressure term) — an explicit scope cut, not an oversight. `wettability` only fixes the
-more basic defect: slurry previously could not cling to media at all, regardless of any parameter.
-
-**Two defects fixed after an external review reported ball+slurry clumps floating indefinitely
-through the air, unrelated to either mechanism above.**
-
-1. **The shell was wider than the ball.** `ADHESION_RANGE_FACTOR * h` alone (no cap) reached
-   roughly 2.6 ball radii out from the surface at this project's default coupling resolution
-   (fluid `h` several times a coarse-grained ball's own radius) — fluid held at that range reads
-   as a separate floating clump rather than a wetting film. `ADHESION_RANGE_BALL_RADII` caps the
-   shell at half the ball's own radius regardless of how fine the fluid resolution is.
-2. **Nothing tested whether there was any actual liquid there.** A single sub-resolution particle
-   passing through the shell pulled at full strength, identical to a particle touching the edge of
-   a real pool — there was no submergence, local-density, or neighbour-count gate. Combined with
-   (1)'s wide shell, a ball with a couple of stray shell particles could pick up roughly
-   `wettability * 2g` of pull, comparable to gravity itself, holding the clump together
-   indefinitely rather than letting it disperse.
-
-The fix (`adhesion_wetness`) gates each contributing particle's `taper` weight by how "wet" its
-own already-computed SPH density (`pbf.rs` step 3's `density[]`, one iteration stale — cheap, and
-adequate for a gate) reads, before it contributes to `weight_sum`/`dir_sum`/`coverage`/`m_contrib`/
-`attach` and the final `frac`-weighted reaction split:
+Bounded per ball (not per contributing particle), mirroring ss6.2's drag closure for the identical
+reason (an earlier version applied the peak acceleration independently to every particle in range
+and let the ball absorb the sum, amplifying its response by the contributing-particle count):
 
 ```
-self_frac = particle_mass * poly6(0, h) / rest_density   (the density an isolated particle with
-                                                            zero real neighbours reads, ~0.28 at
-                                                            this project's defaults)
-wet_j     = ((density_j / rest_density - self_frac) / (1 - self_frac)).clamp(0, 1)
-taper_j  *= wet_j
+weight_sum          = sum over (fluid j, boundary point k of ball b) of
+                       (particle_mass * adhesion_kernel(r_jk, h_adhesion) / rest_density)
+fluid_pull_dir_sum   = weighted sum of n_hat_jk (points from j toward k)
+ball_pull_dir        = -normalize(fluid_pull_dir_sum)     (opposite: toward the fluid, not the
+                                                             ball's own surface)
+coverage             = min(1, weight_sum)
+m_contrib            = particle_mass * weight_sum
+attach               = m_contrib / (balls.mass + m_contrib)   <= 1, -> 0 as m_contrib -> 0
+adhesion_accel        = wettability * ADHESION_ACCEL_FACTOR * |GRAVITY|   (ADHESION_ACCEL_FACTOR = 2.0)
+dv_b                  = ball_pull_dir * (adhesion_accel * coverage * dt * attach)
 ```
 
-`wet_j = 0` for an isolated particle (its measured density is exactly `self_frac * rest_density`,
-having no real neighbours) and approaches `1` as `density_j` approaches `rest_density` (genuine
-bulk liquid) — so a ball surrounded only by scattered stray droplets now receives essentially no
-pull, while a ball at the edge of a real pool still wets normally. Because a small *mutually-close*
-cluster of droplets locally reads an elevated (if still sub-`rest_density`) density among
-themselves, the gate reduces rather than fully eliminates adhesion for a tight multi-droplet clump
-that isn't connected to any bulk liquid — a known, accepted limitation of using purely local
-density as the wetness signal, not requiring a matching fluid-fluid cohesion term (see the
-scope-cut note above) to fix properly. Regression tests:
-`coupling::tests::an_airborne_ball_does_not_carry_a_floating_slurry_clump` (several mutually-
-isolated scattered droplets around an airborne ball produce ~zero net impulse) and
-`coupling::tests::adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`
-(a particle with enough nearby density still gets pulled).
+`coupling.impulses[b] += balls.mass * dv_b` (angular term via a single mean `lever = ball_pull_dir *
+balls.radius` across every contributing boundary point, the same level of aggregate-lever
+simplification the drag closure and this mechanism's predecessor both already used); each
+contributing fluid particle `j` absorbs `dv_j = -(balls.mass * frac_j / mass) * dv_b` (`frac_j` its
+share of `weight_sum`), so the fluid side's total momentum change is exactly `-balls.mass * dv_b`
+regardless of how many boundary points or fluid particles were involved. Balls are processed
+sequentially (Gauss-Seidel), same reason as ss6.2: a fluid particle can be near more than one ball's
+boundary at once. Both cohesion and adhesion are pure velocity kicks (`accel * dt`, no position
+change), so -- like ss6.1's push excess -- they are accumulated separately and added back into
+`self.v` right after step 5's `v = (x - x0) / dt` reconstruction, which would otherwise silently
+discard them. Regression tests:
+`coupling::tests::adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`,
+`coupling::tests::adhesion_range_is_capped_at_twice_the_ball_radius_regardless_of_fluid_resolution`.
+
+**History: the shell-based predecessor this replaced.** Before this pass, `slurry.wettability`
+pulled fluid in a purely geometric shell `(shell_start, adhesion_radius]` beyond `contact_radius`
+(ss6.1's overlap-push standoff), gated by each contributing particle's own SPH density
+(`adhesion_wetness`) reading "wet" versus "an isolated airborne droplet". That gate existed to fix
+a review-reported defect: ball+slurry clumps floating indefinitely through the air, caused by (1)
+the shell reaching roughly 2.6 ball radii out from the surface at this project's typical coupling
+resolution, wide enough that a distant fluid particle read as a separate floating clump rather than
+a clinging film, and (2) nothing testing whether there was any actual bulk liquid there, so a
+single stray droplet pulled at full strength identical to one touching a real pool. The
+density-based wetness gate suppressed exactly the particles that would form a genuine thin wetting
+film (necessarily low-density, being sub-resolution relative to `h`), and had no fluid-fluid
+cohesion counterpart to hold a film together once pulled on -- a structural limitation the current
+formulation's real contact angle and real geometric range cap (rather than a shell width tied to
+the fluid's own resolution) do not share.
 
 ### 6.2 Viscous no-slip drag (pbf.rs step 6.5)
 
@@ -778,47 +765,37 @@ state after calling `compute`:
 
 ## 9. Known limitations
 
-- **Tunnelling / continuous-collision guard is diagnostic, with a partial mitigation.**
-  `DemStepStats::max_substep_displacement_over_diameter = |v| * dt / (2*radius)` (the fraction of
-  a ball's own diameter it moved in one sub-step) is computed every sub-step and surfaced through
-  `Simulation::max_substep_displacement_over_diameter` and `metrics::Metrics::
-  max_substep_displacement_over_diameter`. There is still **no actual swept/continuous-collision
-  correction** — the broad-phase (`dem.rs` step 2) now includes a per-sub-step displacement margin
-  (ss4.2) so a fast pair isn't *lost* between sub-steps, and step 3's recovery is now
-  rate-limited (`MAX_RECOVERY_FRACTION`, ss4.2) so a deep overlap decays over several sub-steps
-  instead of becoming a single unphysical velocity spike (ss6's restitution fix removes any excess
-  regardless) — but a ball can still, in principle, pass fully through another within one discrete
-  sub-step without either ever registering as a candidate pair at all. This was observed at
-  ~0.85-0.86 at this project's *former* default parameters (`max_balls = 2000`, `substeps = 4`) —
-  already at the point where tunnelling risk is a live, not merely theoretical, concern, and
-  plausibly connected to the fluidised-charge energy-injection bug this crate's history documents
-  (a solver already at its tunnelling limit gives the (now-fixed) unbounded depenetration/coupling
-  mechanisms above the largest overlaps to react to). The current defaults (`max_balls = 600`,
-  `substeps = 8`, see `docs/PARAMETERS.md`) bring the typical ratio to roughly `0.16` at the
-  default mill speed **with no lifters** -- comfortably under 1, though this is a UI-configurable
-  parameter, not a solver-enforced bound, so a user can still push it back into risky territory
-  (larger `max_balls`, fewer `substeps`, faster rotation, smaller media). **With `lifters.count = 8`
-  at the default speed, both `max_substep_displacement_over_diameter` and `max_ball_overlap_fraction`
-  read measurably higher** than the no-lifter figure above -- cataracting balls launched off a lifter
-  reach higher peak speeds than the no-lifter cascading case. Measured in-browser (default params,
-  `lifters.count = 8`, steady cataracting after ~20 s of sim time):
-  `max_substep_displacement_over_diameter` ~0.30 (vs. ~0.16-0.21 with no lifters),
-  `max_ball_overlap_fraction` ~25-27% (vs. ~20-45%, similar order). An external review's screenshot
-  of a lifters-enabled run reading `substep_displacement = 0.402` is consistent with this pattern
-  (measurably higher than the no-lifter figure, not comparable to it), not evidence of a regression
-  -- both stay well under the XPBD `< 1` criterion. See `docs/METRICS.md` for the full measured
-  reading, including the metrics not discussed here.
-  - **A separate, notable finding from the same measurement: `max_ball_wall_overlap_fraction`
-    reads ~31-33% with `lifters.count = 8`, versus ~1-2% with no lifters**, and this was
-    consistently elevated across repeated readings (not a one-off transient). Plausible
-    contributors, not yet root-caused: the lifter SDF's near-corner approximation
-    (`Drum::sdf_lifters`, ss2) and/or genuinely harder impacts against a lifter face during
-    cataracting (a ball striking a lifter has less opportunity to be caught by a gradually
-    increasing normal force the way a shallow approach to the smooth circular wall does). Worth
-    a follow-up investigation; not fixed as part of this pass.
-- **`s_corr` artificial pressure is implemented but disabled** (`S_CORR_K = 0.0` in `pbf.rs`) — see
-  ss5.2. Revisit only if visual clustering artefacts are observed; no working non-zero `k` was found
-  for this project's SI parameter scale.
+- **Continuous collision detection covers the wall/lifters, not ball-ball.**
+  `Drum::toi_swept` (ss2) clamps a ball's predicted advance to its geometric time-of-impact against
+  the wall/lifters before the non-penetration solve runs, gated to engage only when the predicted
+  end-of-step overlap exceeds `MAX_RECOVERY_FRACTION`'s one-pass recovery budget -- so it acts as a
+  backstop for genuinely severe events, not a routine per-sub-step intervention (an unconditional
+  version measurably regressed `max_ball_wall_overlap_fraction` on a packed, lifters-enabled
+  cataracting charge, by repeatedly truncating ordinary tangential sliding along the wall's curved
+  boundary -- see `dem.rs` step 2.5's own doc comment for the full account). A ball-ball CCD pass
+  was tried and reverted for a related but distinct reason: in a dense granular bed a ball routinely
+  has several simultaneous near-touching neighbours (ordinary jostling, not a tunnelling risk), and
+  clamping to the *minimum* time-of-impact across all of them froze far more motion than the
+  discrete solver's own bounded-recovery pass already handles safely (the mechanism validated by
+  the fluidised-charge energy-injection fix, `MAX_RECOVERY_FRACTION`) -- balls piling up unable to
+  settle pushed *more* of them into the wall, not fewer. `DemStepStats::
+  max_substep_displacement_over_diameter = |v| * dt / (2*radius)` remains the live diagnostic for
+  ball-ball tunnelling risk specifically; at this project's current defaults it stays comfortably
+  under the XPBD `< 1` criterion (`docs/METRICS.md`), and a genuine, isolated ball-ball tunnelling
+  event has not been observed in this crate's regression tests (`dem::tests::
+  two_balls_head_on_collision_conserves_momentum`'s anti-tunnelling assertion).
+- **`max_ball_wall_overlap_fraction` reads elevated under `lifters.count > 0`** (measured ~0.87-0.90
+  worst-case over a 20 s cataracting run at `lifters.count = 8`, versus a much smaller figure with
+  no lifters) -- a real, XPBD contact-convergence residual (cataracting off a lifter reaches higher
+  peak ball speeds than no-lifter cascading), separate from the CCD backstop above, which targets
+  only the pathological >=100% "ball centre fully passed through solid" case and leaves this
+  residual untouched by design. An earlier hypothesis attributed part of this reading to
+  `Drum::sdf_lifters`'s near-corner SDF approximation; that approximation was real (`ss2`'s
+  `lifter_cross_section_sdf` used the min over each edge's infinite supporting line, exact for
+  interior points but under-estimating the true distance to an exterior convex vertex) but biased
+  contact to register *earlier*, not later -- the opposite of a tunnelling risk. It has since been
+  replaced with an exact convex-polygon signed distance (point-to-segment, clamped); reducing this
+  residual further is a `dem_iterations`/performance-budget question, not a geometry bug.
 - **Bingham/Herschel-Bulkley rheology is not implemented.** `params::Rheology::Bingham` exists as a
   reserved enum variant (with `yield_stress_pa` already a validated `SlurryParams` field) but only
   `Rheology::Newtonian` is wired into `pbf.rs`'s viscosity solve; `mean_shear_rate` is computed and
@@ -847,7 +824,3 @@ state after calling `compute`:
   viscosity (ss5.3) also removes real mechanical energy from the balls (ss6.2's drag) that never
   appears in this metric. A coupled steady-state run legitimately shows
   `dissipated_power_w < power_draw_w`; this is not a missing-energy bug.
-- **No fluid-fluid cohesion/surface-tension term.** `S_CORR_K` stays `0` (ss5.2 step 3); the only
-  attraction anywhere in this solver is the ball<->fluid adhesion term (ss6.1a, gated by
-  `slurry.wettability`), not a true Young's-equation contact angle. The free surface has no surface
-  tension.
