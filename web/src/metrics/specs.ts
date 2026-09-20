@@ -94,7 +94,8 @@ export const METRIC_SPECS: MetricSpec[] = [
   { id: "centroid_x", group: "Media", label: "Charge centroid X", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[0] ?? null, format: fixed(3), csv: true },
   { id: "centroid_y", group: "Media", label: "Charge centroid Y", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[1] ?? null, format: fixed(3), csv: true },
   { id: "total_kinetic_energy", group: "Media", label: "Total kinetic energy", unit: "J/m", value: m("total_kinetic_energy_j"), format: fixed(2), sparkline: true, csv: true },
-  { id: "max_ball_overlap", group: "Media", label: "Max ball overlap", value: m("max_ball_overlap_fraction"), format: percentOf1(2), csv: true },
+  { id: "max_ball_overlap", group: "Media", label: "Max ball overlap (of radius)", value: m("max_ball_overlap_fraction"), format: percentOf1(2), csv: true },
+  { id: "max_ball_wall_overlap", group: "Media", label: "Max ball-wall overlap (of radius)", value: m("max_ball_wall_overlap_fraction"), format: percentOf1(2), csv: true },
 
   // --- Grinding (power draw / collisions / dissipation) -------------------------------------
   { id: "power_draw", group: "Grinding", label: "Power draw", unit: "W/m", value: m("power_draw_w"), format: fixed(2), sparkline: true, csv: true },
@@ -119,8 +120,10 @@ export const METRIC_SPECS: MetricSpec[] = [
   { id: "free_surface_offset", group: "Slurry", label: "Free-surface offset", unit: "m", value: m("free_surface_offset_m"), format: fixed(3) },
   { id: "pool_depth", group: "Slurry", label: "Pool depth (bottom)", unit: "m", value: m("pool_depth_m"), format: fixed(3), csv: true },
   { id: "mixing_index", group: "Slurry", label: "Mixing index", value: m("mixing_index"), format: fixed(2), sparkline: true, csv: true },
-  { id: "max_density_error", group: "Slurry", label: "Max density error", value: m("max_fluid_density_error_fraction"), format: percentOf1(1), sparkline: true, csv: true },
-  { id: "mean_density_error", group: "Slurry", label: "Mean density error", value: m("mean_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
+  { id: "max_compression_error", group: "Slurry", label: "Max compression error", value: m("max_fluid_compression_error_fraction"), format: percentOf1(2), sparkline: true, csv: true },
+  { id: "mean_compression_error", group: "Slurry", label: "Mean compression error", value: m("mean_fluid_compression_error_fraction"), format: percentOf1(2), csv: true },
+  { id: "max_density_error", group: "Slurry", label: "Density spread, max (incl. free surface)", value: m("max_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
+  { id: "mean_density_error", group: "Slurry", label: "Density spread, mean (incl. free surface)", value: m("mean_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
   { id: "mean_shear_rate", group: "Slurry", label: "Mean shear rate", unit: "1/s", value: m("mean_shear_rate_per_s"), format: fixed(2), csv: true },
   { id: "viscosity_iterations", group: "Slurry", label: "Viscosity CG iterations", value: m("viscosity_solver_iterations"), format: fixed(0) },
 

@@ -244,10 +244,28 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
 
 `DemStepStats` (per-substep diagnostics, all per-metre-of-mill-depth) returned by this function:
 `wall_work_j`, `collision_count`, `impact_energy_histogram` (12 log-spaced bins from `1e-6` J to
-`1.0` J, `impact_energy_bin_edges`), `dissipated_energy_j` (total ball KE right after predict, i.e.
-including gravity/external forces but before any contact correction, minus final KE — a net,
-mechanism-agnostic dissipation estimate that does not separately attribute loss to friction vs.
-restitution vs. rolling resistance), and `max_substep_displacement_over_diameter` (see ss9).
+`1.0` J, `impact_energy_bin_edges`), `dissipated_energy_j`, and
+`max_substep_displacement_over_diameter` (see ss9).
+
+`dissipated_energy_j = e_after_predict + wall_work_j - e_final`, where `e = mechanical_energy_j`
+(translational + rotational KE + gravitational PE, `mechanical_energy_j`'s own doc comment) is
+evaluated right after the predict step (i.e. including gravity/external forces but before any
+contact correction) and again after the full contact solve (steps 3-7) — a net, mechanism-agnostic
+dissipation estimate that does not separately attribute loss to friction vs. restitution vs.
+rolling resistance vs. step 3's bounded depenetration recovery. Adding back `wall_work_j` is what
+keeps this non-negative: it is exactly the residual of the invariant
+`crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies` proves holds
+every sub-step (`e_final <= e_after_predict + wall_work_j`), so it is bounded below by the same
+argument, not by clamping. An earlier version used translational KE only and omitted `wall_work_j`
+entirely (`ke_after_predict - ke_final`), which read hundreds of watts negative whenever the
+moving wall pumped energy into the charge faster than friction/restitution removed it — an
+entirely ordinary situation under active cascading, not a thermodynamics violation, but one an
+external review understandably flagged as looking like one. **Does not include fluid-side viscous
+dissipation** (ss6.2's drag removes mechanical energy from the balls that never shows up here), so
+`Simulation::dissipated_power_w < Simulation::power_draw_w` in a coupled steady state is expected,
+not a leak. Regression tests:
+`dem::tests::dissipated_energy_is_never_materially_negative_while_cascading`,
+`tests::dissipated_power_approaches_power_draw_in_a_settled_dry_charge` (`crates/mill-core/src/lib.rs`).
 
 ---
 
@@ -261,8 +279,14 @@ solve. `s_corr` artificial pressure is implemented but disabled.
 ### 5.1 Seeding & kernels
 
 - `FluidParticles::seed_lattice`: spacing `dx = drum_radius_m / resolution`, kernel radius `h = 2 *
-  dx`, `rest_density = slurry.density_kg_m3`, `particle_mass = rest_density * dx^2` (2D unit-depth
-  convention, matching `ball_mass`). Particles are placed on a hexagonal lattice filling
+  dx`, `rest_density = slurry.density_kg_m3`. Particles are placed on a **hexagonal** lattice
+  (columns `dx` apart, rows `row_h = dx * sqrt(3)/2` apart), so `particle_mass = rest_density * dx *
+  row_h` (2D unit-depth convention, matching `ball_mass`) — the hex-cell area, **not** the
+  square-lattice `dx^2` an earlier version of this document stated. Deriving both the mass and the
+  seeded site count from that same hex-cell area keeps the total seeded mass, the seeded footprint
+  (`fill_fraction`), and the lattice's own Poly6 density sum (which reads `rest_density` to within
+  ~0.1% right at seeding) all consistent at once; using the square-lattice cell for the mass while
+  seeding hexagonally left every run ~15% over-dense at `t = 0` in an earlier version. Fill:
   `slurry.fill_fraction` of the drum's cross-sectional area from the bottom upward; lattice sites
   overlapping an already-seeded ball are skipped.
 - **Poly6** (density kernel): `W(r^2, h) = 4/(pi*h^8) * (h^2 - r^2)^3` for `r < h`, else `0`.
@@ -415,7 +439,10 @@ attraction: for a fluid particle in the shell `(shell_start, adhesion_radius]` j
 
 ```
 shell_start     = contact_radius + ADHESION_SHELL_DEAD_ZONE * h   (ADHESION_SHELL_DEAD_ZONE = 1e-3)
-adhesion_radius = contact_radius + ADHESION_RANGE_FACTOR * h      (ADHESION_RANGE_FACTOR = 1.0)
+adhesion_radius = contact_radius
+                  + min(ADHESION_RANGE_FACTOR * h, ADHESION_RANGE_BALL_RADII * balls.radius)
+                                                    (ADHESION_RANGE_FACTOR = 1.0,
+                                                     ADHESION_RANGE_BALL_RADII = 0.5)
 accel_mag       = wettability * ADHESION_ACCEL_FACTOR * |GRAVITY| (ADHESION_ACCEL_FACTOR = 2.0)
 ```
 
@@ -471,6 +498,48 @@ excess term.
 cohesion term, which this crate does not (re-)implement (`S_CORR_K` stays `0`, ss5.2 step 3's
 artificial-pressure term) — an explicit scope cut, not an oversight. `wettability` only fixes the
 more basic defect: slurry previously could not cling to media at all, regardless of any parameter.
+
+**Two defects fixed after an external review reported ball+slurry clumps floating indefinitely
+through the air, unrelated to either mechanism above.**
+
+1. **The shell was wider than the ball.** `ADHESION_RANGE_FACTOR * h` alone (no cap) reached
+   roughly 2.6 ball radii out from the surface at this project's default coupling resolution
+   (fluid `h` several times a coarse-grained ball's own radius) — fluid held at that range reads
+   as a separate floating clump rather than a wetting film. `ADHESION_RANGE_BALL_RADII` caps the
+   shell at half the ball's own radius regardless of how fine the fluid resolution is.
+2. **Nothing tested whether there was any actual liquid there.** A single sub-resolution particle
+   passing through the shell pulled at full strength, identical to a particle touching the edge of
+   a real pool — there was no submergence, local-density, or neighbour-count gate. Combined with
+   (1)'s wide shell, a ball with a couple of stray shell particles could pick up roughly
+   `wettability * 2g` of pull, comparable to gravity itself, holding the clump together
+   indefinitely rather than letting it disperse.
+
+The fix (`adhesion_wetness`) gates each contributing particle's `taper` weight by how "wet" its
+own already-computed SPH density (`pbf.rs` step 3's `density[]`, one iteration stale — cheap, and
+adequate for a gate) reads, before it contributes to `weight_sum`/`dir_sum`/`coverage`/`m_contrib`/
+`attach` and the final `frac`-weighted reaction split:
+
+```
+self_frac = particle_mass * poly6(0, h) / rest_density   (the density an isolated particle with
+                                                            zero real neighbours reads, ~0.28 at
+                                                            this project's defaults)
+wet_j     = ((density_j / rest_density - self_frac) / (1 - self_frac)).clamp(0, 1)
+taper_j  *= wet_j
+```
+
+`wet_j = 0` for an isolated particle (its measured density is exactly `self_frac * rest_density`,
+having no real neighbours) and approaches `1` as `density_j` approaches `rest_density` (genuine
+bulk liquid) — so a ball surrounded only by scattered stray droplets now receives essentially no
+pull, while a ball at the edge of a real pool still wets normally. Because a small *mutually-close*
+cluster of droplets locally reads an elevated (if still sub-`rest_density`) density among
+themselves, the gate reduces rather than fully eliminates adhesion for a tight multi-droplet clump
+that isn't connected to any bulk liquid — a known, accepted limitation of using purely local
+density as the wetness signal, not requiring a matching fluid-fluid cohesion term (see the
+scope-cut note above) to fix properly. Regression tests:
+`coupling::tests::an_airborne_ball_does_not_carry_a_floating_slurry_clump` (several mutually-
+isolated scattered droplets around an airborne ball produce ~zero net impulse) and
+`coupling::tests::adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`
+(a particle with enough nearby density still gets pulled).
 
 ### 6.2 Viscous no-slip drag (pbf.rs step 6.5)
 
@@ -605,8 +674,9 @@ Produces closed (rarely open) polylines approximating the slurry free surface fo
    (`THRESHOLD_FRACTION = 0.5`), where `phi_full` is computed **analytically**
    (`analytic_phi_full`), not read off the grid's measured maximum:
    `phi_full = number_density * integral(K dA) = (rest_density / particle_mass) * (pi *
-   splat_radius^2 / 4)`. `number_density = 1/dx^2` is exact at the PBF density constraint's
-   equilibrium because `particle_mass = rest_density * dx^2` at seeding; the kernel's integral has
+   splat_radius^2 / 4)`. `number_density = rest_density / particle_mass = 1 / (dx * row_h)` (the
+   hex lattice's true number density, `row_h = dx * sqrt(3)/2` — see ss5.1's `particle_mass`
+   correction) is exact at the PBF density constraint's equilibrium; the kernel's integral has
    the closed form `pi * splat_radius^2 / 4` (substitute `u = r^2/splat_radius^2`). By symmetry, the
    field value exactly at a flat bulk/free-surface boundary is exactly half the deep-bulk value, so
    the `0.5` contour lands precisely on the physical surface. Using the grid's own measured maximum
@@ -659,10 +729,26 @@ derives:
   (near-zero denominator) return `1.0`.
 - **Total ball kinetic energy** (`total_kinetic_energy_j`): `sum(0.5 * mass * |v|^2)`.
 - **Max ball-ball overlap fraction** (`max_ball_overlap_fraction`): `(2r - dist)/r` over
-  broad-phase candidate pairs (same `UniformGrid` cell size as the DEM contact solve).
+  broad-phase candidate pairs (same `UniformGrid` cell size as the DEM contact solve) — note the
+  denominator is the ball **radius**, not the diameter: two centres coincident reads `2.0` (200%).
+- **Max ball-wall overlap fraction** (`max_ball_wall_overlap_fraction`): `(r - d)/r` (`d` from
+  `Drum::sdf_world`, same per-radius normalisation as above) over every ball. Companion to
+  `max_ball_overlap_fraction`, which is ball-ball only and leaves wall penetration invisible.
 - **Max/mean fluid density error fraction** (`max_fluid_density_error_fraction`,
   `mean_fluid_density_error_fraction`): `|rho_i - rest_density| / rest_density`, reusing
-  `FluidParticles::densities()`.
+  `FluidParticles::densities()`. **Includes free-surface/boundary neighbour deficiency**, which the
+  one-sided PBF density constraint (ss5.2 step 3) never corrects by design -- this reading can look
+  large (tens of percent) on an entirely healthy run, since it is structurally dominated by
+  under-dense free-surface/near-wall particles in any SPH-family method. Not, by itself, evidence
+  the solver has failed to converge; see the compression-error pair below for that.
+- **Max/mean fluid compression error fraction** (`max_fluid_compression_error_fraction`,
+  `mean_fluid_compression_error_fraction`): `(rho_i/rest_density - 1).max(0.0)`, term-for-term the
+  one-sided quantity the PBF density constraint's own `C_i` (ss5.2 step 3) actually drives toward
+  zero, so this is the honest convergence readout -- a healthy run keeps it small (a percent or two)
+  regardless of how large the absolute-value reading above looks. Added after an external review
+  read the absolute-value density error (72% max, 16-26% mean on an ordinary run) as evidence of a
+  broken incompressibility constraint; the compression-only reading over the same population stays
+  small. Regression: `metrics::tests::settled_puddle_compression_error_is_small`.
 
 **Grinding/solver diagnostics are not derivable from `(balls, fluid, drum)` alone** — `compute`
 zero/empty-defaults these fields; `Simulation::metrics()` fills them in from its own accumulated
@@ -709,9 +795,27 @@ state after calling `compute`:
   (a solver already at its tunnelling limit gives the (now-fixed) unbounded depenetration/coupling
   mechanisms above the largest overlaps to react to). The current defaults (`max_balls = 600`,
   `substeps = 8`, see `docs/PARAMETERS.md`) bring the typical ratio to roughly `0.16` at the
-  default mill speed -- comfortably under 1, though this is a UI-configurable parameter, not a
-  solver-enforced bound, so a user can still push it back into risky territory (larger `max_balls`,
-  fewer `substeps`, faster rotation, smaller media).
+  default mill speed **with no lifters** -- comfortably under 1, though this is a UI-configurable
+  parameter, not a solver-enforced bound, so a user can still push it back into risky territory
+  (larger `max_balls`, fewer `substeps`, faster rotation, smaller media). **With `lifters.count = 8`
+  at the default speed, both `max_substep_displacement_over_diameter` and `max_ball_overlap_fraction`
+  read measurably higher** than the no-lifter figure above -- cataracting balls launched off a lifter
+  reach higher peak speeds than the no-lifter cascading case. Measured in-browser (default params,
+  `lifters.count = 8`, steady cataracting after ~20 s of sim time):
+  `max_substep_displacement_over_diameter` ~0.30 (vs. ~0.16-0.21 with no lifters),
+  `max_ball_overlap_fraction` ~25-27% (vs. ~20-45%, similar order). An external review's screenshot
+  of a lifters-enabled run reading `substep_displacement = 0.402` is consistent with this pattern
+  (measurably higher than the no-lifter figure, not comparable to it), not evidence of a regression
+  -- both stay well under the XPBD `< 1` criterion. See `docs/METRICS.md` for the full measured
+  reading, including the metrics not discussed here.
+  - **A separate, notable finding from the same measurement: `max_ball_wall_overlap_fraction`
+    reads ~31-33% with `lifters.count = 8`, versus ~1-2% with no lifters**, and this was
+    consistently elevated across repeated readings (not a one-off transient). Plausible
+    contributors, not yet root-caused: the lifter SDF's near-corner approximation
+    (`Drum::sdf_lifters`, ss2) and/or genuinely harder impacts against a lifter face during
+    cataracting (a ball striking a lifter has less opportunity to be caught by a gradually
+    increasing normal force the way a shallow approach to the smooth circular wall does). Worth
+    a follow-up investigation; not fixed as part of this pass.
 - **`s_corr` artificial pressure is implemented but disabled** (`S_CORR_K = 0.0` in `pbf.rs`) — see
   ss5.2. Revisit only if visual clustering artefacts are observed; no working non-zero `k` was found
   for this project's SI parameter scale.
@@ -730,3 +834,20 @@ state after calling `compute`:
   (out-of-plane) transport, end-wall effects, or 3D particle shape are modelled. This is a
   deliberate, project-wide scope decision (see `docs/PLAN.md`), not a defect, but it means results
   are qualitative relative to a real 3D mill.
+- **The broad-phase displacement margin (ss4.2) covers the largest single-ball speed, not the
+  largest pair *closing* speed.** `cell_size = max(2r*1.05, 2r + max_speed*dt)` uses `max_speed`,
+  the fastest any one ball moves this sub-step; a head-on pair (each moving toward the other at
+  close to `max_speed`) closes at up to twice that rate, so the margin can in principle be half of
+  what step 2's own rationale intends for that specific pair. Widening it to cover the worst-case
+  pairwise closing speed would cost more candidate pairs per sub-step (and, at the broad-phase
+  level, cannot distinguish a genuinely closing pair from a merely fast one); left as a known gap,
+  not fixed, pending the M6 performance pass creating headroom for a broader margin.
+- **`dissipated_power_w` excludes fluid-side viscous dissipation.** It is a purely DEM-side
+  accounting (ss4.2's `dissipated_energy_j`, net of the wall's own work input); the slurry's
+  viscosity (ss5.3) also removes real mechanical energy from the balls (ss6.2's drag) that never
+  appears in this metric. A coupled steady-state run legitimately shows
+  `dissipated_power_w < power_draw_w`; this is not a missing-energy bug.
+- **No fluid-fluid cohesion/surface-tension term.** `S_CORR_K` stays `0` (ss5.2 step 3); the only
+  attraction anywhere in this solver is the ball<->fluid adhesion term (ss6.1a, gated by
+  `slurry.wettability`), not a true Young's-equation contact angle. The free surface has no surface
+  tension.

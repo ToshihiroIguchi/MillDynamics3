@@ -108,9 +108,14 @@ pub struct Metrics {
     /// Largest ball-ball overlap, as a fraction of the ball radius. See
     /// [`max_ball_overlap_fraction`].
     pub max_ball_overlap_fraction: f32,
-    /// Largest fluid particle density error, as a fraction of the rest density. `None` if the
-    /// fluid population is empty (e.g. `slurry.enabled == false`). See
-    /// [`max_fluid_density_error_fraction`].
+    /// Largest ball-wall (including lifters) penetration, as a fraction of the ball radius. See
+    /// [`max_ball_wall_overlap_fraction`].
+    pub max_ball_wall_overlap_fraction: f32,
+    /// Largest fluid particle density error, as a fraction of the rest density -- **includes
+    /// free-surface/boundary neighbour deficiency the solver never corrects by design**. `None`
+    /// if the fluid population is empty (e.g. `slurry.enabled == false`). See
+    /// [`max_fluid_density_error_fraction`], and [`max_fluid_compression_error_fraction`] for the
+    /// one-sided reading the solver actually converges.
     pub max_fluid_density_error_fraction: Option<f32>,
     /// The drum's angular velocity (rad/s) at the moment these metrics were computed, echoed here
     /// so a caller (e.g. the HUD) can convert `*_angle_rad` fields to the "from vertical"
@@ -120,9 +125,21 @@ pub struct Metrics {
     /// `false` at construction time. See [`compute`].
     pub fluid_particle_count: u32,
     /// Mean fluid particle density error, as a fraction of the rest density (companion to
-    /// [`max_fluid_density_error_fraction`]'s worst-case reading). `None` if the fluid
-    /// population is empty. See [`mean_fluid_density_error_fraction`].
+    /// [`max_fluid_density_error_fraction`]'s worst-case reading). Same free-surface caveat as
+    /// that field. `None` if the fluid population is empty. See
+    /// [`mean_fluid_density_error_fraction`].
     pub mean_fluid_density_error_fraction: Option<f32>,
+    /// Largest fluid particle **compression** error, as a fraction of the rest density
+    /// (`(rho_i/rho0 - 1).max(0.0)`) -- the one-sided quantity the PBF density constraint
+    /// actually drives toward zero, so this is the honest convergence readout (unlike the
+    /// absolute-value `max_fluid_density_error_fraction`, it excludes free-surface/boundary
+    /// neighbour deficiency by construction). `None` if the fluid population is empty. See
+    /// [`max_fluid_compression_error_fraction`].
+    pub max_fluid_compression_error_fraction: Option<f32>,
+    /// Mean fluid particle compression error, as a fraction of the rest density (companion to
+    /// [`max_fluid_compression_error_fraction`]'s worst-case reading). `None` if the fluid
+    /// population is empty. See [`mean_fluid_compression_error_fraction`].
+    pub mean_fluid_compression_error_fraction: Option<f32>,
 
     // --- Fields below are zero/empty from `compute` alone; `Simulation::metrics` fills them in
     // from its own accumulated state (EMA-smoothed grinding/solver diagnostics) or from `Params`
@@ -190,8 +207,11 @@ pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f
     let mixing_index = mixing_index(fluid, drum);
     let total_kinetic_energy_j = total_kinetic_energy_j(balls);
     let max_ball_overlap_fraction = max_ball_overlap_fraction(balls);
+    let max_ball_wall_overlap_fraction = max_ball_wall_overlap_fraction(balls, drum, drum_angle);
     let max_fluid_density_error_fraction = max_fluid_density_error_fraction(fluid);
     let mean_fluid_density_error_fraction = mean_fluid_density_error_fraction(fluid);
+    let max_fluid_compression_error_fraction = max_fluid_compression_error_fraction(fluid);
+    let mean_fluid_compression_error_fraction = mean_fluid_compression_error_fraction(fluid);
 
     Metrics {
         toe_angle_rad,
@@ -205,10 +225,13 @@ pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f
         mixing_index,
         total_kinetic_energy_j,
         max_ball_overlap_fraction,
+        max_ball_wall_overlap_fraction,
         max_fluid_density_error_fraction,
         drum_omega_rad_s: drum.omega,
         fluid_particle_count: fluid.len() as u32,
         mean_fluid_density_error_fraction,
+        max_fluid_compression_error_fraction,
+        mean_fluid_compression_error_fraction,
         // Filled in by `Simulation::metrics` -- see the module doc comment and this struct's own
         // doc comment for why `compute` cannot derive these from `(balls, fluid, drum)` alone.
         power_draw_w: 0.0,
@@ -523,10 +546,13 @@ pub fn total_kinetic_energy_j(balls: &Balls) -> f32 {
         .sum()
 }
 
-/// Largest ball-ball overlap, as a fraction of the ball radius (`(2r - dist) / r`, clamped to
-/// `>= 0`), scanning only spatially-nearby candidate pairs via the same [`UniformGrid`] broad-
-/// phase [`crate::dem::DemState::step_with_external_forces`] uses for its own contact solve. `0.0`
-/// if there are fewer than 2 balls.
+/// Largest ball-ball overlap, as a fraction of the ball **radius** (`(2r - dist) / r`, clamped to
+/// `>= 0` -- note this denominator: two ball centres coincident reads `2.0`, i.e. 200%, and a
+/// half-diameter overlap reads `1.0`, i.e. 100%, not 50%), scanning only spatially-nearby
+/// candidate pairs via the same [`UniformGrid`] broad-phase
+/// [`crate::dem::DemState::step_with_external_forces`] uses for its own contact solve. `0.0` if
+/// there are fewer than 2 balls. Ball-**wall** penetration is not included here -- see
+/// [`max_ball_wall_overlap_fraction`].
 pub fn max_ball_overlap_fraction(balls: &Balls) -> f32 {
     if balls.len() < 2 || balls.radius <= 0.0 {
         return 0.0;
@@ -543,10 +569,40 @@ pub fn max_ball_overlap_fraction(balls: &Balls) -> f32 {
     max_overlap
 }
 
+/// Largest ball-wall (including lifters) penetration, as a fraction of the ball radius
+/// (`(r - d) / r`, clamped to `>= 0`, `d` the signed distance from [`Drum::sdf_world`] -- same
+/// per-radius normalisation as [`max_ball_overlap_fraction`]). `0.0` if there are no balls.
+/// Companion to [`max_ball_overlap_fraction`]: wall penetration is otherwise invisible to the
+/// metrics panel even though the DEM solver's ball-wall contact (docs/PHYSICS.md ss4.2) is
+/// subject to the same [`crate::dem::MAX_RECOVERY_FRACTION`] depenetration cap as ball-ball.
+pub fn max_ball_wall_overlap_fraction(balls: &Balls, drum: &Drum, drum_angle: f32) -> f32 {
+    if balls.is_empty() || balls.radius <= 0.0 {
+        return 0.0;
+    }
+    let r = balls.radius;
+    balls
+        .x
+        .iter()
+        .map(|&x| {
+            let (d, _normal) = drum.sdf_world(x, drum_angle);
+            (r - d).max(0.0) / r
+        })
+        .fold(0.0f32, f32::max)
+}
+
 /// Largest fluid particle density error, as a fraction of the rest density
 /// (`|rho_i - rho0| / rho0`), reusing [`FluidParticles::densities`] (already public exactly for
 /// this purpose -- see its doc comment) rather than recomputing SPH density from scratch. `None`
 /// if the fluid population is empty.
+///
+/// **Includes free-surface/boundary neighbour deficiency, which the PBF solver never corrects by
+/// design** -- the density constraint is one-sided (`pbf.rs`'s `c_i = (rho_i/rho0 - 1).max(0.0)`,
+/// docs/PHYSICS.md ss5.2 step 3), so a particle with too few neighbours (any free-surface or
+/// near-wall particle, structurally, in any SPH-family method) is left exactly as sparse as
+/// geometry made it. This absolute-value reading can therefore look large (tens of percent) on an
+/// entirely healthy run and is not, by itself, evidence the solver has failed to converge -- see
+/// [`max_fluid_compression_error_fraction`] for the one-sided reading the solver actually drives
+/// toward zero.
 pub fn max_fluid_density_error_fraction(fluid: &FluidParticles) -> Option<f32> {
     if fluid.is_empty() || fluid.rest_density <= 0.0 {
         return None;
@@ -563,7 +619,9 @@ pub fn max_fluid_density_error_fraction(fluid: &FluidParticles) -> Option<f32> {
 /// Mean fluid particle density error, as a fraction of the rest density (companion to
 /// [`max_fluid_density_error_fraction`]'s worst-case reading -- a settled interior can have a
 /// small mean error even while one boundary/free-surface particle drives up the max). `None` if
-/// the fluid population is empty.
+/// the fluid population is empty. Same free-surface caveat as
+/// [`max_fluid_density_error_fraction`] applies -- see [`mean_fluid_compression_error_fraction`]
+/// for the reading that excludes it by construction.
 pub fn mean_fluid_density_error_fraction(fluid: &FluidParticles) -> Option<f32> {
     if fluid.is_empty() || fluid.rest_density <= 0.0 {
         return None;
@@ -571,6 +629,39 @@ pub fn mean_fluid_density_error_fraction(fluid: &FluidParticles) -> Option<f32> 
     let density = fluid.densities();
     let rest = fluid.rest_density;
     let sum_err: f32 = density.iter().map(|&rho| (rho - rest).abs() / rest).sum();
+    Some(sum_err / density.len() as f32)
+}
+
+/// Largest fluid particle **compression** error, as a fraction of the rest density
+/// (`(rho_i/rho0 - 1).max(0.0)`). Unlike [`max_fluid_density_error_fraction`]'s absolute-value
+/// reading, this matches term-for-term the one-sided quantity the PBF density constraint actually
+/// drives toward zero (`pbf.rs`'s `c_i`, docs/PHYSICS.md ss5.2 step 3), so it is the honest
+/// convergence readout: a healthy run keeps this small (a percent or two) regardless of how sparse
+/// the free surface reads under [`max_fluid_density_error_fraction`]. `None` if the fluid
+/// population is empty.
+pub fn max_fluid_compression_error_fraction(fluid: &FluidParticles) -> Option<f32> {
+    if fluid.is_empty() || fluid.rest_density <= 0.0 {
+        return None;
+    }
+    let density = fluid.densities();
+    let rest = fluid.rest_density;
+    let max_err = density
+        .iter()
+        .map(|&rho| (rho / rest - 1.0).max(0.0))
+        .fold(0.0f32, f32::max);
+    Some(max_err)
+}
+
+/// Mean fluid particle compression error, as a fraction of the rest density (companion to
+/// [`max_fluid_compression_error_fraction`]'s worst-case reading, same one-sided definition).
+/// `None` if the fluid population is empty.
+pub fn mean_fluid_compression_error_fraction(fluid: &FluidParticles) -> Option<f32> {
+    if fluid.is_empty() || fluid.rest_density <= 0.0 {
+        return None;
+    }
+    let density = fluid.densities();
+    let rest = fluid.rest_density;
+    let sum_err: f32 = density.iter().map(|&rho| (rho / rest - 1.0).max(0.0)).sum();
     Some(sum_err / density.len() as f32)
 }
 
@@ -735,6 +826,28 @@ mod tests {
         let density_err = max_fluid_density_error_fraction(sim.fluid())
             .expect("expected a density error reading for enabled slurry");
         assert!(density_err.is_finite());
+
+        // The one-sided compression reading (what the PBF solver actually converges, unlike the
+        // absolute-value `density_err` above, which is dominated by free-surface neighbour
+        // deficiency and stays large even on a healthy run). This is a "not blown up" sanity
+        // bound, not a tight convergence check -- 40 sub-steps (~0.67 s) of an actively rotating,
+        // freshly-seeded charge is a much shorter/more turbulent window than
+        // `settled_puddle_compression_error_is_small`'s still, fully-settled puddle, which checks
+        // convergence properly.
+        let m = sim.metrics();
+        let compression_err = m
+            .max_fluid_compression_error_fraction
+            .expect("expected a compression error reading for enabled slurry");
+        assert!(
+            compression_err.is_finite() && compression_err < 0.5,
+            "compression error fraction too large: {compression_err}"
+        );
+
+        let wall_overlap = m.max_ball_wall_overlap_fraction;
+        assert!(
+            wall_overlap.is_finite() && wall_overlap < 0.1,
+            "ball-wall overlap fraction too large: {wall_overlap}"
+        );
     }
 
     #[test]
@@ -767,9 +880,12 @@ mod tests {
         assert_eq!(metrics.mixing_index, None);
         assert_eq!(metrics.total_kinetic_energy_j, 0.0);
         assert_eq!(metrics.max_ball_overlap_fraction, 0.0);
+        assert_eq!(metrics.max_ball_wall_overlap_fraction, 0.0);
         assert_eq!(metrics.max_fluid_density_error_fraction, None);
         assert_eq!(metrics.fluid_particle_count, 0);
         assert_eq!(metrics.mean_fluid_density_error_fraction, None);
+        assert_eq!(metrics.max_fluid_compression_error_fraction, None);
+        assert_eq!(metrics.mean_fluid_compression_error_fraction, None);
         // Grinding/solver diagnostics are `compute`'s own zero/empty defaults here (this test
         // calls `compute` directly, not `Simulation::metrics`, which is what fills them in).
         assert_eq!(metrics.power_draw_w, 0.0);
@@ -799,6 +915,48 @@ mod tests {
         assert!(
             mean <= max + 1e-6,
             "mean density error {mean} should not exceed the max {max}"
+        );
+    }
+
+    #[test]
+    fn settled_puddle_compression_error_is_small() {
+        // Companion to `crate::pbf::tests::hydrostatic_column_settles_near_rest_density`, which
+        // excludes boundary/free-surface particles to check the solver's actual convergence. The
+        // compression-error metric is defined precisely so that exclusion isn't necessary: it is
+        // zero by construction for any under-dense (rarefied) particle, so it can be checked over
+        // the *whole* population -- including the free surface and wall-adjacent particles the
+        // absolute-value density-error metric
+        // (`mean_fluid_density_error_is_no_larger_than_the_max` above) reads tens of percent on
+        // even when the solver is working correctly, precisely the review finding this metric
+        // exists to correct (see [`max_fluid_compression_error_fraction`]'s doc comment).
+        use crate::params::SlurryParams;
+
+        let slurry = SlurryParams {
+            fill_fraction: 0.25,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.5;
+        let drum = Drum::new(radius_m, 0.0, crate::params::LiftersParams::default());
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 20, &[], 0.0);
+        let dt = 1.0 / 240.0;
+        for _ in 0..240 {
+            fluid.step(&drum, 0.0, &slurry, 3, dt);
+        }
+
+        let mean = mean_fluid_compression_error_fraction(&fluid)
+            .expect("expected a mean compression reading");
+        let max = max_fluid_compression_error_fraction(&fluid)
+            .expect("expected a max compression reading");
+        assert!(mean.is_finite() && mean >= 0.0);
+        assert!(max.is_finite() && max >= 0.0);
+        assert!(
+            mean <= max + 1e-6,
+            "mean compression error {mean} should not exceed the max {max}"
+        );
+        assert!(
+            mean < 0.02,
+            "mean compression error should be small for a settled puddle, over the whole \
+             population (including the free surface): {mean}"
         );
     }
 }

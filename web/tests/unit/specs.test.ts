@@ -73,7 +73,7 @@ describe("sparkline specs", () => {
       "power_draw",
       "dissipated_power",
       "mixing_index",
-      "max_density_error",
+      "max_compression_error",
       "coupling_clamp_hits",
     ]);
   });

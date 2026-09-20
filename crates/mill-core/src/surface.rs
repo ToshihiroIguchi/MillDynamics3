@@ -56,11 +56,13 @@ fn splat_radius_of(fluid: &FluidParticles) -> f32 {
 ///
 /// For a uniform number density `n` of particles each splatted with [`splat_kernel`] of radius
 /// `splat_radius`, the field value far from any edge is `n * integral(K dA)`. `n = rest_density /
-/// particle_mass` is exact here because `particle_mass = rest_density * dx * dx` at seeding
-/// ([`FluidParticles::seed_lattice`]), so `n = 1 / dx^2` at the relaxed equilibrium the PBF
-/// density constraint targets -- deriving `n` from mass/density directly (rather than
-/// re-deriving `dx` from `splat_radius`) keeps this correct even if the `h = 2*dx` relationship
-/// baked into `seed_lattice` ever changes.
+/// particle_mass` is exact at the relaxed equilibrium the PBF density constraint targets, whatever
+/// the seeded lattice's actual per-particle mass is ([`FluidParticles::seed_lattice`] seeds a
+/// **hexagonal** lattice, `particle_mass = rest_density * dx * row_h` with `row_h = dx *
+/// sqrt(3)/2`, i.e. `n = 1 / (dx * row_h)`, not the square-lattice `dx * dx`/`1 / dx^2` an earlier
+/// version of this comment stated) -- deriving `n` from mass/density directly (rather than
+/// re-deriving `dx`/`row_h` from `splat_radius`) keeps this correct even if the `h = 2*dx`
+/// relationship or the lattice shape baked into `seed_lattice` ever changes.
 ///
 /// The kernel's integral over its support has the closed form `pi * splat_radius^2 / 4`:
 /// substituting `u = r^2 / splat_radius^2` into `integral_0^splat_radius (1 - r^2 /

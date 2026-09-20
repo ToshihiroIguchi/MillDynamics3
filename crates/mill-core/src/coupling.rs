@@ -341,14 +341,46 @@ mod tests {
                 ..SlurryParams::default()
             };
             // resolution = 200 -> dx = 0.005, h = 0.01; contact_radius = 0.1 + 0.05*0.01 = 0.1005,
-            // adhesion_radius = 0.1005 + 1.0*0.01 = 0.1105. Placing the particle at the shell's
-            // midpoint (dist = 0.1055) keeps it well clear of both the dead zone at `contact_radius`
-            // and the cutoff at `adhesion_radius`.
+            // adhesion_radius = 0.1005 + 1.0*0.01 = 0.1105 (the `ADHESION_RANGE_BALL_RADII` cap
+            // does not bind here: `0.5 * ball_radius_m = 0.05` is wider than `1.0 * h = 0.01`).
+            // Placing the particle at the shell's midpoint (dist = 0.1055) keeps it well clear of
+            // both the dead zone at `contact_radius` and the cutoff at `adhesion_radius`.
             let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 200, &[], 0.0);
             assert!(fluid.is_empty());
             fluid.x.push(Vec2::new(0.1055, 0.0));
             fluid.v.push(Vec2::ZERO);
             fluid.dye.push(0.0);
+            // `adhesion_wetness` gates step 3.6 by each shell particle's own SPH density, so an
+            // isolated particle (the single push above, with no neighbours) now reads as
+            // unwetted and would no longer be pulled -- add three filler particles that raise the
+            // measured particle's *density* (within `h = 0.01` of it) while staying just outside
+            // `adhesion_radius` themselves (so they never become shell/adhesion contributors in
+            // their own right, keeping the "one contributing particle" premise the momentum-
+            // conservation check below relies on).
+            for filler in [
+                Vec2::new(0.1108, 0.0),
+                Vec2::new(0.1108, 0.003),
+                Vec2::new(0.1108, -0.003),
+            ] {
+                assert!(
+                    filler.length() > 0.1105,
+                    "filler must stay outside adhesion_radius: {filler:?}"
+                );
+                assert!(
+                    (filler - Vec2::new(0.1055, 0.0)).length() < 0.01,
+                    "filler must be within h of the measured particle to raise its density: \
+                     {filler:?}"
+                );
+                fluid.x.push(filler);
+                fluid.v.push(Vec2::ZERO);
+                fluid.dye.push(0.0);
+            }
+            // These four particles stay under `rest_density` for every one of them (verified
+            // empirically), so step 3's density constraint (`c_i = (rho_i/rho0 - 1).max(0.0)`)
+            // is exactly `0` everywhere and applies no position correction at all -- the fillers
+            // raise the measured particle's density (feeding `adhesion_wetness`) without
+            // introducing any PBF-pressure crosstalk into this test's `wettability = 0` baseline
+            // or its Newton's-third-law check below.
 
             let mut dem = DemState::new(&effective, radius_m, 1);
             dem.balls.x[0] = Vec2::new(0.0, 0.0);
@@ -393,6 +425,84 @@ mod tests {
             sum_x.abs() < 1e-6,
             "momentum not conserved in isolated adhesion contact: fluid={fluid_momentum_gained:?} \
              ball_impulse={ball_impulse_on:?} (x-components should cancel)"
+        );
+    }
+
+    #[test]
+    fn an_airborne_ball_does_not_carry_a_floating_slurry_clump() {
+        // Regression for the review finding that a ball flying through the air (cataracting)
+        // kept a small cluster of slurry particles glued to it indefinitely: before
+        // `adhesion_wetness` gated step 3.6 by each particle's own local SPH density, a handful
+        // of scattered droplets sitting in a ball's shell pulled just as hard as if the ball
+        // were touching a real pool -- there was no test for whether there was any actual bulk
+        // liquid nearby, only whether a particle happened to be within `adhesion_radius`.
+        //
+        // Three droplets, spread around the shell but kept more than `h` apart *from each
+        // other* (so none of them raises another's measured density -- genuinely scattered
+        // stray droplets, not a small mutually-dense clump), asymmetrically placed (clustered
+        // within a 40 degree arc, not evenly spaced) so the geometric "shell coverage is
+        // symmetric" early-exit (`dir_bar_len <= 1e-9`, unrelated to wetness) cannot by itself
+        // explain a zero result. At `wettability = 1` (the mechanism's strongest setting), the
+        // ball should still receive essentially no pull.
+        let radius_m = 1.0;
+        let drum = still_drum(radius_m);
+        let ball_radius_m = 0.1;
+        let dt = 1.0 / 240.0;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: 2.0 * ball_radius_m,
+            diameter_m: 2.0 * ball_radius_m,
+            density_kg_m3: 7800.0,
+            ball_count: 1,
+            scale_factor: 1.0,
+        };
+        let slurry = SlurryParams {
+            fill_fraction: 0.0,
+            wall_no_slip: 0.0,
+            viscosity_pa_s: 0.0,
+            wettability: 1.0,
+            ..SlurryParams::default()
+        };
+        let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 200, &[], 0.0);
+        assert!(fluid.is_empty());
+
+        // Same geometry as the isolated-contact case in
+        // `adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`
+        // above (resolution = 200 -> h = 0.01, shell midpoint at dist = 0.1055 from the ball),
+        // but three droplets at 0/20/-20 degrees instead of one at 0 degrees. Chord length
+        // between neighbouring droplets is `2 * 0.1055 * sin(10 deg) ~= 0.0366`, well beyond
+        // `h = 0.01`, so each droplet's own SPH density still reads as just its isolated
+        // self-contribution.
+        let shell_mid = 0.1055;
+        for angle_deg in [0.0f32, 20.0, -20.0] {
+            let angle = angle_deg.to_radians();
+            let p = Vec2::new(shell_mid * angle.cos(), shell_mid * angle.sin());
+            fluid.x.push(p);
+            fluid.v.push(Vec2::ZERO);
+            fluid.dye.push(0.0);
+        }
+        for i in 0..fluid.len() {
+            for j in (i + 1)..fluid.len() {
+                assert!(
+                    (fluid.x[i] - fluid.x[j]).length() > fluid.h,
+                    "droplets must stay mutually isolated (further apart than h) for this test \
+                     to actually exercise the density gate rather than geometric symmetry"
+                );
+            }
+        }
+
+        let mut dem = DemState::new(&effective, radius_m, 1);
+        dem.balls.x[0] = Vec2::ZERO;
+        dem.balls.v[0] = Vec2::ZERO;
+        dem.balls.omega[0] = 0.0;
+
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
+        assert!(
+            impulses.impulses[0].length() < 1e-6,
+            "an airborne ball with only a few scattered droplets nearby (no bulk liquid) \
+             should receive essentially no adhesion pull, not be held as a floating clump: \
+             impulse={:?}",
+            impulses.impulses[0]
         );
     }
 
