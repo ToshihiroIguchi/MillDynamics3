@@ -455,6 +455,12 @@ mod tests {
         };
         let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, resolution, &[], 0.0);
         assert!(fluid.is_empty());
+        // `seed_lattice` now derives `particle_mass` from its own *hexagonal* seeding cell
+        // (`dx * row_h`, `docs/PHYSICS.md`), not the plain square-lattice `dx * dx` this test's
+        // manually-built lattice below actually uses -- override it back to the square-lattice
+        // value so the two stay consistent, independent of whatever cell shape `seed_lattice`
+        // itself seeds with.
+        fluid.particle_mass = slurry.density_kg_m3 * dx * dx;
 
         // A big block (half-extent 1.0 m) centred at the drum's centre: comfortably far from the
         // drum wall (radius 2.0 m) and, since we sample near the block's own centre, far from the

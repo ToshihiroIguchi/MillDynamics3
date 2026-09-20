@@ -209,6 +209,14 @@ pub struct SlurryParams {
     pub wall_no_slip: f32,
     /// No-slip blend factor at ball surfaces, in [0, 1] (1 = full no-slip).
     pub ball_no_slip: f32,
+    /// Ball<->slurry wettability, in [0, 1]. `0` = non-wetting (fluid is only ever pushed off a
+    /// ball's surface, never pulled toward it -- the pre-fix behaviour, equivalent to a 180 degree
+    /// contact angle). `1` = strongly wetting. Scales the adhesion term in
+    /// [`crate::pbf::FluidParticles::step_coupled`] step 3.6; see that step's doc comment. Does not
+    /// model a true Young's-equation contact angle (that needs a matching fluid-fluid cohesion term,
+    /// which this crate does not implement -- see docs/PHYSICS.md ss6.1a), only whether fluid clings
+    /// to media at all.
+    pub wettability: f32,
     pub dye_pattern: DyePattern,
 }
 
@@ -223,6 +231,10 @@ impl Default for SlurryParams {
             yield_stress_pa: 0.0,
             wall_no_slip: 1.0,
             ball_no_slip: 1.0,
+            // Real mineral slurries wet ceramic/steel grinding media reasonably well; 0.6 gives a
+            // visible clinging film without dominating the momentum budget (see step 3.6's ADHESION_
+            // ACCEL_FACTOR, scaled by gravity, for the bound).
+            wettability: 0.6,
             dye_pattern: DyePattern::LeftRight,
         }
     }
@@ -245,6 +257,7 @@ impl SlurryParams {
         for (name, b) in [
             ("wall_no_slip", self.wall_no_slip),
             ("ball_no_slip", self.ball_no_slip),
+            ("wettability", self.wettability),
         ] {
             if !(0.0..=1.0).contains(&b) {
                 return Err(format!("slurry.{name} must be in [0, 1]"));

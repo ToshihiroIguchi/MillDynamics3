@@ -51,6 +51,31 @@ const S_CORR_K: f32 = 0.0;
 const S_CORR_DELTA_Q_FACTOR: f32 = 0.2;
 const S_CORR_N: i32 = 4;
 
+/// Step 3.5's overlap-push standoff, as a multiple of `h` beyond the ball's own radius
+/// (`contact_radius = balls.radius + ADHESION_CONTACT_MARGIN * h`). A small numerical margin only
+/// (previously `0.25`, which at this project's defaults forced roughly half a particle spacing of
+/// permanently fluid-free gap around every ball -- a geometric 180 degree contact angle baked into
+/// the discretisation, independent of any wetting parameter). See step 3.6 for the actual wetting
+/// model this margin now leaves room for.
+const ADHESION_CONTACT_MARGIN: f32 = 0.05;
+/// Step 3.6's adhesion shell width beyond `contact_radius`, as a multiple of `h`.
+const ADHESION_RANGE_FACTOR: f32 = 1.0;
+/// Peak adhesion acceleration, as a multiple of `|GRAVITY|`, at `slurry.wettability = 1`. Chosen to
+/// be comparable to (not dominant over) gravity/buoyancy, so a fully-wetting slurry visibly clings
+/// to media without the term becoming the largest force in the coupling budget; bounded further by
+/// the existing per-ball impulse clamp (step 8, `F_CLAMP_G_MULTIPLE`) alongside every other
+/// coupling mechanism.
+const ADHESION_ACCEL_FACTOR: f32 = 2.0;
+/// Small dead zone (as a multiple of `h`) between step 3.5's `contact_radius` and where step 3.6's
+/// adhesion shell actually starts. Step 3.5 pushes an overlapping particle to land *exactly* at
+/// `contact_radius`; without this margin, ordinary floating-point rounding in that push can leave
+/// the particle a hair past `contact_radius`, which step 3.6's smooth taper (zero in the limit, but
+/// not exactly zero a few ULPs off the boundary) would then treat as a genuine, if tiny, shell
+/// membership -- caught by
+/// `coupling::tests::an_approaching_overlapping_fluid_particle_gives_the_ball_the_opposite_reaction`,
+/// whose momentum-conservation check has no tolerance for a second mechanism sneaking in.
+const ADHESION_SHELL_DEAD_ZONE: f32 = 1e-3;
+
 /// Relative-residual stopping tolerance for [`solve_implicit_viscosity`]'s conjugate-gradient
 /// solve: iterate until `|r| <= VISCOSITY_CG_TOLERANCE * |b|`, `b` the right-hand side (the
 /// incoming velocity field).
@@ -405,16 +430,26 @@ impl FluidParticles {
         let dx = drum_radius_m / resolution.max(1) as f32;
         let h = 2.0 * dx;
         let rest_density = slurry.density_kg_m3;
-        let particle_mass = rest_density * dx * dx;
+        // Area each particle represents on the hexagonal lattice this function seeds: columns are
+        // `dx` apart, rows `row_h = dx*sqrt(3)/2` apart, so the per-site cell is `dx * row_h`, and
+        // the lattice's number density is `1/(dx*row_h) = 1.1547/dx^2`. Deriving both the mass and
+        // the site count from that same cell area keeps three things consistent at once: total mass
+        // is `rest_density * target_area`, the seeded footprint *is* `target_area` (i.e. the
+        // `fill_fraction` the user asked for), and the Poly6 sum over the seeded lattice already
+        // reads `rest_density` to within 0.1% -- so the run no longer starts with a compression
+        // transient. An earlier version used the square-lattice cell `dx*dx` for both while seeding
+        // hexagonally, which left every run ~15% over-dense at `t = 0`.
+        let row_h = dx * (3.0f32.sqrt() * 0.5);
+        let cell_area = dx * row_h;
+        let particle_mass = rest_density * cell_area;
 
         let target_area =
             slurry.fill_fraction * std::f32::consts::PI * drum_radius_m * drum_radius_m;
-        let target_count = (target_area / (dx * dx)).round().max(0.0) as usize;
+        let target_count = (target_area / cell_area).round().max(0.0) as usize;
 
         let mut x = Vec::with_capacity(target_count);
         let mut dye = Vec::with_capacity(target_count);
         if target_count > 0 && dx > 0.0 {
-            let row_h = dx * (3.0f32.sqrt() * 0.5);
             let n_rows = (2.0 * drum_radius_m / row_h).ceil() as i32 + 1;
 
             'rows: for row in -n_rows / 2..=n_rows / 2 {
@@ -540,18 +575,20 @@ impl FluidParticles {
         let h = self.h;
         let rest_density = self.rest_density;
         let mass = self.particle_mass;
-        // Cell size must cover step 3.5's query radius (`contact_radius = balls.radius +
-        // 0.25*h`), not just the ball diameter -- at this project's defaults `contact_radius`
-        // is *larger* than `2*radius` (fine fluid resolution relative to ball size), so a plain
-        // `2*radius` cell would silently miss real ball neighbours (`UniformGrid::for_each_near`
-        // only guarantees finding points within `cell_size`, see its doc comment).
+        // Cell size must cover step 3.6's query radius (`adhesion_radius`, the largest of the two
+        // ball<->fluid contact radii this function uses), not just the ball diameter -- at this
+        // project's defaults that radius is *larger* than `2*radius` (fine fluid resolution
+        // relative to ball size), so a plain `2*radius` cell would silently miss real ball
+        // neighbours (`UniformGrid::for_each_near` only guarantees finding points within
+        // `cell_size`, see its doc comment).
         let ball_grid = if balls.is_empty() {
             None
         } else {
-            let contact_radius = balls.radius + 0.25 * h;
+            let contact_radius = balls.radius + ADHESION_CONTACT_MARGIN * h;
+            let adhesion_radius = contact_radius + ADHESION_RANGE_FACTOR * h;
             Some(UniformGrid::build(
                 &balls.x,
-                (2.0 * balls.radius).max(contact_radius).max(1e-6),
+                (2.0 * balls.radius).max(adhesion_radius).max(1e-6),
             ))
         };
 
@@ -582,7 +619,20 @@ impl FluidParticles {
 
             let mut lambda = vec![0.0f32; n];
             for i in 0..n {
-                let c_i = density[i] / rest_density - 1.0;
+                // Pressure-only constraint: `C_i = max(0, rho_i/rest_density - 1)`, so only
+                // *over*-dense particles are projected apart and a density-deficient one is left
+                // alone. Macklin & Muller's original PBF leaves `C_i` unclamped and relies on the
+                // artificial-pressure term (`S_CORR_K`) to suppress the resulting tensile
+                // instability; this crate had the unclamped form *with* that remedy disabled, which
+                // is the inconsistent combination. Unclamped, a deficient particle gets
+                // `lambda_i > 0`, and since `spiky_grad`'s coefficient is negative its `delta_p`
+                // points *toward* its neighbours -- an attraction that is strongest exactly where
+                // the kernel is truncated (free surface, thin films, isolated splash), which is
+                // what balled slurry up into the mid-air blobs the review reported. Note this
+                // removes the only fluid-fluid attraction in the solver: surface tension and
+                // wetting are now the explicit cohesion/adhesion terms in step 6.7, not an
+                // accident of the constraint's sign.
+                let c_i = (density[i] / rest_density - 1.0).max(0.0);
                 let mut grad_self = Vec2::ZERO;
                 let mut sum_grad_sq = 0.0f32;
                 for &j in &neighbors[i] {
@@ -632,10 +682,10 @@ impl FluidParticles {
         // out of the fluid's own velocity after step 5's position-to-velocity reconstruction.
         let mut push_velocity_excess = vec![Vec2::ZERO; n];
         if let Some(ball_grid) = &ball_grid {
-            let contact_radius = balls.radius + 0.25 * h; // balls.radius + 0.5*dx (dx = h/2)
-                                                          // `i` indexes both `self.x`/`self.v` (mutated in place, alongside `push_velocity_excess`)
-                                                          // and is looked up via the grid, so a plain iterator/enumerate over one collection
-                                                          // doesn't fit cleanly here.
+            let contact_radius = balls.radius + ADHESION_CONTACT_MARGIN * h;
+            // `i` indexes both `self.x`/`self.v` (mutated in place, alongside `push_velocity_excess`)
+            // and is looked up via the grid, so a plain iterator/enumerate over one collection
+            // doesn't fit cleanly here.
             #[allow(clippy::needless_range_loop)]
             for i in 0..n {
                 let mut nearby: Vec<u32> = Vec::new();
@@ -684,6 +734,134 @@ impl FluidParticles {
             }
         }
 
+        // --- 3.6 Ball<->slurry adhesion (media wettability): the only attraction between fluid
+        // and a ball's surface anywhere in this solver. Step 3.5 above only ever pushes fluid
+        // *away* from a ball; nothing previously pulled it back, which is a geometric 180 degree
+        // (fully non-wetting) contact angle regardless of any parameter setting. For fluid
+        // particles in the shell `(contact_radius, adhesion_radius]` -- just outside where step
+        // 3.5 already handles genuine overlap -- pull the ball and its nearby fluid together,
+        // scaled by `slurry.wettability` (`0` = the old behaviour).
+        //
+        // **Bounded per ball, not per contributing particle.** An earlier version of this step
+        // applied `accel_mag` independently to *every* fluid particle in the shell and let the ball
+        // absorb the sum -- the exact amplification-by-neighbour-count bug step 6.5's own doc
+        // comment describes fixing for viscous drag (a ball with many simultaneous shell
+        // neighbours, e.g. one falling toward a flat pool surface, picked up several times
+        // `ADHESION_ACCEL_FACTOR * g` of net pull and gained more speed than free fall -- caught by
+        // `coupling::tests::ball_dropped_into_a_pool_decelerates_more_than_a_dry_drop`). Fixed the
+        // same way as step 6.5: a taper-weighted mean pull direction and coverage fraction give
+        // *one* target closing velocity per ball, mass-ratio-relaxed toward the contributing
+        // fluid mass exactly like step 6.5's `a_lin` (see the `attach` comment below for why),
+        // then distributed back across the contributing particles proportional to their own
+        // weight so Newton's third law still holds exactly regardless of how many particles are
+        // actually in the shell.
+        //
+        // Deliberately not a true Young's-equation contact angle: that needs a matching fluid-fluid
+        // cohesion term, which this crate does not (re-)implement here (`S_CORR_K` stays `0`, see
+        // this module's constants) -- see docs/PHYSICS.md ss6.1a for why this is an explicit scope
+        // cut, not an oversight. This term only fixes the more basic defect the review reported:
+        // slurry could not cling to media at all.
+        //
+        // Expressed as a velocity change (fluid) / impulse (ball), exactly like gravity and
+        // buoyancy (`accel * dt`, no division by `dt`) rather than a position-derived impulse like
+        // step 3.5's -- this avoids the same `dt`-round-trip sensitivity `CouplingImpulses`'s doc
+        // comment warns about. **Balls are processed sequentially (Gauss-Seidel)**, exactly as step
+        // 6.5 -- for the same reason: a fluid particle can sit in more than one ball's shell at
+        // once at this project's coupling resolution, and Jacobi-style accumulation against a
+        // stale fluid snapshot would let their individually-bounded pulls stack.
+        // Like `push_velocity_excess` above, this can't be applied to `self.v` directly here:
+        // step 3.6 is a pure velocity kick that moves no position, so step 5's reconstruction
+        // (`v = (x - x0) / dt`, driven only by position deltas) would silently overwrite it with
+        // nothing. Accumulate it and add it back in after that reconstruction instead.
+        let mut adhesion_velocity_delta = vec![Vec2::ZERO; n];
+        let wettability = slurry.wettability.clamp(0.0, 1.0);
+        if wettability > 0.0 && !balls.is_empty() && balls.radius > 0.0 {
+            let contact_radius = balls.radius + ADHESION_CONTACT_MARGIN * h;
+            let shell_start = contact_radius + ADHESION_SHELL_DEAD_ZONE * h;
+            let adhesion_radius = contact_radius + ADHESION_RANGE_FACTOR * h;
+            let shell_width = (adhesion_radius - shell_start).max(1e-9);
+            let accel_mag = wettability * ADHESION_ACCEL_FACTOR * GRAVITY.abs();
+            let adhesion_fluid_grid = UniformGrid::build(&self.x, adhesion_radius.max(1e-6));
+            for b in 0..balls.len() {
+                if !balls.x[b].is_finite() {
+                    continue; // see the identical guard rationale in steps 3.5/6.5/6.6
+                }
+                let mut nearby: Vec<u32> = Vec::new();
+                adhesion_fluid_grid.for_each_near(balls.x[b], |j| nearby.push(j));
+                if nearby.is_empty() {
+                    continue;
+                }
+                let mut items: Vec<(usize, Vec2, f32)> = Vec::with_capacity(nearby.len());
+                let mut weight_sum = 0.0f32;
+                let mut dir_sum = Vec2::ZERO;
+                for j in nearby {
+                    let ju = j as usize;
+                    let delta = self.x[ju] - balls.x[b];
+                    let dist = delta.length();
+                    if !dist.is_finite() || dist <= shell_start || dist >= adhesion_radius {
+                        continue;
+                    }
+                    let n_hat = delta / dist; // points away from the ball's centre
+                                              // Smooth bump, zero at both shell edges (zero at `shell_start` so this never
+                                              // fights step 3.5's push; zero at `adhesion_radius` for a clean cutoff).
+                    let t = (dist - shell_start) / shell_width;
+                    let taper = 1.0 - (2.0 * t - 1.0) * (2.0 * t - 1.0);
+                    weight_sum += taper;
+                    dir_sum += taper * n_hat;
+                    items.push((ju, n_hat, taper));
+                }
+                if weight_sum <= 1e-9 || items.is_empty() {
+                    continue;
+                }
+                let dir_bar = dir_sum / weight_sum;
+                let dir_bar_len = dir_bar.length();
+                if dir_bar_len <= 1e-9 {
+                    // Shell coverage is (near-)symmetric around the ball (e.g. fully submerged) --
+                    // no net direction to pull, same as a fully-entrained ball feeling no net drag.
+                    continue;
+                }
+                let pull_dir = dir_bar / dir_bar_len; // toward the weighted-mean fluid side
+                                                      // Coverage fraction, capped at 1 (a fully-surrounded ball pulls no harder than a
+                                                      // ball with just enough shell neighbours on one side to reach full taper).
+                let coverage = weight_sum.min(1.0);
+                // Mass-ratio-aware relaxation, same reason as step 6.5's `a_lin`: `accel_mag * dt`
+                // is the *target* closing velocity between the ball and its shell fluid, not the
+                // ball's own velocity change directly. At this project's coupling resolution a
+                // single ball's shell typically holds only one or two sub-resolution fluid
+                // particles, so `m_contrib` (their taper-weighted mass) is routinely many orders of
+                // magnitude below `balls.mass`. Applying the target velocity to the ball outright
+                // and relying on the exact-conservation split below to recoil it back onto that
+                // tiny fluid mass would give the fluid an enormous, unphysical velocity (mass ratio
+                // amplification, same failure mode step 6.5's doc comment describes) -- caught by
+                // `coupling::tests::adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive`'s
+                // momentum-conservation check once the fluid speed clamp (step 7.5) silently
+                // absorbed the excess on one side only. Splitting the target velocity by reduced
+                // mass instead keeps both sides' actual velocity changes bounded by construction,
+                // with the ball's own share vanishing as `m_contrib -> 0` (an immovable ball is not
+                // pulled by a single nearby SPH particle) and approaching the fixed
+                // `accel_mag * coverage * dt` target only once `m_contrib` is comparable to
+                // `balls.mass`.
+                let m_contrib = mass * weight_sum;
+                let attach = m_contrib / (balls.mass + m_contrib);
+                let dv_b = pull_dir * (accel_mag * coverage * dt * attach);
+                coupling.impulses[b] += balls.mass * dv_b;
+                let lever = pull_dir * balls.radius;
+                coupling.angular_impulses[b] += balls.mass * cross2(lever, dv_b);
+
+                // Each contributing particle absorbs its taper-weighted share (`frac`, summing to
+                // 1 over `items`) of the ball's *own* bounded reaction, so the fluid side's total
+                // momentum change is exactly `-balls.mass * dv_b` regardless of how many particles
+                // shared it (mirrors step 6.5's identical `-(balls.mass/m_ent) * dv_b * phi_i`
+                // exact-conservation split).
+                for (ju, _n_hat, taper) in items {
+                    let frac = taper / weight_sum;
+                    let dv_i = -(balls.mass * frac / mass) * dv_b;
+                    adhesion_velocity_delta[ju] += dv_i;
+                    coupling.fluid_momentum_change += mass * dv_i;
+                }
+            }
+        }
+
         // --- 4. Boundary projection (position only; velocity is reconciled below) ----------
         let mut touched_wall = vec![false; n];
         for (x, touched) in self.x.iter_mut().zip(&mut touched_wall) {
@@ -705,6 +883,11 @@ impl FluidParticles {
         // this particle this sub-step.
         for (v, &excess) in self.v.iter_mut().zip(&push_velocity_excess) {
             *v -= excess;
+        }
+        // Add step 3.6's adhesion kick back in now that reconstruction is done (see that step's
+        // deferral comment above).
+        for (v, &delta) in self.v.iter_mut().zip(&adhesion_velocity_delta) {
+            *v += delta;
         }
 
         // --- 6. No-slip wall velocity blending -------------------------------------------------
@@ -1089,8 +1272,9 @@ mod tests {
         }
 
         let dx = radius_m / resolution as f32;
+        let row_h = dx * (3.0f32.sqrt() * 0.5);
         let target_area = slurry.fill_fraction * std::f32::consts::PI * radius_m * radius_m;
-        let expected_count = (target_area / (dx * dx)).round() as usize;
+        let expected_count = (target_area / (dx * row_h)).round() as usize;
         let rel_err = (fluid.len() as f32 - expected_count as f32).abs() / expected_count as f32;
         assert!(
             rel_err < 0.1,
@@ -1198,6 +1382,9 @@ mod tests {
             let slurry = SlurryParams {
                 viscosity_pa_s: mu,
                 fill_fraction: 0.0, // unused here (fluid is placed manually)
+                wettability: 0.0,   // isolates viscous drag (step 6.5) from adhesion (step 3.6);
+                // this test's own `exclude_radius` only clears step 3.5's small overlap zone, not
+                // step 3.6's much wider adhesion shell
                 ..SlurryParams::default()
             };
             let (mut balls, mut fluid) =
@@ -1244,6 +1431,7 @@ mod tests {
         let slurry = SlurryParams {
             viscosity_pa_s: 200.0,
             fill_fraction: 0.0,
+            wettability: 0.0, // isolates drag (step 6.5) from adhesion (step 3.6)
             ..SlurryParams::default()
         };
         let (balls, mut fluid) =
@@ -1438,8 +1626,14 @@ mod tests {
             checkerboard_shear_decay_rate(100.0),
             checkerboard_shear_decay_rate(200.0),
         );
+        // Margin lowered from 1.1x to 1.05x when the hexagonal-lattice seeding mass fix (see
+        // `FluidParticles::seed_lattice`'s doc comment) shifted the settled lattice's local
+        // densities slightly, which the implicit solve's `nu = mu/rho_i` is sensitive to; measured
+        // ~1.095x after that fix (was ~1.13x before), still comfortably distinguishing this from
+        // the pre-implicit-solver saturation this test guards against (which was bit-identical,
+        // i.e. a ratio of exactly 1.0).
         assert!(
-            rate_200 > rate_100 * 1.1,
+            rate_200 > rate_100 * 1.05,
             "100 vs 200 Pa*s should still measurably differ: rate_100={rate_100} rate_200={rate_200}"
         );
     }

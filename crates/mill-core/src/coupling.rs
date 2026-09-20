@@ -130,6 +130,9 @@ mod tests {
         let slurry = SlurryParams {
             fill_fraction: 0.35,
             viscosity_pa_s: 1.0,
+            wettability: 0.0, // isolates viscous drag (step 6.5) from adhesion (step 3.6); the
+            // ball crosses the pool surface within the measurement window, where adhesion would
+            // otherwise pull it downward and confound the drag comparison this test means to make
             ..SlurryParams::default()
         };
         let drum = still_drum(radius_m);
@@ -242,6 +245,7 @@ mod tests {
             fill_fraction: 0.0, // we inject the one fluid particle manually, below
             wall_no_slip: 0.0,
             viscosity_pa_s: 0.0, // isolates the overlap-projection reaction from ball-viscosity
+            wettability: 0.0,    // isolates it from step 3.6's adhesion too
             ..SlurryParams::default()
         };
         let dt = 1.0 / 240.0;
@@ -266,8 +270,9 @@ mod tests {
             scale_factor: 1.0,
         };
         let mut dem = DemState::new(&effective, radius_m, 1);
-        // Ball radius 0.1 m; contact_radius = radius + 0.25*h = 0.1 + 0.25*(2*0.005) = 0.1025 m.
-        // The fluid particle at dist=0.1 m is just inside that, for a small 0.0025 m overlap.
+        // Ball radius 0.1 m; contact_radius = radius + ADHESION_CONTACT_MARGIN*h
+        // = 0.1 + 0.05*(2*0.005) = 0.1005 m. The fluid particle at dist=0.1 m is just inside
+        // that, for a small 0.0005 m overlap.
         dem.balls.x[0] = Vec2::new(0.5, 0.0);
         dem.balls.v[0] = Vec2::ZERO;
         dem.balls.omega[0] = 0.0;
@@ -301,6 +306,93 @@ mod tests {
             ball_impulse.x.abs() <= max_expected_impulse * 1.01,
             "reaction exceeds what arresting the particle's actual approach speed justifies: \
              ball_impulse={ball_impulse:?}, max_expected={max_expected_impulse}"
+        );
+    }
+
+    #[test]
+    fn adhesion_pulls_a_ball_and_nearby_fluid_together_only_when_wettability_is_positive() {
+        // Regression for the media/slurry wettability defect: before step 3.6 existed, a fluid
+        // particle just outside a ball's overlap zone (step 3.5's `contact_radius`) never felt any
+        // pull back toward the ball -- a geometric 180 degree (fully non-wetting) contact angle
+        // baked into the discretisation regardless of any parameter. This places one particle at
+        // rest in that shell and checks both halves of the fix: `wettability = 0` reproduces the
+        // old behaviour (no pull, both bodies stay at rest), and `wettability = 1` measurably pulls
+        // the particle toward the ball and gives the ball the exact Newton's-third-law-opposite
+        // reaction (checked the same way as the overlap-push test above).
+        let radius_m = 1.0;
+        let drum = still_drum(radius_m);
+        let dt = 1.0 / 240.0;
+        let ball_radius_m = 0.1;
+
+        let effective = EffectiveMedia {
+            true_diameter_m: 2.0 * ball_radius_m,
+            diameter_m: 2.0 * ball_radius_m,
+            density_kg_m3: 7800.0,
+            ball_count: 1,
+            scale_factor: 1.0,
+        };
+
+        let run = |wettability: f32| -> (Vec2, Vec2, f32) {
+            let slurry = SlurryParams {
+                fill_fraction: 0.0, // we inject the one fluid particle manually, below
+                wall_no_slip: 0.0,
+                viscosity_pa_s: 0.0, // isolates adhesion from viscous drag
+                wettability,
+                ..SlurryParams::default()
+            };
+            // resolution = 200 -> dx = 0.005, h = 0.01; contact_radius = 0.1 + 0.05*0.01 = 0.1005,
+            // adhesion_radius = 0.1005 + 1.0*0.01 = 0.1105. Placing the particle at the shell's
+            // midpoint (dist = 0.1055) keeps it well clear of both the dead zone at `contact_radius`
+            // and the cutoff at `adhesion_radius`.
+            let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 200, &[], 0.0);
+            assert!(fluid.is_empty());
+            fluid.x.push(Vec2::new(0.1055, 0.0));
+            fluid.v.push(Vec2::ZERO);
+            fluid.dye.push(0.0);
+
+            let mut dem = DemState::new(&effective, radius_m, 1);
+            dem.balls.x[0] = Vec2::new(0.0, 0.0);
+            dem.balls.v[0] = Vec2::ZERO;
+            dem.balls.omega[0] = 0.0;
+
+            let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &dem.balls);
+            (fluid.v[0], impulses.impulses[0], fluid.particle_mass)
+        };
+
+        // Only the x-component is meaningful: `y` picks up gravity's `GRAVITY * dt` regardless of
+        // adhesion (the particle is placed offset from the ball along x only, same rationale as
+        // the overlap-push test above).
+        let (fluid_v_off, ball_impulse_off, _mass_off) = run(0.0);
+        assert_eq!(
+            fluid_v_off.x, 0.0,
+            "wettability = 0 must reproduce the old (no-adhesion) behaviour exactly"
+        );
+        assert_eq!(
+            ball_impulse_off,
+            Vec2::ZERO,
+            "wettability = 0 must exert no reaction on the ball"
+        );
+
+        let (fluid_v_on, ball_impulse_on, mass_on) = run(1.0);
+        assert!(
+            fluid_v_on.x < -1e-6,
+            "wettability = 1 should pull the fluid particle toward the ball (negative x): \
+             fluid_v={fluid_v_on:?}"
+        );
+        assert!(
+            ball_impulse_on.x > 1e-9,
+            "wettability = 1 should give the ball a reaction toward the fluid particle \
+             (positive x): ball_impulse={ball_impulse_on:?}"
+        );
+        // Newton's third law: with a single contributing particle, the ball's impulse and the
+        // fluid's own momentum change must cancel exactly (same check as the overlap-push test
+        // above), just via step 3.6 instead of step 3.5.
+        let fluid_momentum_gained = mass_on * fluid_v_on;
+        let sum_x = fluid_momentum_gained.x + ball_impulse_on.x;
+        assert!(
+            sum_x.abs() < 1e-6,
+            "momentum not conserved in isolated adhesion contact: fluid={fluid_momentum_gained:?} \
+             ball_impulse={ball_impulse_on:?} (x-components should cancel)"
         );
     }
 
