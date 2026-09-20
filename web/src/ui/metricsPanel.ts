@@ -94,10 +94,21 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
   }
 }
 
-// Warning-highlight thresholds (raw metric values, not formatted strings).
-const COUPLING_CLAMP_HITS_ID = "coupling_clamp_hits";
-const SUBSTEP_DISPLACEMENT_ID = "substep_displacement"; // confirmed against metrics/specs.ts
+// Warning-highlight thresholds (raw metric values, not formatted strings): a row is flagged
+// `is-warn` once its value exceeds the threshold below. All ids below use the same "value is
+// greater than threshold" test -- coupling_clamp_hits's "warn on any hit" semantics is just the
+// threshold-0 case of that same rule, not a different rule.
+const COUPLING_CLAMP_HITS_WARN_THRESHOLD = 0;
 const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
+const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
+const MAX_BALL_OVERLAP_WARN_THRESHOLD = 0.5;
+
+const WARN_THRESHOLDS = new Map<string, number>([
+  ["coupling_clamp_hits", COUPLING_CLAMP_HITS_WARN_THRESHOLD],
+  ["substep_displacement", SUBSTEP_DISPLACEMENT_WARN_THRESHOLD], // confirmed against metrics/specs.ts
+  ["max_compression_error", MAX_COMPRESSION_ERROR_WARN_THRESHOLD],
+  ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],
+]);
 
 export function createMetricsPanel(container: HTMLElement): MetricsPanel {
   const header = document.createElement("div");
@@ -224,11 +235,11 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
         if (span.textContent !== text) span.textContent = text;
       }
 
-      if (spec.id === COUPLING_CLAMP_HITS_ID || spec.id === SUBSTEP_DISPLACEMENT_ID) {
+      const warnThreshold = WARN_THRESHOLDS.get(spec.id);
+      if (warnThreshold !== undefined) {
         const row = rowEls.get(spec.id);
         if (row) {
-          const warn =
-            spec.id === COUPLING_CLAMP_HITS_ID ? value !== null && value > 0 : value !== null && value > SUBSTEP_DISPLACEMENT_WARN_THRESHOLD;
+          const warn = value !== null && value > warnThreshold;
           row.classList.toggle("is-warn", warn);
         }
       }

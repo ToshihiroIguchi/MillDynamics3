@@ -189,8 +189,12 @@ impl Simulation {
         self.collision_rate_per_s
     }
 
-    /// EMA-smoothed net kinetic-energy dissipation rate (W per metre of mill depth) from the DEM
-    /// contact solve, see [`dem::DemStepStats::dissipated_energy_j`].
+    /// EMA-smoothed net mechanical-energy dissipation rate (W per metre of mill depth) from the
+    /// DEM contact solve, see [`dem::DemStepStats::dissipated_energy_j`] -- net of the wall's own
+    /// work input, so this is non-negative in practice (the raw per-sub-step value is clamped to
+    /// `>= 0` before feeding the EMA, guarding only against float round-off in a near-zero
+    /// sub-step; the invariant the metric relies on already bounds it there). Excludes fluid-side
+    /// viscous dissipation.
     pub fn dissipated_power_w(&self) -> f32 {
         self.dissipated_power_w
     }
@@ -264,11 +268,14 @@ impl Simulation {
 
     /// The fixed sub-step size (s) this simulation's `simulation.substeps` implies at the
     /// project's nominal 60 Hz target frame rate: `1 / (60 * substeps)`. [`FIXED_DT`] is this
-    /// value at the default `substeps = 4`; this method gives the actual value for whatever
-    /// `substeps` this instance's params currently specify. A caller driving a fixed-sub-step
-    /// accumulator loop (docs/PLAN.md ss4.1: "run `step_fixed` until sim time catches up with
-    /// wall time, capped by a frame budget") should use this rather than hard-coding
-    /// [`FIXED_DT`], since it stays correct if `substeps` is changed from the default.
+    /// value only at `substeps = 4`; the current default is `substeps = 8`
+    /// (`params::SimulationParams::default`), so `FIXED_DT` (used only by `benches/step.rs` and
+    /// docs, never by the solver itself) is `1/240 s` while this method's actual default-params
+    /// value is `1/480 s`. This method gives the correct value for whatever `substeps` this
+    /// instance's params currently specify. A caller driving a fixed-sub-step accumulator loop
+    /// (docs/PLAN.md ss4.1: "run `step_fixed` until sim time catches up with wall time, capped by
+    /// a frame budget") should use this rather than hard-coding [`FIXED_DT`], since it stays
+    /// correct if `substeps` is changed from the default.
     pub fn fixed_sub_dt(&self) -> f32 {
         1.0 / (60.0 * self.params.simulation.substeps.max(1) as f32)
     }
@@ -359,7 +366,12 @@ impl Simulation {
         let collision_rate_instant = stats.collision_count as f32 / sub_dt;
         self.collision_rate_per_s += alpha * (collision_rate_instant - self.collision_rate_per_s);
 
-        let dissipated_power_instant = stats.dissipated_energy_j / sub_dt;
+        // Clamped to >= 0: `dissipated_energy_j` is provably non-negative up to floating-point
+        // summation-order slack (see its doc comment), so this guards only against that slack
+        // surfacing as a visible negative wattage, not against a real solver defect -- a
+        // materially negative raw value would still be caught by
+        // `dem::tests`/`tests::dissipated_energy_is_never_materially_negative_while_cascading`.
+        let dissipated_power_instant = stats.dissipated_energy_j.max(0.0) / sub_dt;
         self.dissipated_power_w += alpha * (dissipated_power_instant - self.dissipated_power_w);
 
         for (ema, &count) in self
@@ -611,21 +623,11 @@ mod tests {
         let dt = 1.0 / 240.0;
         let mut drum_angle = 0.0f32;
 
-        let mechanical_energy_j = |dem: &DemState| -> f32 {
-            let ke: f32 = dem
-                .balls
-                .v
-                .iter()
-                .map(|v| 0.5 * dem.balls.mass * v.length_squared())
-                .sum();
-            let pe: f32 = dem
-                .balls
-                .x
-                .iter()
-                .map(|p| dem.balls.mass * 9.81 * p.y)
-                .sum();
-            ke + pe
-        };
+        // Shares its definition with `DemStepStats::dissipated_energy_j`'s own accounting (see
+        // `dem::mechanical_energy_j`'s doc comment) -- translational + rotational KE + PE, not
+        // just translational KE, so a legitimate friction-driven spin<->translation transfer
+        // isn't misread as spurious energy creation.
+        let mechanical_energy_j = |dem: &DemState| -> f32 { dem::mechanical_energy_j(&dem.balls) };
 
         // Settling phase (not checked): the fresh lattice's initial fall/pile-up is not
         // representative of the invariant this test cares about.
@@ -735,6 +737,72 @@ mod tests {
             centrifuging_power < cascading_power,
             "centrifuging should draw less power than cascading: \
              cascading={cascading_power} centrifuging={centrifuging_power}"
+        );
+    }
+
+    #[test]
+    fn dissipated_power_approaches_power_draw_in_a_settled_dry_charge() {
+        // Regression for the same review finding as
+        // `dem::tests::dissipated_energy_is_never_materially_negative_while_cascading`, checked
+        // at the `Simulation`-level EMA'd metric instead of the raw per-sub-step value: once a
+        // dry (no slurry) cascading charge reaches a statistically steady state, its total
+        // mechanical energy is on average constant, so the wall's power input (`power_draw_w`,
+        // energy the motor supplies) and the contact solve's net dissipation
+        // (`dissipated_power_w`) must track each other -- this is exactly the check that would
+        // have caught the original defect (which instead separated the two by a
+        // `wall_work_j`-sized negative offset, see `dem::DemStepStats::dissipated_energy_j`'s
+        // doc comment).
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::PercentCritical,
+                speed_value: 70.0,
+                direction: Direction::CounterClockwise,
+            },
+            media: MediaParams {
+                ball_diameter_m: 0.02,
+                fill_fraction: 0.25,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+            slurry: params::SlurryParams {
+                enabled: false,
+                ..params::SlurryParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 150;
+        params.validate().unwrap();
+
+        let mut sim = Simulation::new(params).unwrap();
+        let dt = 1.0 / 60.0;
+        // Settle well past the EMA time constant (`GRINDING_STATS_EMA_TAU_S = 1.0` s) so both
+        // readings reflect steady state, not the initial-landing transient.
+        for _ in 0..(10 * 60) {
+            sim.step(dt);
+        }
+
+        let power_draw = sim.power_draw_w();
+        let dissipated = sim.dissipated_power_w();
+        assert!(
+            power_draw > 0.0,
+            "expected positive power draw for a settled cascading charge, got {power_draw}"
+        );
+        assert!(
+            dissipated > 0.0,
+            "expected positive dissipated power for a settled cascading charge, got {dissipated}"
+        );
+        let ratio = dissipated / power_draw;
+        assert!(
+            (0.5..=1.5).contains(&ratio),
+            "dissipated_power_w should track power_draw_w within a loose band once a dry \
+             charge is statistically steady (energy in ~= energy out): \
+             power_draw_w={power_draw}, dissipated_power_w={dissipated}, ratio={ratio}"
         );
     }
 

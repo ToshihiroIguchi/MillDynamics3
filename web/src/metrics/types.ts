@@ -30,8 +30,11 @@ export interface Metrics {
   // Debug/health checks.
   total_kinetic_energy_j: number;
   max_ball_overlap_fraction: number;
+  max_ball_wall_overlap_fraction: number;
   max_fluid_density_error_fraction: number | null;
   mean_fluid_density_error_fraction: number | null;
+  max_fluid_compression_error_fraction: number | null;
+  mean_fluid_compression_error_fraction: number | null;
 
   drum_omega_rad_s: number;
   fluid_particle_count: number;

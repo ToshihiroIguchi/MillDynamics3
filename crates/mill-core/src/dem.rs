@@ -37,9 +37,10 @@ const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
 /// gradually over several sub-steps rather than teleporting the pair fully apart in one shot --
 /// which step 4 would otherwise turn directly into an unphysically large separation velocity (see
 /// this module's doc comment and docs/PHYSICS.md for the fluidised-charge energy-injection bug
-/// this, together with step 6's bidirectional restitution, fixes). At `dem_iterations = 4` this
-/// still allows recovering up to `4 * 0.2 = 0.8` diameters of overlap per sub-step, so it does not
-/// meaningfully slow down recovery from the ordinary small overlaps a converged solve produces.
+/// this, together with step 6's bidirectional restitution, fixes). At the current default
+/// `dem_iterations = 2` this still allows recovering up to `2 * 0.2 = 0.4` diameters of overlap
+/// per sub-step, so it does not meaningfully slow down recovery from the ordinary small overlaps
+/// a converged solve produces.
 const MAX_RECOVERY_FRACTION: f32 = 0.2;
 
 /// Number of log-spaced bins in [`DemStepStats::impact_energy_histogram`].
@@ -99,11 +100,24 @@ pub struct DemStepStats {
     /// Count of impacts this sub-step per log-spaced energy bin (see [`impact_energy_bin_edges`]),
     /// `E = 0.5 * m_reduced * v_n_pre^2` (`m_reduced = mass/2` ball-ball, `mass` ball-wall).
     pub impact_energy_histogram: [u32; IMPACT_ENERGY_HISTOGRAM_BINS],
-    /// Kinetic energy (J) removed by this sub-step's contact solve as a whole: total ball KE
-    /// right after the predict step (gravity + external forces, before any contact correction)
-    /// minus final KE. A simple, robust net-dissipation estimate -- it does not attribute the
-    /// loss to any particular mechanism (friction, restitution `e < 1`, rolling resistance), but
-    /// requires no extra per-mechanism bookkeeping and cannot silently miss one.
+    /// Mechanical energy (J) removed by this sub-step's contact solve as a whole:
+    /// [`mechanical_energy_j`] (translational + rotational KE + gravitational PE) right after the
+    /// predict step (gravity + external forces, before any contact correction), plus this
+    /// sub-step's [`wall_work_j`](Self::wall_work_j), minus final mechanical energy. Adding back
+    /// `wall_work_j` is what keeps this metric from reading negative whenever the moving wall
+    /// pumps energy into the charge faster than friction/restitution remove it -- an earlier
+    /// version omitted it (and PE/rotational KE) and could read hundreds of watts negative on an
+    /// ordinary cascading run despite the solver itself never creating energy (see
+    /// `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`,
+    /// which proves `e_final <= e_after_predict + wall_work_j` every sub-step -- this field is
+    /// exactly that invariant's residual, so it is non-negative by the same argument, not by
+    /// clamping). A simple, robust net-dissipation estimate -- it does not attribute the loss to
+    /// any particular mechanism (friction, restitution `e < 1`, rolling resistance, or step 3's
+    /// bounded depenetration recovery), but requires no extra per-mechanism bookkeeping and
+    /// cannot silently miss one. **Does not include fluid-side viscous dissipation** -- with
+    /// slurry enabled, a caller should expect `dissipated_power_w < power_draw_w` in steady
+    /// state, since the fluid removes mechanical energy from the balls (drag, ss6.2) that never
+    /// shows up here.
     pub dissipated_energy_j: f32,
     /// Largest per-ball `|v| * dt / (2 * radius)` this sub-step: the fraction of a ball's own
     /// diameter it moved in one sub-step. A rough tunnelling-risk indicator -- values approaching
@@ -130,6 +144,28 @@ pub fn ball_mass(diameter_m: f32, density_kg_m3: f32) -> f32 {
 /// consistent with [`ball_mass`]).
 pub fn ball_inertia(mass: f32, radius_m: f32) -> f32 {
     0.5 * mass * radius_m * radius_m
+}
+
+/// Total mechanical energy (translational + rotational kinetic energy, plus gravitational
+/// potential energy) of a ball population, per metre of mill depth (consistent with this crate's
+/// unit-depth-disc mass convention, see [`ball_mass`]). Rotational KE must be included, not just
+/// translational: friction (step 5 of [`DemState::step_with_external_forces`]) exchanges momentum
+/// between a ball's linear and angular velocity (e.g. a spinning ball starting to roll gains
+/// linear speed at spin's expense), so omitting it would misread a legitimate
+/// translational<->rotational transfer as spurious energy creation or loss.
+///
+/// Used both by [`DemState::step_with_external_forces`]'s per-sub-step dissipation accounting
+/// ([`DemStepStats::dissipated_energy_j`]) and by this module's and `lib.rs`'s energy-invariant
+/// regression tests, so the metric and the test that proves it cannot go materially negative
+/// share one definition.
+pub(crate) fn mechanical_energy_j(balls: &Balls) -> f32 {
+    let mut e = 0.0f32;
+    for i in 0..balls.len() {
+        e += 0.5 * balls.mass * balls.v[i].length_squared();
+        e += 0.5 * balls.inertia * balls.omega[i] * balls.omega[i];
+        e += balls.mass * GRAVITY.abs() * balls.x[i].y;
+    }
+    e
 }
 
 /// Ball (grinding media) population. All balls currently share one effective radius/mass/inertia
@@ -372,11 +408,7 @@ impl DemState {
             balls.x[i] += balls.v[i] * dt;
             balls.theta[i] += balls.omega[i] * dt;
         }
-        let ke_after_predict: f32 = balls
-            .v
-            .iter()
-            .map(|v| 0.5 * balls.mass * v.length_squared())
-            .sum();
+        let e_after_predict = mechanical_energy_j(balls);
         let max_substep_displacement_over_diameter = balls
             .v
             .iter()
@@ -665,16 +697,12 @@ impl DemState {
             }
         }
 
-        let ke_final: f32 = balls
-            .v
-            .iter()
-            .map(|v| 0.5 * balls.mass * v.length_squared())
-            .sum();
+        let e_final = mechanical_energy_j(balls);
         DemStepStats {
             wall_work_j,
             collision_count,
             impact_energy_histogram,
-            dissipated_energy_j: ke_after_predict - ke_final,
+            dissipated_energy_j: e_after_predict + wall_work_j - e_final,
             max_substep_displacement_over_diameter,
         }
     }
@@ -1068,25 +1096,6 @@ mod tests {
         );
     }
 
-    /// Total mechanical energy (translational + rotational KE + gravitational PE) of a ball
-    /// population, in the same per-metre-of-mill-depth convention as [`ball_mass`]. Rotational KE
-    /// must be included, not just translational: friction (step 5) exchanges momentum between a
-    /// ball's linear and angular velocity (e.g. a spinning ball starting to roll gains linear
-    /// speed at spin's expense), so omitting it would misread a legitimate translational<->
-    /// rotational transfer as spurious energy creation.
-    fn mechanical_energy_j(balls: &Balls) -> f32 {
-        let ke: f32 = balls
-            .v
-            .iter()
-            .zip(&balls.omega)
-            .map(|(v, &omega)| {
-                0.5 * balls.mass * v.length_squared() + 0.5 * balls.inertia * omega * omega
-            })
-            .sum();
-        let pe: f32 = balls.x.iter().map(|p| balls.mass * 9.81 * p.y).sum();
-        ke + pe
-    }
-
     /// Largest pairwise ball-ball overlap, as a fraction of the ball radius (same formula as
     /// [`crate::metrics::max_ball_overlap_fraction`], reimplemented here to keep this module's
     /// tests independent of `crate::metrics`).
@@ -1353,5 +1362,88 @@ mod tests {
                  radius_m={radius_m}"
             );
         }
+    }
+
+    #[test]
+    fn dissipated_energy_is_never_materially_negative_while_cascading() {
+        // Direct regression test for the metrics-panel review finding that `dissipated_power_w`
+        // read hundreds of watts negative on an ordinary cascading run: before the fix,
+        // `dissipated_energy_j` was `ke_after_predict - ke_final` (translational KE only, no
+        // wall-work credit, no PE, no rotational KE), so whenever the moving wall pumped energy
+        // into the charge faster than friction/restitution removed it (an entirely ordinary
+        // situation, not a bug) the metric went negative and looked like a thermodynamics
+        // violation. The current definition (`e_after_predict + wall_work_j - e_final`) is the
+        // residual of the same invariant
+        // `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`
+        // proves holds, so it must stay non-negative up to floating-point slack -- checked here
+        // directly on `DemStepStats`, every sub-step, at the same operating point (30 rpm
+        // cascading, no lifters) the original review screenshot used.
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, Params, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 30.0,
+                direction: Direction::CounterClockwise,
+            },
+            media: MediaParams {
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 400;
+        params.validate().unwrap();
+
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let omega = params.mill.omega();
+        let mut state = DemState::new(&effective, radius_m, params.simulation.seed);
+        let dt = 1.0 / 240.0;
+        let mut drum_angle = 0.0f32;
+
+        // Settling phase (not checked): the fresh lattice's initial landing is an extreme
+        // transient, same rationale as the sibling energy-invariant tests above.
+        for _ in 0..(3 * 240) {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            state.step(
+                &drum,
+                drum_angle,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+        }
+
+        // A small slack for floating-point summation order, same form as
+        // `steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s tolerance --
+        // not a physical allowance.
+        let tolerance_j = 1e-3 * state.balls.mass * (omega * radius_m).powi(2).max(1.0);
+        let mut worst = f32::MAX;
+        for _ in 0..(5 * 240) {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            let stats = state.step(
+                &drum,
+                drum_angle,
+                &params.media,
+                params.simulation.dem_iterations,
+                dt,
+            );
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+            worst = worst.min(stats.dissipated_energy_j);
+            assert!(
+                stats.dissipated_energy_j >= -tolerance_j,
+                "dissipated_energy_j read materially negative while cascading (looks like \
+                 energy created from nothing): dissipated_energy_j={}, tolerance_j={tolerance_j}",
+                stats.dissipated_energy_j
+            );
+        }
+        assert!(worst.is_finite());
     }
 }

@@ -58,8 +58,19 @@ const S_CORR_N: i32 = 4;
 /// the discretisation, independent of any wetting parameter). See step 3.6 for the actual wetting
 /// model this margin now leaves room for.
 const ADHESION_CONTACT_MARGIN: f32 = 0.05;
-/// Step 3.6's adhesion shell width beyond `contact_radius`, as a multiple of `h`.
+/// Step 3.6's adhesion shell width beyond `contact_radius`, as a multiple of `h`, before the
+/// [`ADHESION_RANGE_BALL_RADII`] cap.
 const ADHESION_RANGE_FACTOR: f32 = 1.0;
+/// Upper bound on step 3.6's adhesion shell width beyond `contact_radius`, as a multiple of the
+/// ball's own radius -- `adhesion_radius = contact_radius + (ADHESION_RANGE_FACTOR *
+/// h).min(ADHESION_RANGE_BALL_RADII * balls.radius)`. At a coupling resolution fine relative to
+/// ball size (this project's default: `h` several times a coarse-grained ball's own radius), the
+/// plain `ADHESION_RANGE_FACTOR * h` term alone reached roughly 2.6 ball radii out from the
+/// surface -- wide enough that a distant fluid particle held there by adhesion read as a floating
+/// clump rather than a clinging wetting film (the mid-air ball+slurry clumps a review reported).
+/// Capping the shell at half the ball's own radius keeps the held fluid visually attached to the
+/// ball regardless of how fine the fluid resolution is relative to it.
+const ADHESION_RANGE_BALL_RADII: f32 = 0.5;
 /// Peak adhesion acceleration, as a multiple of `|GRAVITY|`, at `slurry.wettability = 1`. Chosen to
 /// be comparable to (not dominant over) gravity/buoyancy, so a fully-wetting slurry visibly clings
 /// to media without the term becoming the largest force in the coupling budget; bounded further by
@@ -110,6 +121,31 @@ fn spiky_grad(delta: Vec2, r: f32, h: f32) -> Vec2 {
     }
     let coeff = -30.0 / (std::f32::consts::PI * h.powi(5)) * (h - r) * (h - r);
     (delta / r) * coeff
+}
+
+/// Step 3.6's adhesion shell outer radius: `contact_radius` (step 3.5's overlap-push standoff)
+/// plus the smaller of a fixed `h`-multiple and a ball-radius-relative cap -- see
+/// [`ADHESION_RANGE_BALL_RADII`]'s doc comment for why the cap exists.
+fn adhesion_shell_radius(contact_radius: f32, ball_radius: f32, h: f32) -> f32 {
+    contact_radius + (ADHESION_RANGE_FACTOR * h).min(ADHESION_RANGE_BALL_RADII * ball_radius)
+}
+
+/// How "wet" (bulk-liquid-like, as opposed to an isolated splash droplet) a fluid particle reads
+/// from its own already-computed SPH density, in `[0, 1]`. `0` for a particle with no real
+/// neighbours (`density` is then just its own self-kernel contribution,
+/// `particle_mass * poly6(0, h)`, the reading an isolated airborne droplet gets) and `1` once
+/// `density` reaches `rest_density` (genuine bulk liquid). Used to gate step 3.6's adhesion so a
+/// ball does not cling to a lone airborne fluid particle as if it were touching a pool -- the
+/// mechanism a review found let a ball+slurry clump float indefinitely through the air, since
+/// nothing previously distinguished "one particle happens to be in the shell" from "the ball is
+/// actually against the fluid's bulk".
+fn adhesion_wetness(density: f32, rest_density: f32, particle_mass: f32, h: f32) -> f32 {
+    if rest_density <= 0.0 {
+        return 0.0;
+    }
+    let self_frac = particle_mass * poly6(0.0, h) / rest_density;
+    let denom = (1.0 - self_frac).max(1e-6);
+    ((density / rest_density - self_frac) / denom).clamp(0.0, 1.0)
 }
 
 /// 2D cross product (the z-component of the 3D cross product of `(a, 0)` and `(b, 0)`), used for
@@ -585,7 +621,7 @@ impl FluidParticles {
             None
         } else {
             let contact_radius = balls.radius + ADHESION_CONTACT_MARGIN * h;
-            let adhesion_radius = contact_radius + ADHESION_RANGE_FACTOR * h;
+            let adhesion_radius = adhesion_shell_radius(contact_radius, balls.radius, h);
             Some(UniformGrid::build(
                 &balls.x,
                 (2.0 * balls.radius).max(adhesion_radius).max(1e-6),
@@ -629,9 +665,12 @@ impl FluidParticles {
                 // points *toward* its neighbours -- an attraction that is strongest exactly where
                 // the kernel is truncated (free surface, thin films, isolated splash), which is
                 // what balled slurry up into the mid-air blobs the review reported. Note this
-                // removes the only fluid-fluid attraction in the solver: surface tension and
-                // wetting are now the explicit cohesion/adhesion terms in step 6.7, not an
-                // accident of the constraint's sign.
+                // removes the only fluid-fluid attraction the constraint's sign used to produce
+                // by accident: there is no fluid-fluid cohesion/surface-tension term anywhere in
+                // this solver (`S_CORR_K` stays `0`, see this module's constants). Wetting is a
+                // separate, ball<->fluid-only attraction (step 3.6, `slurry.wettability`) -- see
+                // that step's own doc comment for why a true fluid-fluid cohesion term is an
+                // explicit scope cut, not an oversight.
                 let c_i = (density[i] / rest_density - 1.0).max(0.0);
                 let mut grad_self = Vec2::ZERO;
                 let mut sum_grad_sq = 0.0f32;
@@ -762,6 +801,20 @@ impl FluidParticles {
         // cut, not an oversight. This term only fixes the more basic defect the review reported:
         // slurry could not cling to media at all.
         //
+        // **Gated by [`adhesion_wetness`], not just geometric shell membership.** A lone airborne
+        // fluid particle passing through a ball's shell used to pull exactly as hard as one
+        // sitting against the bulk of a settled pool -- there was no test for whether there was
+        // any actual liquid there, only whether a particle happened to be within
+        // `adhesion_radius`. Combined with a shell wider than the ball itself (fixed separately by
+        // [`ADHESION_RANGE_BALL_RADII`]), a ball with a couple of stray shell particles carried a
+        // floating clump indefinitely through the air, since the pull's ~1g-at-default-wettability
+        // scale roughly cancels gravity. `adhesion_wetness` reuses each particle's own SPH density
+        // (already computed by step 3, one iteration stale -- cheap, and adequate for a gate) to
+        // read 0 for an isolated particle and 1 for genuine bulk liquid, and is folded into each
+        // particle's taper weight below so every downstream quantity (`weight_sum`, `dir_sum`,
+        // `coverage`, `m_contrib`, `attach`, and the final `frac`-weighted reaction split) inherits
+        // it automatically -- an airborne ball with no real slurry nearby now pulls nothing.
+        //
         // Expressed as a velocity change (fluid) / impulse (ball), exactly like gravity and
         // buoyancy (`accel * dt`, no division by `dt`) rather than a position-derived impulse like
         // step 3.5's -- this avoids the same `dt`-round-trip sensitivity `CouplingImpulses`'s doc
@@ -778,7 +831,7 @@ impl FluidParticles {
         if wettability > 0.0 && !balls.is_empty() && balls.radius > 0.0 {
             let contact_radius = balls.radius + ADHESION_CONTACT_MARGIN * h;
             let shell_start = contact_radius + ADHESION_SHELL_DEAD_ZONE * h;
-            let adhesion_radius = contact_radius + ADHESION_RANGE_FACTOR * h;
+            let adhesion_radius = adhesion_shell_radius(contact_radius, balls.radius, h);
             let shell_width = (adhesion_radius - shell_start).max(1e-9);
             let accel_mag = wettability * ADHESION_ACCEL_FACTOR * GRAVITY.abs();
             let adhesion_fluid_grid = UniformGrid::build(&self.x, adhesion_radius.max(1e-6));
@@ -805,7 +858,14 @@ impl FluidParticles {
                                               // Smooth bump, zero at both shell edges (zero at `shell_start` so this never
                                               // fights step 3.5's push; zero at `adhesion_radius` for a clean cutoff).
                     let t = (dist - shell_start) / shell_width;
-                    let taper = 1.0 - (2.0 * t - 1.0) * (2.0 * t - 1.0);
+                    let mut taper = 1.0 - (2.0 * t - 1.0) * (2.0 * t - 1.0);
+                    // Gate by how "wet" this particle's own SPH density reads (see
+                    // `adhesion_wetness`'s doc comment) -- zero for an isolated airborne particle,
+                    // regardless of the purely geometric taper above.
+                    taper *= adhesion_wetness(density[ju], rest_density, mass, h);
+                    if taper <= 0.0 {
+                        continue;
+                    }
                     weight_sum += taper;
                     dir_sum += taper * n_hat;
                     items.push((ju, n_hat, taper));
