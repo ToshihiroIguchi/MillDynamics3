@@ -15,12 +15,8 @@ import {
   substepDisplacementOverDiameter,
   trueBallCount,
 } from "../params/derived";
+import { QUALITY_PRESETS } from "../params/presets";
 import { fromDisplayValue, GROUPS, getPath, SCHEMA, toDisplayValue, withPath } from "../params/schema";
-
-// pbf.rs's default fluid lattice resolution (crates/mill-core/src/params.rs
-// SimulationParams::default). Not exposed in SCHEMA (out of scope for this panel), so it's
-// hardcoded here purely as a static estimate input for the "Est. fluid particles" readout.
-const DEFAULT_FLUID_RESOLUTION = 40;
 
 const GROUPS_STORAGE_KEY = "milldynamics.paramsGroups";
 
@@ -82,7 +78,12 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
   const applyBtn = document.createElement("button");
   applyBtn.type = "submit";
-  applyBtn.textContent = "Apply (resets simulation)";
+  // Not "resets simulation" any more: main.ts's onApply callback hot-applies via "setParams"
+  // (Simulation::set_params) unless the changed field actually needs one
+  // (params/schema.ts's `paramsChangeRequiresReset`), in which case it resets -- this label can't
+  // know which in advance without duplicating that decision here, so it stays deliberately
+  // non-committal; see the browser console for which happened on a given Apply.
+  applyBtn.textContent = "Apply";
 
   const revertBtn = document.createElement("button");
   revertBtn.type = "button";
@@ -133,6 +134,58 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const summary = document.createElement("summary");
     summary.textContent = group;
     details.appendChild(summary);
+
+    if (group === "Simulation") {
+      const presetRow = document.createElement("label");
+      presetRow.className = "params-row";
+      const presetLabel = document.createElement("span");
+      presetLabel.textContent = "Quality preset";
+      presetRow.appendChild(presetLabel);
+
+      const presetSelect = document.createElement("select");
+      const placeholderOption = document.createElement("option");
+      placeholderOption.value = "";
+      placeholderOption.textContent = "(custom)";
+      presetSelect.appendChild(placeholderOption);
+      for (const preset of QUALITY_PRESETS) {
+        const opt = document.createElement("option");
+        opt.value = preset.id;
+        opt.textContent = preset.label;
+        presetSelect.appendChild(opt);
+      }
+      presetRow.appendChild(presetSelect);
+      details.appendChild(presetRow);
+
+      const presetNote = document.createElement("p");
+      presetNote.className = "params-note";
+      presetNote.hidden = true;
+      details.appendChild(presetNote);
+
+      // Sets simulation.max_balls/resolution's *displayed* (not-yet-applied) values, exactly as
+      // if the user had typed them in directly -- Apply still commits (and still resets, both
+      // fields are `resetRequired`, see schema.ts). Deliberately not auto-applied: the user should
+      // see and confirm the derived-values readout (fluid particle count, fluid spacing vs. ball
+      // diameter) below before committing to a reset.
+      presetSelect.addEventListener("change", () => {
+        const preset = QUALITY_PRESETS.find((p) => p.id === presetSelect.value);
+        if (!preset) {
+          presetNote.hidden = true;
+          return;
+        }
+        const maxBallsInput = inputs.get("simulation.max_balls");
+        const resolutionInput = inputs.get("simulation.resolution");
+        if (maxBallsInput) {
+          maxBallsInput.value = String(preset.maxBalls);
+          maxBallsInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        if (resolutionInput) {
+          resolutionInput.value = String(preset.resolution);
+          resolutionInput.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        presetNote.textContent = preset.note;
+        presetNote.hidden = false;
+      });
+    }
 
     for (const field of SCHEMA.filter((f) => f.group === group)) {
       const row = document.createElement("label");
@@ -210,6 +263,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const mediaDensityInput = inputs.get("media.density_kg_m3");
     const maxBallsInput = inputs.get("simulation.max_balls");
     const substepsInput = inputs.get("simulation.substeps");
+    const resolutionInput = inputs.get("simulation.resolution");
     const slurryFillInput = inputs.get("slurry.fill_fraction");
     if (
       !diameterInput ||
@@ -221,6 +275,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       !mediaDensityInput ||
       !maxBallsInput ||
       !substepsInput ||
+      !resolutionInput ||
       !slurryFillInput
     ) {
       derived.replaceChildren();
@@ -246,19 +301,22 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     };
     const maxBalls = Number(maxBallsInput.value);
     const substeps = Number(substepsInput.value);
+    const resolution = Number(resolutionInput.value);
     const slurryFill = Number(slurryFillInput.value);
 
     const nTrue = trueBallCount(diameterM, media);
     const eff = effectiveMedia(diameterM, media, maxBalls);
-    const fluidCount = fluidParticleCountEstimate(diameterM / 2, DEFAULT_FLUID_RESOLUTION, slurryFill);
+    const fluidCount = fluidParticleCountEstimate(diameterM / 2, resolution, slurryFill);
     const substepDisp = substepDisplacementOverDiameter(mill, substeps, eff.diameterM);
     // Mirrors pbf.rs's `dx = drum_radius_m / resolution`, same dx used internally by
     // fluidParticleCountEstimate above. A ratio > 1 means a single fluid particle is wider than a
     // ball -- the "unresolved ball<->fluid coupling" regime (docs/PHYSICS.md ss6) where the
     // coupling's per-particle taper weighting is a poor approximation (many fluid particles
     // overlapping one ball, or one fluid particle spanning several balls); this was part of the
-    // fluidised-charge bug's root cause.
-    const fluidDxM = diameterM / 2 / DEFAULT_FLUID_RESOLUTION;
+    // fluidised-charge bug's root cause, and (h = 2*dx, so this ratio is h/(2*ball_diameter), a
+    // fixed multiple of the h/r wetting-resolution ratio) directly explains why a thin wetting
+    // film looks like a few oversized blobs rather than a smooth coating once this exceeds ~0.5.
+    const fluidDxM = diameterM / 2 / resolution;
     const fluidSpacingVsBall = eff.diameterM > 0 ? fluidDxM / eff.diameterM : 0;
 
     const rows: [string, string, boolean?][] = [

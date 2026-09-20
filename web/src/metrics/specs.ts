@@ -13,6 +13,9 @@ export interface MetricContext {
   simTime: number;
   fps: number;
   achievedTimeScale: number;
+  /** See protocol.ts's `FrameMessage.subStepsPerSecondAchieved`/`subStepsPerSecondRequired`. */
+  subStepsPerSecondAchieved: number;
+  subStepsPerSecondRequired: number;
   /** Current rotation speed (rpm), or `null` before the first frame/params arrive. */
   rpm: number | null;
   percentCritical: number | null;
@@ -56,7 +59,9 @@ export const METRIC_SPECS: MetricSpec[] = [
   // --- Drum -------------------------------------------------------------------------------
   { id: "sim_time", group: "Drum", label: "Sim time", unit: "s", value: (ctx) => ctx.simTime, format: fixed(1), csv: true },
   { id: "fps", group: "Drum", label: "FPS", value: (ctx) => ctx.fps, format: fixed(0) },
-  { id: "achieved_speed", group: "Drum", label: "Achieved speed", unit: "x", value: (ctx) => ctx.achievedTimeScale, format: fixed(2) },
+  { id: "achieved_speed", group: "Drum", label: "Achieved speed", unit: "x", value: (ctx) => ctx.achievedTimeScale, format: fixed(2), csv: true },
+  { id: "substeps_achieved_per_s", group: "Drum", label: "Sub-steps/s (achieved)", value: (ctx) => ctx.subStepsPerSecondAchieved, format: fixed(0), csv: true },
+  { id: "substeps_required_per_s", group: "Drum", label: "Sub-steps/s (required for 1x)", value: (ctx) => ctx.subStepsPerSecondRequired, format: fixed(0), csv: true },
   { id: "rpm", group: "Drum", label: "Speed", unit: "rpm", value: (ctx) => ctx.rpm, format: fixed(1), csv: true },
   { id: "percent_critical", group: "Drum", label: "Speed", unit: "% Nc", value: (ctx) => ctx.percentCritical, format: fixed(0), csv: true },
   { id: "critical_speed_rpm", group: "Drum", label: "Critical speed", unit: "rpm", value: (ctx) => ctx.criticalSpeedRpm, format: fixed(1) },

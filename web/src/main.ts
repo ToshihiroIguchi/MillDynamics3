@@ -1,5 +1,6 @@
 import { CanvasRenderer, type LiftersRenderState } from "./render/canvas";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
+import { paramsChangeRequiresReset } from "./params/schema";
 import { createInitialState } from "./state";
 import { createHud } from "./ui/hud";
 import { createMetricsPanel } from "./ui/metricsPanel";
@@ -60,13 +61,18 @@ function applyFrame(msg: FrameMessage): void {
   state.drumAngle = msg.drumAngle;
   state.simTime = msg.simTime;
   state.achievedTimeScale = msg.achievedTimeScale;
+  state.subStepsPerSecondAchieved = msg.subStepsPerSecondAchieved;
+  state.subStepsPerSecondRequired = msg.subStepsPerSecondRequired;
   state.ballPositions = msg.ballPositions;
   state.ballOrientations = msg.ballOrientations;
   state.ballRadiusM = msg.ballRadiusM;
   state.fluidPositions = msg.fluidPositions;
   state.fluidDye = msg.fluidDye;
-  state.fluidSurface = msg.fluidSurface;
-  state.metrics = msg.metrics;
+  // `fluidSurface`/`metrics` are throttled well below render rate (worker.ts's
+  // `SLOW_UPDATE_INTERVAL_MS`) and arrive as `undefined` on frames that didn't recompute them --
+  // keep showing the last received value rather than clearing it.
+  if (msg.fluidSurface) state.fluidSurface = msg.fluidSurface;
+  if (msg.metrics) state.metrics = msg.metrics;
 }
 
 worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
@@ -93,14 +99,27 @@ function togglePlay(): boolean {
   return state.running;
 }
 
-// v1 simplification (see params/schema.ts): both "Apply" and "Reset" fully reconstruct the
-// simulation via an "init" message; there is no partial "hot" apply yet (M5).
+// Apply hot-applies via "setParams" (Simulation::set_params, keeps t/drum angle/ball & fluid
+// population) unless the change actually needs a reset (params/schema.ts's
+// `paramsChangeRequiresReset`, e.g. drum diameter or media geometry), in which case it falls back
+// to "init" like the Reset button always does. `state.params` is updated locally right away on the
+// hot path since the worker sends no reply to "setParams" to update it from (unlike "init"'s
+// "ready" message) -- the value being applied is already authoritative, constructed by the panel
+// from the form the user just submitted.
 const paramsPanelEl = document.querySelector<HTMLElement>("#params-panel");
 if (!paramsPanelEl) {
   throw new Error("Missing #params-panel element");
 }
 const paramsPanel = createParamsPanel(paramsPanelEl, (params) => {
-  send({ type: "init", params });
+  const resetCause = state.params ? paramsChangeRequiresReset(state.params, params) : "initial load";
+  if (resetCause) {
+    console.info(`[params] resetting simulation: "${resetCause}" changed`);
+    send({ type: "init", params });
+  } else {
+    console.info("[params] hot-applying (no reset)");
+    state.params = params;
+    send({ type: "setParams", params });
+  }
 });
 
 const PANEL_STORAGE_KEY = "milldynamics.panel";

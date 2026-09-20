@@ -127,11 +127,21 @@ impl Simulation {
 
     /// Replaces the parameters in place, without resetting `drum_angle`/`sim_time`/the ball
     /// population. Used for "hot" parameter updates that should not restart the simulation
-    /// (docs/PLAN.md ss4.1); the worker is responsible for deciding whether a given change instead
-    /// needs a full reset (i.e. constructing a new [`Simulation`]) instead of calling this. In
-    /// particular, changes to `mill.diameter_m`/`media`/`simulation.seed`/`simulation.max_balls`
-    /// take effect in derived quantities (e.g. `omega`) immediately but do **not** reseed or
-    /// resize the already-created ball population -- callers must reset for those.
+    /// (docs/PLAN.md ss4.1); the caller (the `web/` worker) is responsible for deciding whether a
+    /// given change instead needs a full reset (i.e. constructing a new [`Simulation`]) instead of
+    /// calling this. Fields that take effect only in derived quantities read fresh every sub-step
+    /// (e.g. `omega`, friction/restitution coefficients, `slurry.viscosity_pa_s`, lifter geometry)
+    /// hot-apply correctly; fields baked into state at construction time do not, and calling this
+    /// with a changed one of them silently has no visible effect until a real reset:
+    /// - `mill.diameter_m`, `media.*` (ball geometry), `simulation.seed`, `simulation.max_balls` --
+    ///   change derived quantities immediately but do **not** reseed or resize the already-created
+    ///   ball population.
+    /// - `simulation.resolution` -- baked into the fluid lattice's spacing/kernel radius/particle
+    ///   mass at `seed_lattice` time (`pbf.rs`); an existing fluid population's `h`/mass do not
+    ///   change.
+    /// - `slurry.enabled` -- only read once, at construction (`Simulation::new`), to decide
+    ///   whether to seed the fluid at all; toggling it here neither seeds nor clears the
+    ///   population.
     pub fn set_params(&mut self, params: Params) -> Result<(), String> {
         params.validate()?;
         self.params = params;

@@ -103,3 +103,48 @@ physics-fix snapshot, not a clean isolated regression check against Phase 3b's 1
 happens to come out lower, consistent with the ball-count and DEM-iteration drops outweighing the
 doubled sub-step count, but that's a coarser statement than "X% faster/slower for the same reason"
 the other three rows above support.
+
+## Browser (WASM) achieved-speed measurements and quality presets
+
+The table above is native `cargo bench`, not the actual in-browser experience; this section is. A
+second external review measured `Achieved speed` at **0.12x** in-browser at (then-)default
+parameters, with the HUD reading `speed: 0.12x` -- a real, reproducible reading, but the review's
+own framing ("the M6 performance pass has not been done") was incomplete: `web/src/worker.ts`
+recomputed `fluidSurface()` (marching squares over a 128x128 grid) and `metricsJson()` (a full
+toe/shoulder/pool/mixing-index pass) **unconditionally every rendered frame**, regardless of how
+fast the underlying simulation itself was actually advancing -- pure waste, fixable without any
+solver-level optimization at all. Throttling both to `SLOW_UPDATE_INTERVAL_MS = 1000/15` (~15 Hz,
+well below render rate, and below the metrics panel's own 100 ms DOM-paint throttle) alone raised
+the reading from 0.12x to **~0.35x** at the original default parameters (`max_balls = 600`,
+`resolution = 40`) -- measured in-browser, same machine, same params, only that one change.
+
+That alone does not reach 1.0x; the remaining gap is genuine `mill-core` solver cost (DEM + PBF +
+coupling), which the full M6 SIMD/wasm-opt/neighbour-list-reuse pass this project has still not
+done would address directly. Absent that, the only other lever is fewer particles -- lowering
+`simulation.max_balls`/`resolution` trades fidelity for speed along the same curve `docs/PERF.md`'s
+native benches already show (`dem_step` scales roughly linearly with ball count; the PBF/coupling
+side dominates `drum_only_step` and scales with fluid particle count, roughly `resolution^2`).
+Measured in-browser (WASM release build, default drum/media/slurry otherwise, `lifters.count = 0`,
+steady cascading after ~10 s of sim time), with the metrics/surface throttling fix already applied:
+
+| `max_balls` | `resolution` | Achieved speed | Fluid spacing / ball diameter (`dx / effective_diameter`) |
+|---|---|---|---|
+| 150 | 15 | ~1.0-1.1x | ~0.82 |
+| 200 | 18 | ~0.9-1.0x (borderline) | ~0.73 |
+| 300 | 25 | ~0.7-0.75x | ~0.70 |
+| 600 | 40 (mill-core's own `Default`) | ~0.3-0.4x | ~0.62 |
+
+The first, third, and fourth rows are exposed as the "Realtime" / "Balanced" / "Accuracy" quality
+presets (`web/src/params/presets.ts`, selectable in the parameters panel's Simulation group); a
+fresh app load with no explicit params starts at Realtime (`web/src/worker.ts`), not mill-core's
+own `SimulationParams::default()` (kept at the `600`/`40` "Accuracy" values since native
+tests/benches on this page compare against it directly). All three presets stay under the
+parameters panel's own "a fluid particle is wider than a ball" warning (`> 1.0`), but all three
+still under-resolve a *thin* wetting film specifically -- a stricter bar than that warning checks,
+and one none of these three tiers clears; see `docs/PARAMETERS.md`'s quality-preset table for the
+full disclosure of that trade-off.
+
+Achieved-speed readings above vary run-to-run by several points (observed range roughly ±0.1x at a
+fixed configuration on this machine) with ambient system load, the same caveat the native bench
+numbers above already carry -- read them as orders of magnitude and relative comparisons, not
+precise guarantees, and expect a slower end-user machine to read lower across the board.

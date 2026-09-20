@@ -6,11 +6,15 @@
 // (Bingham is unimplemented, M7), so surfacing those fields would imply behaviour that doesn't
 // exist yet.
 //
-// v1 (M1) simplification: every field is treated as requiring a full simulation reset on Apply
-// (no "hot" live-apply distinction yet -- see docs/PLAN.md ss4.1's hot/reset split, completed in
-// M5). This is safe by construction: mill-core's Simulation::set_params does not reseed the ball
-// population even for changes that would need it, so defaulting to "always reset" avoids a class
-// of silent-desync bugs while that distinction isn't implemented on the UI side yet.
+// **`resetRequired`**: whether a change to this field takes effect only through a full simulation
+// reset (`InitMessage`, reconstructing `Simulation`) or can be applied live
+// (`SetParamsMessage`/`Simulation::set_params`, which does not reseed/resize the ball or fluid
+// population or the fluid lattice's baked-in spacing -- see that method's own doc comment in
+// lib.rs for the exact, authoritative list this mirrors). Getting this wrong in the "should be
+// `true`" direction produces a silent no-op (the UI shows the new value, nothing actually
+// changes); getting it wrong in the "should be `false`" direction forces an unnecessary reset.
+// `paramsChangeRequiresReset` below is what main.ts actually calls -- these annotations are its
+// data, not consulted directly.
 
 import type { ParamsJson } from "../protocol";
 
@@ -38,6 +42,8 @@ export interface FieldSchema {
    * already expressed in display units. Omitted (or 1) means no conversion.
    */
   displayScale?: number;
+  /** See this module's doc comment. */
+  resetRequired: boolean;
 }
 
 /** Converts a raw (SI) field value to the value shown in the UI input. */
@@ -57,7 +63,7 @@ export const GROUPS: FieldSchema["group"][] = ["Mill", "Media", "Lifters", "Slur
 
 export const SCHEMA: FieldSchema[] = [
   // Mill
-  { path: "mill.diameter_m", group: "Mill", label: "Drum diameter", unit: "m", type: "number", min: 0.1, max: 5, step: 0.05 },
+  { path: "mill.diameter_m", group: "Mill", label: "Drum diameter", unit: "m", type: "number", min: 0.1, max: 5, step: 0.05, resetRequired: true },
   {
     path: "mill.speed_mode",
     group: "Mill",
@@ -67,8 +73,9 @@ export const SCHEMA: FieldSchema[] = [
       { value: "percent_critical", label: "% of critical speed" },
       { value: "rpm", label: "rpm" },
     ],
+    resetRequired: false,
   },
-  { path: "mill.speed_value", group: "Mill", label: "Speed", type: "number", min: 0, max: 300, step: 1 },
+  { path: "mill.speed_value", group: "Mill", label: "Speed", type: "number", min: 0, max: 300, step: 1, resetRequired: false },
   {
     path: "mill.direction",
     group: "Mill",
@@ -78,32 +85,45 @@ export const SCHEMA: FieldSchema[] = [
       { value: "counter_clockwise", label: "Counter-clockwise" },
       { value: "clockwise", label: "Clockwise" },
     ],
+    resetRequired: false,
   },
-  // Media
-  { path: "media.ball_diameter_m", group: "Media", label: "Ball diameter", unit: "mm", type: "number", min: 0.5, max: 200, step: 0.1, displayScale: 1000 },
-  { path: "media.fill_fraction", group: "Media", label: "Fill fraction (J)", type: "number", min: 0, max: 0.9, step: 0.01 },
-  { path: "media.packing_fraction_2d", group: "Media", label: "2D packing fraction", type: "number", min: 0.5, max: 0.907, step: 0.001 },
-  { path: "media.density_kg_m3", group: "Media", label: "Media density", unit: "kg/m3", type: "number", min: 100, max: 20000, step: 100 },
-  { path: "media.restitution_ball_ball", group: "Media", label: "Restitution (ball-ball)", type: "number", min: 0, max: 1, step: 0.01 },
-  { path: "media.restitution_ball_wall", group: "Media", label: "Restitution (ball-wall)", type: "number", min: 0, max: 1, step: 0.01 },
-  { path: "media.friction_ball_ball", group: "Media", label: "Friction (ball-ball)", type: "number", min: 0, max: 2, step: 0.01 },
-  { path: "media.friction_ball_wall", group: "Media", label: "Friction (ball-wall)", type: "number", min: 0, max: 2, step: 0.01 },
-  { path: "media.rolling_friction", group: "Media", label: "Rolling friction", type: "number", min: 0, max: 1, step: 0.001 },
-  // Lifters (count = 0 is the default: a perfectly smooth wall, see docs/PLAN.md ss3.1)
-  { path: "lifters.count", group: "Lifters", label: "Lifter count", type: "number", min: 0, max: 64, step: 1 },
-  { path: "lifters.height_m", group: "Lifters", label: "Height", unit: "m", type: "number", min: 0, max: 0.2, step: 0.005 },
-  { path: "lifters.base_width_m", group: "Lifters", label: "Base width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005 },
-  { path: "lifters.top_width_m", group: "Lifters", label: "Top width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005 },
-  { path: "lifters.phase_deg", group: "Lifters", label: "Phase offset", unit: "deg", type: "number", min: -180, max: 180, step: 1 },
-  // Slurry
-  { path: "slurry.enabled", group: "Slurry", label: "Enabled", type: "boolean" },
-  { path: "slurry.fill_fraction", group: "Slurry", label: "Fill fraction", type: "number", min: 0, max: 0.9, step: 0.01 },
-  { path: "slurry.density_kg_m3", group: "Slurry", label: "Slurry density", unit: "kg/m3", type: "number", min: 100, max: 5000, step: 50 },
+  // Media: geometry/mass fields (baked into the ball population at seed time, params.rs's
+  // `Params::effective_media`) need a reset; the physics coefficients below them are read fresh
+  // every sub-step (`dem.rs`'s `step_with_external_forces`) and hot-apply correctly.
+  { path: "media.ball_diameter_m", group: "Media", label: "Ball diameter", unit: "mm", type: "number", min: 0.5, max: 200, step: 0.1, displayScale: 1000, resetRequired: true },
+  { path: "media.fill_fraction", group: "Media", label: "Fill fraction (J)", type: "number", min: 0, max: 0.9, step: 0.01, resetRequired: true },
+  { path: "media.packing_fraction_2d", group: "Media", label: "2D packing fraction", type: "number", min: 0.5, max: 0.907, step: 0.001, resetRequired: true },
+  { path: "media.density_kg_m3", group: "Media", label: "Media density", unit: "kg/m3", type: "number", min: 100, max: 20000, step: 100, resetRequired: true },
+  { path: "media.restitution_ball_ball", group: "Media", label: "Restitution (ball-ball)", type: "number", min: 0, max: 1, step: 0.01, resetRequired: false },
+  { path: "media.restitution_ball_wall", group: "Media", label: "Restitution (ball-wall)", type: "number", min: 0, max: 1, step: 0.01, resetRequired: false },
+  { path: "media.friction_ball_ball", group: "Media", label: "Friction (ball-ball)", type: "number", min: 0, max: 2, step: 0.01, resetRequired: false },
+  { path: "media.friction_ball_wall", group: "Media", label: "Friction (ball-wall)", type: "number", min: 0, max: 2, step: 0.01, resetRequired: false },
+  { path: "media.rolling_friction", group: "Media", label: "Rolling friction", type: "number", min: 0, max: 1, step: 0.001, resetRequired: false },
+  // Lifters (count = 0 is the default: a perfectly smooth wall, see docs/PLAN.md ss3.1). The drum
+  // geometry these describe is re-derived from `params.lifters` every sub-step (lib.rs), not baked
+  // into any seeded state, so every field here hot-applies -- including `count` itself, letting a
+  // user watch the charge's transient response to lifters appearing/disappearing mid-run.
+  { path: "lifters.count", group: "Lifters", label: "Lifter count", type: "number", min: 0, max: 64, step: 1, resetRequired: false },
+  { path: "lifters.height_m", group: "Lifters", label: "Height", unit: "m", type: "number", min: 0, max: 0.2, step: 0.005, resetRequired: false },
+  { path: "lifters.base_width_m", group: "Lifters", label: "Base width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005, resetRequired: false },
+  { path: "lifters.top_width_m", group: "Lifters", label: "Top width", unit: "m", type: "number", min: 0, max: 0.3, step: 0.005, resetRequired: false },
+  { path: "lifters.phase_deg", group: "Lifters", label: "Phase offset", unit: "deg", type: "number", min: -180, max: 180, step: 1, resetRequired: false },
+  // Slurry: `enabled`/`fill_fraction`/`density_kg_m3` are only read once, at `seed_lattice` time
+  // (pbf.rs) -- toggling/changing them live neither seeds, clears, nor re-derives the existing
+  // fluid population's mass/rest density (`FluidParticles::rest_density`/`particle_mass` are baked
+  // in then, not re-read from `SlurryParams` on every step the way viscosity/no-slip/wettability
+  // are). `dye_pattern` is likewise baked per-particle at seed time (no live re-tagging exists).
+  { path: "slurry.enabled", group: "Slurry", label: "Enabled", type: "boolean", resetRequired: true },
+  { path: "slurry.fill_fraction", group: "Slurry", label: "Fill fraction", type: "number", min: 0, max: 0.9, step: 0.01, resetRequired: true },
+  { path: "slurry.density_kg_m3", group: "Slurry", label: "Slurry density", unit: "kg/m3", type: "number", min: 100, max: 5000, step: 50, resetRequired: true },
   // `step` is a UI granularity hint only (spinner increment); it is never enforced as a validity
   // constraint (the form uses novalidate and its own JS range check -- see ui/paramsPanel.ts).
-  { path: "slurry.viscosity_pa_s", group: "Slurry", label: "Viscosity", unit: "Pa·s", type: "number", min: 0, max: 200, step: 0.1 },
-  { path: "slurry.wall_no_slip", group: "Slurry", label: "Wall no-slip (β)", type: "number", min: 0, max: 1, step: 0.05 },
-  { path: "slurry.wettability", group: "Slurry", label: "Wettability", type: "number", min: 0, max: 1, step: 0.05 },
+  { path: "slurry.viscosity_pa_s", group: "Slurry", label: "Viscosity", unit: "Pa·s", type: "number", min: 0, max: 200, step: 0.1, resetRequired: false },
+  { path: "slurry.wall_no_slip", group: "Slurry", label: "Wall no-slip (β)", type: "number", min: 0, max: 1, step: 0.05, resetRequired: false },
+  { path: "slurry.wettability", group: "Slurry", label: "Wettability", type: "number", min: 0, max: 1, step: 0.05, resetRequired: false },
+  // Real water is 0.072 N/m; see this field's params.rs doc comment for why the mapping into the
+  // solver's internal cohesion strength is a calibrated proportionality, not a unit conversion.
+  { path: "slurry.surface_tension_n_m", group: "Slurry", label: "Surface tension", unit: "N/m", type: "number", min: 0, max: 0.2, step: 0.005, resetRequired: false },
   {
     path: "slurry.dye_pattern",
     group: "Slurry",
@@ -114,14 +134,39 @@ export const SCHEMA: FieldSchema[] = [
       { value: "top_bottom", label: "Top / bottom" },
       { value: "none", label: "None" },
     ],
+    resetRequired: true,
   },
-  // Simulation
-  { path: "simulation.substeps", group: "Simulation", label: "Sub-steps / frame", type: "number", min: 1, max: 16, step: 1 },
-  { path: "simulation.dem_iterations", group: "Simulation", label: "Ball solver iterations", type: "number", min: 1, max: 20, step: 1 },
-  { path: "simulation.max_balls", group: "Simulation", label: "Max balls (coarse-graining target)", type: "number", min: 10, max: 50000, step: 10 },
-  { path: "simulation.time_scale", group: "Simulation", label: "Time scale", type: "number", min: 0.1, max: 5, step: 0.1 },
-  { path: "simulation.seed", group: "Simulation", label: "Random seed", type: "number", min: 0, max: 1_000_000_000, step: 1 },
+  // Simulation: `substeps`/`dem_iterations`/`time_scale` (and `pbf_iterations`, not yet exposed
+  // here) are read fresh every sub-step/call; `max_balls`, `seed`, and `resolution` are baked into
+  // the ball/fluid population at seed time (same reason as `media.*`/`slurry.*` geometry above --
+  // `resolution` sets the fluid lattice's spacing/kernel radius/particle mass in `seed_lattice`).
+  { path: "simulation.substeps", group: "Simulation", label: "Sub-steps / frame", type: "number", min: 1, max: 16, step: 1, resetRequired: false },
+  { path: "simulation.dem_iterations", group: "Simulation", label: "Ball solver iterations", type: "number", min: 1, max: 20, step: 1, resetRequired: false },
+  { path: "simulation.max_balls", group: "Simulation", label: "Max balls (coarse-graining target)", type: "number", min: 10, max: 50000, step: 10, resetRequired: true },
+  { path: "simulation.resolution", group: "Simulation", label: "Slurry resolution (particles/radius)", type: "number", min: 4, max: 200, step: 1, resetRequired: true },
+  { path: "simulation.time_scale", group: "Simulation", label: "Time scale", type: "number", min: 0.1, max: 5, step: 0.1, resetRequired: false },
+  { path: "simulation.seed", group: "Simulation", label: "Random seed", type: "number", min: 0, max: 1_000_000_000, step: 1, resetRequired: true },
 ];
+
+/**
+ * Whether applying `newParams` over `oldParams` needs a full simulation reset (`InitMessage`)
+ * rather than a hot apply (`SetParamsMessage`) -- true if any field marked `resetRequired: true`
+ * in `SCHEMA` actually changed value. Returns the *label* of the first such field found (for a
+ * status message naming the cause), or `null` if every changed field can be hot-applied.
+ *
+ * Deliberately walks `SCHEMA`, not a generic deep-diff of the two param trees: fields not exposed
+ * in the UI (e.g. `simulation.resolution`, `slurry.rheology`) cannot have changed via this panel,
+ * and a generic diff would have no `resetRequired` annotation for them to consult anyway.
+ */
+export function paramsChangeRequiresReset(oldParams: ParamsJson, newParams: ParamsJson): string | null {
+  for (const field of SCHEMA) {
+    if (!field.resetRequired) continue;
+    const before = getPath(oldParams, field.path);
+    const after = getPath(newParams, field.path);
+    if (before !== after) return field.label;
+  }
+  return null;
+}
 
 /** Reads a dot-path (e.g. "mill.diameter_m") out of a nested params object. */
 export function getPath(params: ParamsJson, path: string): unknown {

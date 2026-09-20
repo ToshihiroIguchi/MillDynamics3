@@ -63,7 +63,10 @@ test("applying an off-step value round-trips through the WASM core", async ({ pa
   const densityInput = await openField(page, "Media density (kg/m3)");
   await densityInput.fill("7850");
 
-  await page.getByRole("button", { name: "Apply (resets simulation)" }).click();
+  // media.density_kg_m3 is `resetRequired` (schema.ts) -- baked into the ball population's mass
+  // at seed time -- so this Apply still goes through a real WASM reinit, same as before Apply
+  // started hot-applying fields that don't need one.
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
 
   // Apply triggers a real WASM reinit (resets the simulation), which can take a few seconds --
   // poll rather than using a fixed short timeout.
@@ -86,7 +89,7 @@ test("an out-of-range value shows a visible error without freezing the simulatio
   const diameterInput = await openField(page, "Drum diameter (m)");
   await diameterInput.fill("0");
 
-  await page.getByRole("button", { name: "Apply (resets simulation)" }).click();
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
 
   const errorBanner = page.locator(".params-error");
   await expect(errorBanner).toBeVisible();

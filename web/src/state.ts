@@ -8,6 +8,9 @@ export interface AppState {
   drumAngle: number;
   simTime: number;
   achievedTimeScale: number;
+  /** See protocol.ts's `FrameMessage.subStepsPerSecondAchieved`/`subStepsPerSecondRequired`. */
+  subStepsPerSecondAchieved: number;
+  subStepsPerSecondRequired: number;
   ballPositions: Float32Array;
   ballOrientations: Float32Array;
   ballRadiusM: number;
@@ -26,6 +29,8 @@ export function createInitialState(): AppState {
     drumAngle: 0,
     simTime: 0,
     achievedTimeScale: 1,
+    subStepsPerSecondAchieved: 0,
+    subStepsPerSecondRequired: 0,
     ballPositions: new Float32Array(0),
     ballOrientations: new Float32Array(0),
     ballRadiusM: 0,
