@@ -43,6 +43,19 @@ const GRAVITY: f32 = -9.81;
 /// with few/no neighbours (docs/PLAN.md ss3.3: "epsilon = 1e2..1e3 relaxation").
 const EPSILON_RELAX: f32 = 200.0;
 
+/// Step 3's density-constraint solve treats `simulation.pbf_iterations` as a floor, not a fixed
+/// count: once that many passes have run, it keeps going -- up to this many further passes -- only
+/// while the worst-particle compression error (`c_i`, see step 3's loop) still exceeds
+/// [`COMPRESSION_CONVERGENCE_TOLERANCE`]. A violent lifter/cataracting impact can inject enough
+/// velocity in one sub-step that the fixed default (3) under-converges, producing the compression-
+/// error spikes documented in docs/PHYSICS.md; escalating only when actually needed keeps the
+/// common (already-converged) case at its prior cost.
+const ADAPTIVE_MAX_EXTRA_ITERATIONS: u32 = 6;
+/// Compression-error convergence target for step 3's escalation, matching the bound this project's
+/// own quiescent-state regression test already asserts (`metrics.rs`,
+/// `settled_puddle_compression_error_is_small`).
+const COMPRESSION_CONVERGENCE_TOLERANCE: f32 = 0.02;
+
 /// Step 3.5's overlap-push standoff, as a multiple of `h` beyond the ball's own radius
 /// (`contact_radius = balls.radius + OVERLAP_PUSH_MARGIN * h`). A small numerical margin only
 /// (previously `0.25`, which at this project's defaults forced roughly half a particle spacing of
@@ -673,8 +686,11 @@ impl FluidParticles {
         let neighbors = build_neighbor_lists(&self.x, &grid, h);
 
         // --- 3. Density-constraint solve (Jacobi-style: compute all deltas, then apply) -----
+        // `iterations` is a floor here, not a fixed count -- see [`ADAPTIVE_MAX_EXTRA_ITERATIONS`].
         let mut density = vec![0.0f32; n];
-        for _ in 0..iterations.max(1) {
+        let base_iterations = iterations.max(1);
+        let mut iter_count = 0u32;
+        loop {
             for i in 0..n {
                 let mut rho = mass * poly6(0.0, h);
                 for &j in &neighbors[i] {
@@ -685,6 +701,7 @@ impl FluidParticles {
             }
 
             let mut lambda = vec![0.0f32; n];
+            let mut max_c = 0.0f32;
             for i in 0..n {
                 // Pressure-only constraint: `C_i = max(0, rho_i/rest_density - 1)`, so only
                 // *over*-dense particles are projected apart and a density-deficient one is left
@@ -702,6 +719,7 @@ impl FluidParticles {
                 // step 3.6's cohesion term (`slurry.surface_tension_n_m`) is the real one, and is
                 // explicit, bounded, and tunable independently of the incompressibility solve.
                 let c_i = (density[i] / rest_density - 1.0).max(0.0);
+                max_c = max_c.max(c_i);
                 let mut grad_self = Vec2::ZERO;
                 let mut sum_grad_sq = 0.0f32;
                 for &j in &neighbors[i] {
@@ -729,6 +747,14 @@ impl FluidParticles {
             }
             for (x, dp) in self.x.iter_mut().zip(&delta_p) {
                 *x += *dp;
+            }
+
+            iter_count += 1;
+            let converged = max_c <= COMPRESSION_CONVERGENCE_TOLERANCE;
+            if (iter_count >= base_iterations && converged)
+                || iter_count >= base_iterations + ADAPTIVE_MAX_EXTRA_ITERATIONS
+            {
+                break;
             }
         }
 
