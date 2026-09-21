@@ -349,12 +349,20 @@ solve. `s_corr` artificial pressure is implemented but disabled.
      tunable cohesion term (ss6.1a step 3.6a, `slurry.surface_tension_n_m`), not an artefact of
      this constraint.
 4. **Ball overlap projection** (coupling step 1 — see ss6.1).
-5. **Boundary projection** (position only): for any particle with `drum.sdf_world(x) = d < 0`,
-   `x += -d * normal`; marks the particle `touched_wall` for the no-slip blend below.
+5. **Boundary projection** (position only): for any particle with
+   `drum.sdf_world(x, drum_angle_next) = d < 0`, `x += -d * normal`; marks the particle
+   `touched_wall` for the no-slip blend below. Uses `drum_angle_next = drum_angle + drum.omega *
+   dt` (the drum's angle at the **end** of this sub-step), not `drum_angle`, since particles have
+   already been predicted to `t + dt` in step 1 — the same one-sub-step lag fix as `dem.rs`'s
+   `DemState::step_with_external_forces` (ss4.2).
 6. **Velocity reconstruction**: `v = (x - x0) / dt` for every particle (`x0` = pre-predict
    position).
 7. **No-slip wall blending**: for particles marked `touched_wall`, `v = (1-beta)*v + beta*v_wall`
-   (`v_wall = drum.wall_velocity(x)`), `beta = slurry.wall_no_slip` clamped to `[0,1]`.
+   (`v_wall = drum.wall_velocity(x)`), `beta = slurry.wall_no_slip` clamped to `[0,1]`. The implied
+   impulse this delivers to each such particle (`mass * (v_new - v_old)`), dotted with the wall's
+   own velocity there, is summed into `FluidStepStats::wall_work_j` — the fluid-side counterpart of
+   `dem::DemStepStats::wall_work_j`, folded into `Simulation::power_draw_w`/`torque_nm` (ss8) so a
+   wet mill's motor load reflects viscous drag on the slurry, not only ball-wall friction.
 8. **Ball viscous drag** (coupling step 2 — see ss6.2).
 9. **Buoyancy** (coupling step 3 — see ss6.3).
 10. **Implicit Newtonian viscosity** (`mu = slurry.viscosity_pa_s`; skipped entirely, at zero
