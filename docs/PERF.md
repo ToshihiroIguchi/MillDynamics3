@@ -148,3 +148,68 @@ Achieved-speed readings above vary run-to-run by several points (observed range 
 fixed configuration on this machine) with ambient system load, the same caveat the native bench
 numbers above already carry -- read them as orders of magnitude and relative comparisons, not
 precise guarantees, and expect a slower end-user machine to read lower across the board.
+
+## 2026-09-21: re-measured after raising the default slurry fill fraction
+
+`bd19299` ("Raise default slurry fill and make PBF density solve adaptive") raised
+`SlurryParams::fill_fraction`'s default from 0.15 to 0.35 and made `pbf_iterations` a floor that
+the density solve escalates past (up to `pbf::ADAPTIVE_MAX_EXTRA_ITERATIONS` extra passes) when
+still unconverged after a violent sub-step. Neither the quality presets
+(`web/src/params/presets.ts`) nor `SimulationParams::default()` override `slurry.fill_fraction` --
+all three tiers, and mill-core's own default, inherit whatever the global `SlurryParams` default
+is. `FluidParticles::seed_lattice` (`crates/mill-core/src/pbf.rs`) seeds
+`target_count = fill_fraction * pi * drum_radius_m^2 / cell_area`, with `cell_area` fixed only by
+`resolution`, so this change scales the fluid particle count at *every* fixed `resolution` by
+`0.35 / 0.15 ~= 2.33x` -- this was expected to cost real PBF time, not just change the free-
+surface height as the commit's own rationale focused on, and it was re-measured rather than
+assumed.
+
+Native `cargo bench -p mill-core` (release, same machine as every section above), best-of-three
+runs after the first run's cold-start outlier settled (a >2x first-run inflation that vanished on
+immediate re-run, the same ambient-noise pattern already documented in the Phase 3b section above):
+
+| Benchmark | Time | vs. fluidised-charge-fix section |
+|---|---|---|
+| `dem_step/500_balls` | 0.42 ms | no material change (was 0.41 ms) |
+| `dem_step/1000_balls` | 1.00-1.12 ms | no material change (was 0.93 ms) |
+| `dem_step/2000_balls` | 2.16-2.17 ms | no material change (was 2.00 ms) |
+| `drum_only_step` | 52.7-53.0 ms | **+~4x** (was 13.17 ms) |
+
+`dem_step/*` hardcodes its own ball counts and is unaffected by `fill_fraction`, exactly as
+expected -- confirmed, not just assumed. `drum_only_step` runs at *default* `Params`
+(`slurry.fill_fraction = 0.35`, `simulation.resolution = 40` unchanged), so it is not a clean
+single-cause comparison: since the last recorded number six commits landed
+(`1cc6cc7` wettability/adhesion, `8ecd966` review fixes, `c81899d` wall/lifter CCD, `b7f0c06`
+Akinci cohesion+adhesion replacing the old shell model, `74b85d1` hot-apply/presets, `bd19299`
+itself), several of which add real per-substep PBF or DEM work. The fluid-particle-count math above
+(2.33x more particles at the same resolution, each now also possibly paying extra adaptive PBF
+passes) plausibly accounts for most of a ~4x `drum_only_step` increase on its own; this section
+does not attempt to isolate `bd19299`'s share from the other five commits' -- that would need a
+`git stash` bisection this task didn't budget for, and the browser measurement below is the number
+that actually matters for the UI-facing question this re-measurement exists to answer.
+
+Browser (WASM, freshly rebuilt from this commit via `scripts/build-wasm.sh` -- the committed
+`web/src/wasm/` bundle predated `db96784` by a few minutes and was not trusted as-is), same
+methodology as the table above (default drum/media/slurry otherwise, `lifters.count = 0`, steady
+cascading, HUD/metrics-panel `Achieved speed (x)` reading, several samples per preset):
+
+| `max_balls` | `resolution` | Achieved speed (this measurement) | Achieved speed (prior table) | Est. fluid particles |
+|---|---|---|---|---|
+| 150 (Realtime) | 15 | ~1.0x (samples: 1.02, 1.00, 1.00) | ~1.0-1.1x | 247 |
+| 300 (Balanced) | 25 | ~0.25-0.38x (samples: 0.38, 0.25, 0.37, 0.38) | ~0.7-0.75x | ~690 (extrapolated) |
+| 600 (Accuracy) | 40 | ~0.12-0.13x (samples: 0.13, 0.13, 0.13, 0.13, 0.12) | ~0.3-0.4x | 1759 |
+
+The verdict: **the fill-fraction bump (plus the other physics work that landed alongside it) did
+measurably shift the achieved-speed numbers, and the shift is well outside this doc's own ±0.1x
+noise band.** Realtime is unaffected (~1.0x, matching the prior table) because at `resolution = 15`
+the absolute fluid particle count stays small (247) regardless of `fill_fraction`, and Realtime's
+cost is DEM/render-bound, not PBF-bound. Balanced and Accuracy both regressed by roughly half:
+Balanced ~0.7-0.75x -> ~0.3x, Accuracy ~0.3-0.4x -> ~0.13x -- consistent with PBF cost dominating
+at higher `resolution` and scaling with the ~2.33x particle-count increase (plus whatever the
+adaptive-iteration escalation and the Akinci cohesion/adhesion passes added on top).
+`web/src/params/presets.ts`'s own per-preset `note` strings (last written before `bd19299`) are now
+stale for Balanced and Accuracy -- both undersell how slow those tiers actually are -- and should
+be refreshed together with this table the next time someone touches that file; this task's scope
+was measurement only, so the `note` strings were left as-is pending that follow-up. Realtime's
+"default" status stays justified (it is still the only tier at >= 1.0x), but a user who deliberately
+picks Balanced or Accuracy today gets a slower experience than the UI copy currently promises.
