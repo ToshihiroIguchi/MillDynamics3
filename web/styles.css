@@ -64,12 +64,18 @@ body.params-collapsed .params-panel {
 
   .scene-wrap {
     order: 1;
+    /* Never let the canvas get squeezed below usable size by the two stacked side panels below
+       (each capped at max-height, not a fixed height, so they shrink to fit what's left and
+       scroll internally -- they already have overflow-y: auto). */
+    flex: 1;
+    min-height: 45vh;
   }
 
   .params-panel {
     order: 2;
     width: auto;
-    height: 40vh;
+    flex: 1;
+    max-height: 40vh;
     border-right: 0;
     border-top: 1px solid #3a4048;
   }
@@ -77,9 +83,17 @@ body.params-collapsed .params-panel {
   .metrics-panel {
     order: 3;
     width: auto;
-    height: 40vh;
+    flex: 1;
+    max-height: 40vh;
     border-left: 0;
     border-top: 1px solid #3a4048;
+  }
+
+  /* Sparkline canvases get a fixed CSS pixel width set inline by ui/sparkline.ts (an inline style
+     wins over any width set here), so the fix for narrow viewports is to let the row wrap instead
+     of clipping/overflowing at the right edge. */
+  .metric-row {
+    flex-wrap: wrap;
   }
 }
 
@@ -168,12 +182,17 @@ body.params-collapsed .params-panel {
   color: #9aa3b0;
 }
 
+.params-status.is-applied {
+  color: #5fc97c;
+  font-weight: 600;
+}
+
 .params-status.is-edited {
   color: #e8a33d;
 }
 
 .params-status.is-error {
-  color: #e8a33d;
+  color: #e8546a;
   font-weight: 600;
 }
 
@@ -219,10 +238,21 @@ body.params-collapsed .params-panel {
   color: #e8a33d;
   font-size: 12px;
   margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid #e8a33d;
+  border-radius: 4px;
+  background: rgba(232, 163, 61, 0.12);
 }
 
 .params-warn[hidden] {
   display: none;
+}
+
+/* Dims (but doesn't disable -- the value is still real and stays editable) the ball-diameter
+   input while coarse-graining is active and it has no effect on the simulation, see the
+   `.params-warn` banner text set alongside this in ui/paramsPanel.ts. */
+.params-row.is-ineffective input {
+  opacity: 0.55;
 }
 
 .params-note {

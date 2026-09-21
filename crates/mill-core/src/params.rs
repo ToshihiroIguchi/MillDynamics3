@@ -251,7 +251,10 @@ impl Default for SlurryParams {
     fn default() -> Self {
         Self {
             enabled: true,
-            fill_fraction: 0.15,
+            // Above `MediaParams::fill_fraction`'s default (0.30) so the liquid's free surface
+            // clears the top of the settled ball heap at rest, instead of leaving media exposed
+            // above the slurry pool (see docs/PARAMETERS.md's Slurry table).
+            fill_fraction: 0.35,
             density_kg_m3: 1800.0,
             viscosity_pa_s: 50.0,
             rheology: Rheology::Newtonian,
@@ -347,7 +350,10 @@ pub struct SimulationParams {
     /// Fixed sub-steps per rendered frame at 1x time scale (nominal PBF step rate is
     /// `substeps * 60` Hz before frame-budget throttling).
     pub substeps: u32,
-    /// PBF density-constraint solver iterations per sub-step.
+    /// PBF density-constraint solver iterations per sub-step. A floor, not a fixed count: the
+    /// solver runs additional passes beyond this (bounded separately, see
+    /// `pbf::ADAPTIVE_MAX_EXTRA_ITERATIONS`) when the density constraint is still unconverged
+    /// after this many, so a violent collision doesn't leave a large compression-error residual.
     pub pbf_iterations: u32,
     /// XPBD non-penetration solver iterations per sub-step for the ball population (see
     /// docs/PLAN.md ss3.2). Analogous to `pbf_iterations`; unlike an explicit DEM time step, this

@@ -119,6 +119,10 @@ const paramsPanel = createParamsPanel(paramsPanelEl, (params) => {
     console.info("[params] hot-applying (no reset)");
     state.params = params;
     send({ type: "setParams", params });
+    // No "ready" reply follows a hot "setParams" (unlike "init"), so the panel's status indicator
+    // would otherwise stay stuck on "Edited -- not applied" even though the apply succeeded --
+    // restore it to "Applied" here, mirroring the "ready" handler above.
+    paramsPanel.setParams(params);
   }
 });
 

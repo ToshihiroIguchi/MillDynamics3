@@ -851,6 +851,64 @@ mod tests {
     }
 
     #[test]
+    fn compression_error_stays_bounded_under_violent_lifter_cataracting() {
+        // Regression for a QA-reported finding: under a lifters-enabled, cataracting charge (the
+        // same high-impact-energy regime as `dem::tests::a_cataracting_charge_with_lifters_never_
+        // tunnels_through_a_lifter`, but here with slurry coupled in), `max_fluid_compression_
+        // error_fraction` was observed spiking to ~16% -- `pbf::step`'s density-constraint solve
+        // was a *fixed* `pbf_iterations` pass count with no escalation, so a large one-sub-step
+        // velocity injection from a lifter impact could leave it under-converged. `pbf.rs`'s solve
+        // now treats `pbf_iterations` as a floor and escalates (bounded by `ADAPTIVE_MAX_EXTRA_
+        // ITERATIONS`) while still unconverged; this asserts that actually holds here, well below
+        // both the old incident reading and `debug_checks_are_finite_and_reasonable`'s much looser
+        // "not blown up" sanity bound.
+        use crate::params::{Direction, LiftersParams, MediaParams, MillParams, Params, SpeedMode};
+
+        let mut params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 30.0,
+                direction: Direction::CounterClockwise,
+            },
+            media: MediaParams {
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            lifters: LiftersParams {
+                count: 8,
+                ..LiftersParams::default()
+            },
+            ..Params::default()
+        };
+        params.simulation.max_balls = 150;
+        params.simulation.resolution = 15;
+        params.validate().unwrap();
+
+        let mut sim = Simulation::new(params).unwrap();
+        let mut worst = 0.0f32;
+        for step in 0..(8 * 60) {
+            sim.step(1.0 / 60.0);
+            if step < 5 * 60 {
+                continue; // let the fresh charge fall/settle into steady cataracting first
+            }
+            let err = sim
+                .metrics()
+                .max_fluid_compression_error_fraction
+                .expect("expected a compression error reading for enabled slurry");
+            assert!(err.is_finite(), "compression error not finite: {err}");
+            worst = worst.max(err);
+        }
+
+        assert!(
+            worst < 0.12,
+            "worst compression error {worst} during cataracting exceeds the bound the adaptive \
+             iteration escalation is meant to hold (previously observed spiking to ~0.16 with a \
+             fixed iteration count; measured ~0.091 with the escalation in place)"
+        );
+    }
+
+    #[test]
     fn empty_populations_compute_gracefully_to_none() {
         use crate::params::{LiftersParams, SlurryParams};
 

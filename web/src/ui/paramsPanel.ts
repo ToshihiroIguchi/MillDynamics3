@@ -91,16 +91,17 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   revertBtn.addEventListener("click", () => setParams(currentParams));
 
   const status = document.createElement("span");
-  status.className = "params-status";
+  status.className = "params-status is-applied";
   status.textContent = "Applied";
 
   header.append(applyBtn, revertBtn, status);
   form.appendChild(header);
 
   function setStatus(state: "applied" | "edited" | "error"): void {
-    status.classList.remove("is-edited", "is-error");
+    status.classList.remove("is-applied", "is-edited", "is-error");
     if (state === "applied") {
       status.textContent = "Applied";
+      status.classList.add("is-applied");
     } else if (state === "edited") {
       status.textContent = "Edited — not applied";
       status.classList.add("is-edited");
@@ -191,8 +192,13 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       const row = document.createElement("label");
       row.className = "params-row";
 
+      // min/max (when both are defined) are already in display units per schema.ts's own comment
+      // on `displayScale` -- no conversion needed here. `noValidate` on the form means the
+      // browser never surfaces the input's min/max attributes (set below) to the user on its own,
+      // so the valid range is otherwise invisible; show it in the label and as a hover tooltip.
+      const rangeSuffix = field.min !== undefined && field.max !== undefined ? ` [${field.min}–${field.max}]` : "";
       const labelText = document.createElement("span");
-      labelText.textContent = field.unit ? `${field.label} (${field.unit})` : field.label;
+      labelText.textContent = (field.unit ? `${field.label} (${field.unit})` : field.label) + rangeSuffix;
       row.appendChild(labelText);
 
       let input: HTMLInputElement | HTMLSelectElement;
@@ -215,6 +221,9 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         if (field.min !== undefined) numberInput.min = String(field.min);
         if (field.max !== undefined) numberInput.max = String(field.max);
         if (field.step !== undefined) numberInput.step = String(field.step);
+        if (field.min !== undefined && field.max !== undefined) {
+          numberInput.title = `Valid range: ${field.min}–${field.max}`;
+        }
         input = numberInput;
       }
       input.addEventListener("input", () => {
@@ -341,8 +350,10 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       derived.append(dt, dd);
     }
 
+    const ballDiameterRow = rowsByPath.get("media.ball_diameter_m");
     if (mediaWarn) {
-      if (eff.scaleFactor > 1) {
+      const coarseGrained = eff.scaleFactor > 1;
+      if (coarseGrained) {
         mediaWarn.hidden = false;
         mediaWarn.textContent =
           `Coarse-graining is active (k = ${eff.scaleFactor.toFixed(3)}). Ball diameter has no ` +
@@ -352,6 +363,10 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       } else {
         mediaWarn.hidden = true;
       }
+      // Dim (not disable) the ball-diameter input itself so the warning is hard to miss even
+      // without reading the banner text -- the value stays editable for when the user later
+      // raises Max balls.
+      ballDiameterRow?.classList.toggle("is-ineffective", coarseGrained);
     }
   }
 
