@@ -429,6 +429,14 @@ pub struct FluidStepStats {
     /// [`crate::Simulation`] does not need a third return value from `step_coupled` just for one
     /// `u32`.
     pub coupling_clamp_hits: u32,
+    /// Work (J per metre of mill depth) the drum wall's no-slip drag did against the slurry this
+    /// sub-step -- the fluid-side counterpart of [`crate::dem::DemStepStats::wall_work_j`], summed
+    /// into the same [`crate::Simulation::power_draw_w`] reading so a wet mill's motor load
+    /// reflects viscous drag on the slurry, not only ball-wall friction (an external review found
+    /// this contribution silently zeroed). Positive when the wall does net positive work on the
+    /// fluid (the ordinary case while the drum turns); zero at `omega = 0` or `slurry.wall_no_slip
+    /// = 0`.
+    pub wall_work_j: f32,
 }
 
 /// Clamp magnitude for the coupling impulse applied to a ball over one sub-step (docs/PLAN.md
@@ -680,6 +688,12 @@ impl FluidParticles {
             self.v[i].y += GRAVITY * dt;
             self.x[i] += self.v[i] * dt;
         }
+        // The drum's angle at the *end* of this sub-step -- step 4's boundary projection below
+        // runs against particle positions already predicted to `t + dt`, so it must be evaluated
+        // against where the (possibly rotating, lifter-bearing) wall actually is at `t + dt`, not
+        // where it was at `t`. Mirrors `dem::DemState::step_with_external_forces`'s
+        // `drum_angle_next` (same fix, same rationale, on the DEM side).
+        let drum_angle_next = drum_angle + drum.omega * dt;
 
         // --- 2. Neighbour lists (rebuilt each sub-step, reused across iterations) -----------
         let grid = UniformGrid::build(&self.x, h);
@@ -989,7 +1003,7 @@ impl FluidParticles {
         // --- 4. Boundary projection (position only; velocity is reconciled below) ----------
         let mut touched_wall = vec![false; n];
         for (x, touched) in self.x.iter_mut().zip(&mut touched_wall) {
-            let (d, normal) = drum.sdf_world(*x, drum_angle);
+            let (d, normal) = drum.sdf_world(*x, drum_angle_next);
             if d < 0.0 {
                 *x += -d * normal;
                 *touched = true;
@@ -1019,11 +1033,20 @@ impl FluidParticles {
 
         // --- 6. No-slip wall velocity blending -------------------------------------------------
         let beta = slurry.wall_no_slip.clamp(0.0, 1.0);
+        let mut wall_work_j = 0.0f32;
         if beta > 0.0 {
             for ((v, &touched), &x) in self.v.iter_mut().zip(&touched_wall).zip(&self.x) {
                 if touched {
                     let v_wall = drum.wall_velocity(x);
-                    *v = (1.0 - beta) * *v + beta * v_wall;
+                    let v_old = *v;
+                    *v = (1.0 - beta) * v_old + beta * v_wall;
+                    // Same "impulse delivered to the body, dotted with the wall's own velocity"
+                    // convention as `dem::DemStepStats::wall_work_j` (dem.rs step 5): the rate of
+                    // work the drum's motor must supply to overcome the slurry's viscous drag,
+                    // surfaced here so a wet mill's power draw reflects that drag rather than only
+                    // ball-wall friction -- see [`FluidStepStats::wall_work_j`]'s doc comment.
+                    let dv = *v - v_old;
+                    wall_work_j += mass * dv.dot(v_wall);
                 }
             }
         }
@@ -1252,8 +1275,22 @@ impl FluidParticles {
                     continue;
                 }
                 let rho_eff = rho_local.min(rest_density);
+                // General Archimedes buoyancy is `F = -rho * V * g_eff`, where `g_eff` is the
+                // *apparent* gravity in the fluid's own (possibly accelerating) rest frame: for
+                // slurry in near solid-body rotation with the drum, a fluid parcel's actual
+                // acceleration is centripetal (`-omega^2 * d`, `d` the position relative to the
+                // drum's centre, which is the world origin -- see `Drum::wall_velocity`), so
+                // `g_eff = g_vec - a_fluid = g_vec + omega^2 * d`. At `omega = 0` this reduces
+                // exactly to the previous world-vertical-only expression; away from zero it adds
+                // the inward (centripetal) buoyancy a real rotating slurry pool exerts, which an
+                // external review found completely absent -- every ball, however dense, was
+                // buoyed only against gravity, never pushed toward the drum's axis by the
+                // centrifugal pressure gradient dominating near the wall at speed.
+                let g_vec = Vec2::new(0.0, GRAVITY);
+                let centripetal = drum.omega * drum.omega * balls.x[b];
+                let g_eff = g_vec + centripetal;
                 // Acts through the ball's centroid, so it contributes no angular impulse.
-                let impulse_on_ball = Vec2::new(0.0, -rho_eff * area * GRAVITY * dt);
+                let impulse_on_ball = -rho_eff * area * g_eff * dt;
                 coupling.impulses[b] += impulse_on_ball;
                 for (ju, w) in weights {
                     let frac = w / rho_local;
@@ -1330,6 +1367,7 @@ impl FluidParticles {
                 viscosity_iterations,
                 mean_shear_rate_per_s,
                 coupling_clamp_hits,
+                wall_work_j,
             },
         )
     }
@@ -1574,6 +1612,108 @@ mod tests {
             new_v.x >= 0.0 && new_v.x <= fluid_velocity.x * 1.001,
             "ball overshot the fluid velocity it was relaxing toward: new_v={new_v:?}, \
              fluid_velocity={fluid_velocity:?}"
+        );
+    }
+
+    #[test]
+    fn buoyancy_is_purely_vertical_at_rest_and_inward_while_spinning() {
+        // Buoyancy in a rotating frame should add an inward (toward the drum's axis) component
+        // once the drum spins, on top of the always-present vertical (gravity) component -- and
+        // must reduce exactly to the world-vertical-only expression at `omega = 0`. Isolated from
+        // every other coupling mechanism (drag, adhesion, cohesion, wall no-slip) so only the
+        // buoyancy impulse (step 6.6) is measured.
+        let ball_radius_m = 0.01;
+        let ball_density = 6000.0;
+        let slurry = SlurryParams {
+            viscosity_pa_s: 0.0,
+            ball_no_slip: 0.0,
+            wettability: 0.0,
+            surface_tension_n_m: 0.0,
+            wall_no_slip: 0.0,
+            fill_fraction: 0.0, // unused: fluid is placed manually
+            ..SlurryParams::default()
+        };
+        // The ball sits off-centre (on +x) so the centripetal term (proportional to the ball's
+        // own position relative to the drum's centre, the world origin) is nonzero; a drum large
+        // enough that this offset stays far from the wall.
+        let offset = Vec2::new(0.3, 0.0);
+        let dt = 1.0 / 480.0;
+
+        let buoyant_impulse_x = |omega: f32| -> f32 {
+            let (mut balls, mut fluid) =
+                ball_in_uniform_fluid_patch(ball_radius_m, ball_density, &slurry, Vec2::ZERO);
+            balls.x[0] += offset;
+            for x in fluid.x.iter_mut() {
+                *x += offset;
+            }
+            let drum = Drum::new(
+                10.0,
+                omega,
+                LiftersParams {
+                    count: 0,
+                    ..LiftersParams::default()
+                },
+            );
+            let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
+            impulses.impulses[0].x
+        };
+
+        let still = buoyant_impulse_x(0.0);
+        let spinning = buoyant_impulse_x(4.0);
+        assert!(
+            still.abs() < 1e-6,
+            "no rotation: expected ~zero horizontal buoyant impulse, got {still}"
+        );
+        assert!(
+            spinning < -1e-6,
+            "spinning drum: expected an inward (negative x) buoyant impulse, got {spinning}"
+        );
+    }
+
+    #[test]
+    fn wall_drag_does_positive_work_while_spinning_and_none_at_rest() {
+        // The drum's no-slip drag on the slurry (step 6) must contribute a nonzero, positive
+        // `FluidStepStats::wall_work_j` while the drum turns (the motor doing work against
+        // viscous drag on the fluid) and exactly zero at `omega = 0`.
+        let slurry = SlurryParams {
+            viscosity_pa_s: 5.0,
+            wall_no_slip: 1.0,
+            wettability: 0.0,
+            surface_tension_n_m: 0.0,
+            fill_fraction: 0.2,
+            ..SlurryParams::default()
+        };
+        let radius_m = 0.3;
+        let dt = 1.0 / 240.0;
+
+        let run_and_measure = |omega: f32| -> f32 {
+            let mut fluid = FluidParticles::seed_lattice(&slurry, radius_m, 24, &[], 0.0);
+            let drum = Drum::new(
+                radius_m,
+                omega,
+                LiftersParams {
+                    count: 0,
+                    ..LiftersParams::default()
+                },
+            );
+            let mut total = 0.0f32;
+            for _ in 0..60 {
+                let (_impulses, stats) =
+                    fluid.step_coupled(&drum, 0.0, &slurry, 3, dt, &Balls::empty());
+                total += stats.wall_work_j;
+            }
+            total
+        };
+
+        let still_work = run_and_measure(0.0);
+        let spinning_work = run_and_measure(3.0);
+        assert_eq!(
+            still_work, 0.0,
+            "a stationary drum should do no work on the slurry, got {still_work}"
+        );
+        assert!(
+            spinning_work > 0.0,
+            "a spinning drum should do positive net work dragging the slurry, got {spinning_work}"
         );
     }
 

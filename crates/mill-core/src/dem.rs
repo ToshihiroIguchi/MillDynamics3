@@ -489,7 +489,7 @@ impl DemState {
         let drum_angle_next = drum_angle + drum.omega * dt;
         let mut toi = vec![1.0f32; n];
         for i in 0..n {
-            let (d_end, _) = drum.sdf_world(balls.x[i], drum_angle);
+            let (d_end, _) = drum.sdf_world(balls.x[i], drum_angle_next);
             let c_end = d_end - r;
             if c_end >= -MAX_RECOVERY_FRACTION * 2.0 * r {
                 continue;
@@ -552,7 +552,7 @@ impl DemState {
                     .or_insert(0.0) += d_lambda;
             }
             for i in 0..n {
-                let (d, n_hat) = drum.sdf_world(balls.x[i], drum_angle);
+                let (d, n_hat) = drum.sdf_world(balls.x[i], drum_angle_next);
                 let c = d - r;
                 if c >= 0.0 {
                     continue;
@@ -633,9 +633,18 @@ impl DemState {
                 continue;
             }
             let iu = i as usize;
-            let (_, n_hat) = drum.sdf_world(balls.x[iu], drum_angle);
+            let (_, n_hat) = drum.sdf_world(balls.x[iu], drum_angle_next);
             let t_hat = Vec2::new(-n_hat.y, n_hat.x);
-            let v_wall = drum.wall_velocity(balls.x[iu]);
+            // Sampled at the contact point (`x_c - r*n_hat`), not the ball centre: the wall is
+            // rigid, so its velocity varies across the ball's own radius, and the contact point is
+            // the only location where "no relative tangential slip" is a meaningful statement. A
+            // ball rigidly co-rotating with the drum (`omega_ball == drum.omega`) has zero slip
+            // *there*; sampling at the centre instead undercounts the wall's tangential speed by
+            // `omega * r` (since `t_hat` at the contact point differs from the centre-sampled one
+            // only by that much, for a circular/lifter-face wall), which previously read a
+            // perfectly rolling ball as slipping and biased friction, the reconstructed spin, and
+            // `wall_work_j` below.
+            let v_wall = drum.wall_velocity(balls.x[iu] - r * n_hat);
 
             let v_t = (balls.v[iu] - v_wall).dot(t_hat) - r * balls.omega[iu];
             let w_sum_t = w + r * r * w_rot;
@@ -664,6 +673,17 @@ impl DemState {
             // of `dt` (240x at this project's default sub-step) relative to the (correctly
             // `dt`-independent) dissipated-energy estimate below.
             wall_work_j += (d_lambda_t / dt) * t_hat.dot(v_wall);
+            // The wall's *normal* impulse does no work only for a smooth cylindrical wall, whose
+            // normal is always radial while the wall's own velocity is purely tangential
+            // (`n_hat . v_wall == 0` there). A lifter face's normal has a large circumferential
+            // component -- pushing a ball up and along, not just constraining it radially -- so
+            // `n_hat . v_wall` is generally nonzero and this term is exactly the missing "lifter
+            // lifts the charge" power contribution an external review found absent (a smooth-wall
+            // mill with `lifters.count == 0` has `n_hat . v_wall == 0` everywhere, so this adds
+            // nothing there and stays a strict no-op on that configuration). Same impulse-vs-
+            // position-multiplier convention as the tangential term above: `lambda_n / dt` is the
+            // actual normal impulse (kg*m/s per metre of mill depth).
+            wall_work_j += (lambda_n / dt) * n_hat.dot(v_wall);
         }
         // Re-reconstruct velocities from the total position/orientation change once more: exactly
         // redundant with the incremental updates above in exact arithmetic (both compute the same
@@ -718,7 +738,17 @@ impl DemState {
             };
             // `.max(0.0)`: the target can never be negative (a contact cannot pull its pair
             // together), and restitution never reverses the sign of the approach velocity.
-            let target = (-e * v_n_pre).max(0.0);
+            // `.max(v_n_pre.max(0.0))`: if the pair was already separating *before* this solve
+            // (`v_n_pre > 0` -- e.g. step 3's depenetration had already pushed them apart faster
+            // than restitution alone would justify), the target must not fall below that existing
+            // separation speed. Without this, a pair that entered this step already separating
+            // faster than `target` gets `delta_v_n < 0` below, i.e. an impulse that pulls them back
+            // together -- an artificial attraction between dry rigid discs (Signorini's `F_n >= 0`
+            // forbids exactly this). This does not reopen the energy-injection bug this pass exists
+            // to close: an *approaching* pair (`v_n_pre <= 0`) is untouched (`v_n_pre.max(0.0)` is
+            // `0.0` there), so step 3's depenetration is still capped at the restitution target
+            // exactly as before.
+            let target = (-e * v_n_pre).max(0.0).max(v_n_pre.max(0.0));
             let v_n_now = (balls.v[iu] - balls.v[ju]).dot(n_hat);
             let delta_v_n = target - v_n_now;
             let w_sum = w + w;
@@ -734,8 +764,8 @@ impl DemState {
                 continue;
             }
             let iu = i as usize;
-            let (_, n_hat) = drum.sdf_world(balls.x[iu], drum_angle);
-            let v_wall = drum.wall_velocity(balls.x[iu]);
+            let (_, n_hat) = drum.sdf_world(balls.x[iu], drum_angle_next);
+            let v_wall = drum.wall_velocity(balls.x[iu] - r * n_hat);
 
             let v_n_pre = (v_pre[iu] - v_wall).dot(n_hat);
             let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
@@ -753,7 +783,9 @@ impl DemState {
             } else {
                 0.0
             };
-            let target = (-e * v_n_pre).max(0.0);
+            // See the ball-ball restitution pass above for why the target is also floored at the
+            // pre-solve separation speed.
+            let target = (-e * v_n_pre).max(0.0).max(v_n_pre.max(0.0));
             let v_n_now = (balls.v[iu] - v_wall).dot(n_hat);
             let delta_v_n = target - v_n_now;
             if w <= 0.0 {
@@ -763,6 +795,20 @@ impl DemState {
         }
 
         // --- 7. Rolling resistance -------------------------------------------------------------
+        // Damps every ball's *world* `omega` toward zero, scaled by that ball's total accumulated
+        // normal load (`total_lambda_n`, summed across all its ball-ball/ball-wall contacts this
+        // sub-step) -- a known simplification (docs/PHYSICS.md ss9): it neither applies a
+        // reaction torque to a ball-ball contact's partner (so it does not conserve angular
+        // momentum) nor references a ball-wall contact's target to `drum.omega` rather than zero
+        // (so it fights, rather than assists, a ball correctly rolling without slipping on a
+        // rotating drum). A per-contact, momentum-conserving, wall-frame-aware rewrite was tried
+        // and reverted: it destabilised this crate's core cataracting/cascading-density regression
+        // tests (`dem::tests::a_cascading_charge_stays_dense`,
+        // `metrics::tests::compression_error_stays_bounded_under_violent_lifter_cataracting`),
+        // which protect against the much more severe fluidised-charge energy-injection bug this
+        // solver was extensively tuned against -- see this module's and `MAX_RECOVERY_FRACTION`'s
+        // doc comments. Revisiting this needs dedicated re-tuning against those regressions, not a
+        // drive-by correctness fix.
         if media.rolling_friction > 0.0 && balls.inertia > 0.0 {
             let mut total_lambda_n = vec![0.0f32; n];
             for &(i, j, lambda_n) in &ball_ball_contacts {
@@ -1023,6 +1069,225 @@ mod tests {
 
         // After a head-on collision the balls must have separated (not passed through each other).
         assert!(state.balls.x[1].x > state.balls.x[0].x + 2.0 * r * 0.9);
+    }
+
+    #[test]
+    fn ball_resting_on_rotating_wall_settles_into_rolling_without_slip() {
+        // Ball dropped onto a large ("locally flat"), slowly rotating drum's floor. Once it has
+        // settled, its own spin should track the wall's rotation closely enough that the
+        // *contact point* has near-zero relative tangential velocity ("rolling without
+        // slipping") -- not just the ball's centre-of-mass velocity, which the wall's own
+        // rotation keeps nonzero regardless. Exercises the wall-velocity-at-contact-point fix:
+        // friction/restitution now sample `drum.wall_velocity` at `x - r*n_hat`, not the ball
+        // centre, so a rigidly co-rotating ball no longer reads as artificially slipping by
+        // `omega_ball * r`.
+        let radius_drum = 10.0;
+        let omega = 0.5; // rad/s; keeps the wall speed near the floor modest (~5 m/s)
+        let r = 0.05;
+        let mass = ball_mass(2.0 * r, 7800.0);
+        let balls = single_ball(Vec2::new(0.0, -(radius_drum - r)), Vec2::ZERO, r, mass);
+        let mut state = DemState { balls };
+        let drum = Drum::new(
+            radius_drum,
+            omega,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+        let media = media_defaults();
+        let dt = 1.0 / 480.0;
+
+        // `drum_angle` stays 0.0 throughout: a smooth cylindrical wall's SDF is rotation-
+        // invariant, so only `drum.omega` (the wall's *velocity* field) matters here, exactly as
+        // the other still-drum-with-omega-baked-into-the-`Drum`-value tests in this module rely
+        // on for `Drum::wall_velocity`.
+        for _ in 0..(5 * 480) {
+            state.step(&drum, 0.0, &media, 4, dt);
+        }
+
+        let x = state.balls.x[0];
+        let (_, n_hat) = drum.sdf_world(x, 0.0);
+        let t_hat = Vec2::new(-n_hat.y, n_hat.x);
+        let v_wall = drum.wall_velocity(x - r * n_hat);
+        let slip = (state.balls.v[0] - v_wall).dot(t_hat) - r * state.balls.omega[0];
+        let wall_speed = v_wall.length();
+        assert!(
+            slip.abs() < 0.05 * wall_speed.max(1e-6),
+            "contact-point slip too large: slip={slip} wall_speed={wall_speed} omega_ball={}",
+            state.balls.omega[0]
+        );
+    }
+
+    #[test]
+    fn lifter_normal_force_contributes_to_wall_work() {
+        // A lifter face's normal has a large circumferential component and does real work
+        // lifting the charge, unlike a smooth wall's purely radial normal -- `wall_work_j` must
+        // pick that up (`(lambda_n/dt) * n_hat.dot(v_wall)`, alongside the tangential-friction
+        // term), not just the tangential-friction accounting alone.
+        let r = 0.02;
+        let radius_drum = 0.5;
+        let omega = 6.0; // fast enough to cataract off a lifter within a short run
+        let lifters = LiftersParams {
+            count: 6,
+            height_m: 0.03,
+            base_width_m: 0.05,
+            top_width_m: 0.03,
+            phase_deg: 0.0,
+        };
+        let drum = Drum::new(radius_drum, omega, lifters);
+        let mut media = media_defaults();
+        media.rolling_friction = 0.0;
+        let effective = crate::params::EffectiveMedia {
+            true_diameter_m: 2.0 * r,
+            diameter_m: 2.0 * r,
+            density_kg_m3: 6000.0,
+            ball_count: 40,
+            scale_factor: 1.0,
+        };
+        let mut state = DemState::new(&effective, radius_drum, 42);
+        let dt = 1.0 / 960.0;
+        let mut drum_angle = 0.0f32;
+
+        let mut total_wall_work_j = 0.0f32;
+        let mut any_normal_work = false;
+        for _ in 0..(2 * 960) {
+            let stats = state.step(&drum, drum_angle, &media, 4, dt);
+            total_wall_work_j += stats.wall_work_j;
+            drum_angle = (drum_angle + omega * dt).rem_euclid(std::f32::consts::TAU);
+            if stats.wall_work_j.abs() > 1e-9 {
+                any_normal_work = true;
+            }
+        }
+
+        assert!(
+            any_normal_work,
+            "expected lifter contacts to register nonzero wall_work_j over the run"
+        );
+        assert!(
+            total_wall_work_j > 0.0,
+            "expected lifters to do net positive work lifting the charge, got {total_wall_work_j}"
+        );
+    }
+
+    #[test]
+    fn smooth_wall_normal_force_does_no_work() {
+        // Companion to `lifter_normal_force_contributes_to_wall_work`: on a smooth cylindrical
+        // wall, `wall_work_j`'s `n_hat . v_wall` term must be an exact no-op, since a smooth
+        // wall's normal is always radial while its velocity is purely tangential there.
+        let radius_drum = 10.0;
+        let omega = 0.5;
+        let r = 0.05;
+        let mass = ball_mass(2.0 * r, 7800.0);
+        let balls = single_ball(Vec2::new(0.0, -(radius_drum - r)), Vec2::ZERO, r, mass);
+        let mut state = DemState { balls };
+        let drum = Drum::new(
+            radius_drum,
+            omega,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+        let media = media_defaults();
+        let dt = 1.0 / 480.0;
+
+        // Settle first, then measure: the friction-only tangential term should be the entire
+        // `wall_work_j` reading once resting, since the normal term is provably zero regardless.
+        for _ in 0..480 {
+            state.step(&drum, 0.0, &media, 4, dt);
+        }
+        let x = state.balls.x[0];
+        let (_, n_hat) = drum.sdf_world(x, 0.0);
+        let v_wall_at_contact = drum.wall_velocity(x - r * n_hat);
+        let dot = n_hat.dot(v_wall_at_contact);
+        // Tolerance is relative to wall speed, not a tiny absolute epsilon: `sdf_world`'s normal
+        // is a numeric (central-difference) gradient, and at `radius_drum = 10` the underlying
+        // `sdf` values it differences are a small difference of two O(10) lengths (catastrophic
+        // cancellation in f32), so the normal itself carries roughly `1e-3`-relative noise here --
+        // exactly zero only in exact arithmetic.
+        let wall_speed = v_wall_at_contact.length();
+        assert!(
+            dot.abs() < 0.01 * wall_speed,
+            "smooth wall's normal should carry ~no velocity component, got {dot} (wall speed {wall_speed})"
+        );
+    }
+
+    #[test]
+    fn restitution_does_not_pull_an_already_separating_pair_together() {
+        // Two balls given an initial *separating* velocity while still overlapping (as if step
+        // 3's depenetration had already pushed them apart faster than restitution alone would
+        // justify). The restitution target's floor at the pre-solve separation speed must not let
+        // the solve decelerate them below the separation speed they already had -- an artificial
+        // attraction between dry rigid discs would violate the one-sided normal-force (Signorini)
+        // condition.
+        let r = 0.05;
+        let mass = ball_mass(2.0 * r, 7800.0);
+        let mut media = media_defaults();
+        media.restitution_ball_ball = 0.5; // low e: without the floor this pulls hard
+        media.friction_ball_ball = 0.0;
+        media.rolling_friction = 0.0;
+
+        // Overlapping (`dist < 2r`) but already moving apart faster than `e * 0` would target.
+        let separation_speed = 3.0;
+        let balls = Balls {
+            x: vec![Vec2::new(-0.9 * r, 0.0), Vec2::new(0.9 * r, 0.0)],
+            v: vec![
+                Vec2::new(-separation_speed / 2.0, 0.0),
+                Vec2::new(separation_speed / 2.0, 0.0),
+            ],
+            theta: vec![0.0, 0.0],
+            omega: vec![0.0, 0.0],
+            radius: r,
+            mass,
+            inertia: ball_inertia(mass, r),
+        };
+        let mut state = DemState { balls };
+        let drum = still_drum(1000.0);
+        let dt = 1.0 / 480.0;
+
+        state.step(&drum, 0.0, &media, 4, dt);
+
+        let relative_speed_after = (state.balls.v[1] - state.balls.v[0]).dot(Vec2::X);
+        assert!(
+            relative_speed_after >= separation_speed * 0.95,
+            "an already-separating pair lost separation speed: before={separation_speed} after={relative_speed_after}"
+        );
+    }
+
+    #[test]
+    fn settled_bed_produces_no_spurious_collisions() {
+        // Regression pin for a rejected review finding: it claimed a fully settled, motionless
+        // bed under gravity would register a fresh "collision" every sub-step, because the
+        // predict step's `g*dt` speed increment (~0.041 m/s at 240 Hz) exceeds
+        // `RESTITUTION_VELOCITY_THRESHOLD` (0.02 m/s). That reasoning uses the *post-predict*
+        // velocity; the actual impact test uses `v_pre`, captured *before* gravity is applied
+        // this sub-step (see `step_with_external_forces`'s doc comment on step 1 and step 6's use
+        // of `v_pre`), so a resting contact's approach speed reads as whatever it was at the
+        // *start* of the sub-step -- ~0 once settled, not `g*dt`.
+        let radius_drum = 10.0;
+        let r = 0.05;
+        let mass = ball_mass(2.0 * r, 7800.0);
+        let balls = single_ball(Vec2::new(0.0, -(radius_drum - r)), Vec2::ZERO, r, mass);
+        let mut state = DemState { balls };
+        let drum = still_drum(radius_drum);
+        let media = media_defaults();
+        let dt = 1.0 / 240.0;
+
+        // Let it settle first.
+        for _ in 0..240 {
+            state.step(&drum, 0.0, &media, 4, dt);
+        }
+
+        let mut total_collisions = 0u32;
+        for _ in 0..240 {
+            let stats = state.step(&drum, 0.0, &media, 4, dt);
+            total_collisions += stats.collision_count;
+        }
+        assert_eq!(
+            total_collisions, 0,
+            "a settled, motionless bed should register no fresh collisions"
+        );
     }
 
     #[test]

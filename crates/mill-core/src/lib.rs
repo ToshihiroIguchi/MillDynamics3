@@ -350,20 +350,31 @@ impl Simulation {
             sub_dt,
         );
         self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
+        self.update_grinding_stats(&dem_stats, fluid_stats.wall_work_j, sub_dt, omega);
         self.fluid_stats = fluid_stats;
-        self.update_grinding_stats(&dem_stats, sub_dt, omega);
         self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
         self.sim_time += sub_dt as f64;
     }
 
-    /// Folds one sub-step's [`dem::DemStepStats`] into the EMA-smoothed grinding diagnostics
-    /// (time constant [`GRINDING_STATS_EMA_TAU_S`]), except
+    /// Folds one sub-step's [`dem::DemStepStats`] (plus the fluid's own
+    /// [`pbf::FluidStepStats::wall_work_j`], `fluid_wall_work_j`) into the EMA-smoothed grinding
+    /// diagnostics (time constant [`GRINDING_STATS_EMA_TAU_S`]), except
     /// `max_substep_displacement_over_diameter`, which tracks this call's peak directly (see its
     /// struct doc comment).
-    fn update_grinding_stats(&mut self, stats: &dem::DemStepStats, sub_dt: f32, omega: f32) {
+    fn update_grinding_stats(
+        &mut self,
+        stats: &dem::DemStepStats,
+        fluid_wall_work_j: f32,
+        sub_dt: f32,
+        omega: f32,
+    ) {
         let alpha = 1.0 - (-sub_dt / GRINDING_STATS_EMA_TAU_S).exp();
 
-        let power_instant = stats.wall_work_j / sub_dt;
+        // Power draw is the wall's total work rate against *everything* resisting it -- balls
+        // (friction, and lifter normal force) and slurry (viscous drag) alike -- not ball-wall
+        // friction alone, which under-reported a wet mill's true motor load (an external review
+        // finding).
+        let power_instant = (stats.wall_work_j + fluid_wall_work_j) / sub_dt;
         self.power_draw_w += alpha * (power_instant - self.power_draw_w);
 
         let torque_instant = if omega.abs() > 1e-6 {
