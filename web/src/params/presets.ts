@@ -37,13 +37,13 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Balanced",
     maxBalls: 300,
     resolution: 25,
-    note: "~0.7-0.75x achieved speed (noticeably slower than real time). More balls and finer slurry than Realtime; wetting resolution improves but a thin film is still coarse.",
+    note: "~0.25-0.38x achieved speed (well below real time -- regressed from an earlier ~0.7-0.75x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). More balls and finer slurry than Realtime; wetting resolution improves but a thin film is still coarse.",
   },
   {
     id: "accuracy",
     label: "Accuracy",
     maxBalls: 600,
     resolution: 40,
-    note: "~0.3-0.4x achieved speed (clearly slow motion). This project's original default ball/fluid counts -- the finest of the three tiers, and still under-resolves a thin wetting film.",
+    note: "~0.12-0.13x achieved speed (clearly slow motion, worse than before -- regressed from an earlier ~0.3-0.4x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). This project's original default ball/fluid counts -- the finest of the three tiers, and still under-resolves a thin wetting film.",
   },
 ];
