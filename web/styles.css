@@ -470,6 +470,10 @@ body.params-collapsed .params-panel {
   padding: 2px 0;
 }
 
+.metric-row[hidden] {
+  display: none;
+}
+
 .metric-label {
   color: #b7bfcc;
   flex: 1;
@@ -494,6 +498,10 @@ body.params-collapsed .params-panel {
   margin: 4px 0 12px;
 }
 
+.impact-histogram-wrap[hidden] {
+  display: none;
+}
+
 .impact-histogram-label {
   font-size: 11px;
   color: #9aa3b0;
@@ -502,4 +510,18 @@ body.params-collapsed .params-panel {
 
 .impact-histogram {
   display: block;
+}
+
+.metrics-warn {
+  color: #e8a33d;
+  font-size: 12px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid #e8a33d;
+  border-radius: 4px;
+  background: rgba(232, 163, 61, 0.12);
+}
+
+.metrics-warn[hidden] {
+  display: none;
 }

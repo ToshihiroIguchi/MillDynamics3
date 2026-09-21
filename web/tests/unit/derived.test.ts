@@ -3,6 +3,7 @@ import {
   criticalSpeedRpm,
   effectiveMedia,
   fluidParticleCountEstimate,
+  interstitialFilling,
   substepDisplacementOverDiameter,
   trueBallCount,
   type MediaLike,
@@ -37,6 +38,33 @@ describe("effectiveMedia", () => {
     expect(eff.diameterM).toBe(eff.trueDiameterM);
     expect(eff.diameterM).toBe(0.01);
     expect(eff.ballCount).toBeCloseTo(2460, 0);
+  });
+
+  it("coarse-grains at the project's actual shipped defaults (1.0 m drum, 10 mm balls, max_balls = 600)", () => {
+    const eff = effectiveMedia(1.0, media, 600);
+    expect(eff.scaleFactor).toBeGreaterThan(1);
+    expect(eff.scaleFactor).toBeCloseTo(Math.sqrt(2460 / 600), 2);
+  });
+});
+
+describe("interstitialFilling", () => {
+  it("matches the hand-computed U formula", () => {
+    // U = slurry_fill / (media_fill * (1 - packing_fraction_2d)) = 0.35 / (0.30 * 0.18) ~= 6.48
+    expect(interstitialFilling(0.35, media)).toBeCloseTo(0.35 / (0.3 * 0.18), 6);
+  });
+
+  it("scales linearly with slurry fill fraction", () => {
+    expect(interstitialFilling(0.7, media)).toBeCloseTo(2 * interstitialFilling(0.35, media), 10);
+  });
+
+  it("returns 0 when the void volume fraction is zero (media.fill_fraction = 0)", () => {
+    const zeroFillMedia: MediaLike = { ...media, fill_fraction: 0 };
+    expect(interstitialFilling(0.35, zeroFillMedia)).toBe(0);
+  });
+
+  it("returns 0 when the void volume fraction is zero (packing_fraction_2d = 1)", () => {
+    const fullyPackedMedia: MediaLike = { ...media, packing_fraction_2d: 1 };
+    expect(interstitialFilling(0.35, fullyPackedMedia)).toBe(0);
   });
 });
 

@@ -3,7 +3,7 @@
 // impact-energy histogram chart. All the data plumbing (spec table, history ring buffer, sparkline
 // renderer, `Metrics` type) lives elsewhere; this file only builds/updates the DOM.
 
-import { METRIC_GROUPS, METRIC_SPECS, type MetricContext } from "../metrics/specs";
+import { coarseGrainingReason, METRIC_GROUPS, METRIC_SPECS, type MetricContext, type MetricGroupName } from "../metrics/specs";
 import { MetricsHistory, type CsvColumn } from "../metrics/history";
 import type { ImpactEnergyHistogram } from "../metrics/types";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
@@ -117,15 +117,6 @@ const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
 const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
 const MAX_BALL_OVERLAP_WARN_THRESHOLD = 0.5;
 
-// Toe/shoulder angle read `null` (rendered as a bare "-") whenever the charge has no substantial
-// gap to measure a leading/trailing edge from -- physically correct (metrics.rs's
-// `charge_toe_shoulder`, `CENTRIFUGE_GAP_THRESHOLD_RAD`) but, without a reason attached, a "-"
-// alone reads as a broken readout rather than an expected state at high speed (reported by an
-// external review). Centrifuging (media pinned to the wall, no free-fall/cascading region) is by
-// far the common cause once %Nc is at or above 100, so that's what these two rows say instead.
-const CENTRIFUGING_EXPLAINABLE_IDS = new Set(["toe_angle_deg", "shoulder_angle_deg"]);
-const CENTRIFUGING_PERCENT_NC_THRESHOLD = 100;
-
 const WARN_THRESHOLDS = new Map<string, number>([
   ["coupling_clamp_hits", COUPLING_CLAMP_HITS_WARN_THRESHOLD],
   ["substep_displacement", SUBSTEP_DISPLACEMENT_WARN_THRESHOLD], // confirmed against metrics/specs.ts
@@ -150,13 +141,17 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
   const valueEls = new Map<string, HTMLSpanElement>();
   const sparklineEls = new Map<string, HTMLCanvasElement>();
   const rowEls = new Map<string, HTMLElement>();
+  const groupHeadingEls = new Map<MetricGroupName, HTMLHeadingElement>();
   let histogramCanvas: HTMLCanvasElement | null = null;
+  let histogramWrapEl: HTMLElement | null = null;
+  let coarseGrainingWarnEl: HTMLElement | null = null;
 
   for (const group of METRIC_GROUPS) {
     const section = document.createElement("section");
     const h3 = document.createElement("h3");
     h3.textContent = group;
     section.appendChild(h3);
+    groupHeadingEls.set(group, h3);
 
     for (const spec of METRIC_SPECS.filter((s) => s.group === group)) {
       const row = document.createElement("div");
@@ -188,6 +183,12 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     container.appendChild(section);
 
     if (group === "Grinding") {
+      const warnEl = document.createElement("div");
+      warnEl.className = "metrics-warn";
+      warnEl.hidden = true;
+      container.appendChild(warnEl);
+      coarseGrainingWarnEl = warnEl;
+
       const histWrap = document.createElement("div");
       histWrap.className = "impact-histogram-wrap";
       const histLabel = document.createElement("div");
@@ -199,6 +200,7 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       histWrap.appendChild(canvas);
       container.appendChild(histWrap);
       histogramCanvas = canvas;
+      histogramWrapEl = histWrap;
     }
   }
 
@@ -238,12 +240,18 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     };
 
     const values: Record<string, number | null> = {};
+    const reasons: Record<string, string | null> = {};
     for (const spec of METRIC_SPECS) {
-      values[spec.id] = spec.value(ctx);
+      const raw = spec.value(ctx);
+      const reason = spec.unavailable ? spec.unavailable(raw, ctx) : null;
+      reasons[spec.id] = reason;
+      values[spec.id] = reason !== null ? null : raw;
     }
 
     // Sampling must happen every frame (MetricsHistory self-throttles by sim time); only the DOM
-    // paint below is throttled by wall-clock time.
+    // paint below is throttled by wall-clock time. A metric currently `unavailable` (e.g.
+    // collision_rate while coarse-grained) is sampled as `null`, so its sparkline/CSV column shows
+    // a gap/empty cell rather than a value that can't be compared to a real mill.
     history.push(state.simTime, values);
     lastSimTime = state.simTime;
     exportButton.disabled = history.length === 0;
@@ -254,25 +262,32 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     for (const spec of METRIC_SPECS) {
       const raw = values[spec.id];
       const value = raw === undefined ? null : raw;
+      const reason = reasons[spec.id] ?? null;
       const span = valueEls.get(spec.id);
       if (span) {
-        const centrifuging =
-          value === null &&
-          CENTRIFUGING_EXPLAINABLE_IDS.has(spec.id) &&
-          ctx.percentCritical !== null &&
-          ctx.percentCritical >= CENTRIFUGING_PERCENT_NC_THRESHOLD;
-        const text = centrifuging ? "Centrifuging" : value === null ? "-" : spec.format ? spec.format(value) : String(value);
+        const text = reason ?? (value === null ? "-" : spec.format ? spec.format(value) : String(value));
         if (span.textContent !== text) span.textContent = text;
       }
 
-      const warnThreshold = WARN_THRESHOLDS.get(spec.id);
-      if (warnThreshold !== undefined) {
-        const row = rowEls.get(spec.id);
-        if (row) {
-          const warn = value !== null && value > warnThreshold;
-          row.classList.toggle("is-warn", warn);
-        }
+      const row = rowEls.get(spec.id);
+      if (row) {
+        row.hidden = spec.hideWhenUnavailable === true && reason !== null;
       }
+
+      const warnThreshold = WARN_THRESHOLDS.get(spec.id);
+      if (warnThreshold !== undefined && row) {
+        const warn = value !== null && value > warnThreshold;
+        row.classList.toggle("is-warn", warn);
+      }
+    }
+
+    // Generic guard: hide a group's heading if every row in it ended up hidden above (nothing left
+    // to head), so it never dangles above an empty group.
+    for (const group of METRIC_GROUPS) {
+      const heading = groupHeadingEls.get(group);
+      if (!heading) continue;
+      const groupSpecs = METRIC_SPECS.filter((s) => s.group === group);
+      heading.hidden = groupSpecs.length > 0 && groupSpecs.every((s) => rowEls.get(s.id)?.hidden === true);
     }
 
     for (const spec of METRIC_SPECS) {
@@ -282,7 +297,23 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       drawSparkline(canvas, history.seriesFor(spec.id));
     }
 
-    if (histogramCanvas) {
+    const kReason = coarseGrainingReason(ctx);
+    if (coarseGrainingWarnEl) {
+      coarseGrainingWarnEl.hidden = kReason === null;
+      if (kReason !== null && state.metrics) {
+        const k = state.metrics.coarse_graining_factor.toFixed(2);
+        const nTrue = state.metrics.true_ball_count.toFixed(0);
+        coarseGrainingWarnEl.textContent =
+          `Coarse-graining is active (k = ${k}). Collision rate and the impact energy distribution ` +
+          `are hidden -- impact counts scale as 1/k^2 and per-impact energies as k^2, so both would ` +
+          `be misleading. Raise Max balls above ${nTrue} to show them.`;
+      }
+    }
+
+    if (histogramWrapEl) {
+      histogramWrapEl.hidden = kReason !== null;
+    }
+    if (histogramCanvas && kReason === null) {
       drawImpactHistogram(histogramCanvas, state.metrics?.impact_energy_histogram);
     }
   }

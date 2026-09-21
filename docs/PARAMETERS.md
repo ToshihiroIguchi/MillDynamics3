@@ -50,6 +50,8 @@ This reference documents every user-facing simulation parameter. The table data 
 
 **Note:** Fields `slurry.rheology` and `slurry.yield_stress_pa` exist in the data model (`crates/mill-core/src/params.rs`) but are not yet exposed in the UI because Bingham rheology is unimplemented (scheduled for M7 per `docs/PLAN.md`). The solver currently always runs an implicit (conjugate-gradient) Newtonian viscosity solve (Morris SPH Laplacian, see `docs/PHYSICS.md`) regardless of the `rheology` field.
 
+**Derived: Interstitial filling (U).** The params panel's Derived section also shows `U = slurry.fill_fraction / (media.fill_fraction * (1 - media.packing_fraction_2d))`, the ratio of slurry volume to the ball charge's void volume; see `docs/PHYSICS.md` §9's "2D areal packing is not 3D voidage" entry for why this project's 2D packing makes the same `slurry.fill_fraction` correspond to a much higher `U` (and deeper-looking pool) than an equivalent real 3D mill.
+
 ## Simulation Parameters
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
