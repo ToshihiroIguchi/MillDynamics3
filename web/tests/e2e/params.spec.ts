@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openField } from "../helpers/paramsPanel";
 
 test.beforeEach(async ({ page }) => {
   // Guarantee a clean, default panel/group state regardless of what a prior run/session left in
@@ -9,16 +10,6 @@ test.beforeEach(async ({ page }) => {
     localStorage.removeItem("milldynamics.paramsGroups");
   });
 });
-
-/** Locates a field's `<input>` by its row's label text, forcing the row's group `<details>` open
- * first (fields in collapsed groups aren't fillable/readable via Playwright). */
-async function openField(page: import("@playwright/test").Page, labelText: string) {
-  const row = page.locator(".params-row", { has: page.locator("span", { hasText: labelText }) });
-  await row.locator("xpath=ancestor::details[1]").evaluate((el) => {
-    (el as HTMLDetailsElement).open = true;
-  });
-  return row.locator("input");
-}
 
 test("derived N_sim readout in the parameters panel never exceeds the max-balls input", async ({ page }) => {
   await page.goto("/");

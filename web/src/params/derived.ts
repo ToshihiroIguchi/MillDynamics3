@@ -69,6 +69,18 @@ export function fluidParticleCountEstimate(radiusM: number, resolution: number, 
 }
 
 /**
+ * U = slurry.fill_fraction / (media.fill_fraction * (1 - media.packing_fraction_2d)): the ratio of
+ * slurry volume to the ball charge's void volume. See docs/PHYSICS.md §9's "2D areal packing is
+ * not 3D voidage" entry -- this project's 2D `packing_fraction_2d` (default 0.82, ~18% void) is
+ * much denser than real 3D random-close-packing (~36-40% void), so the same `slurry.fill_fraction`
+ * implies a much higher `U` (and a deeper-looking slurry pool) than an equivalent real 3D mill.
+ */
+export function interstitialFilling(slurryFillFraction: number, media: MediaLike): number {
+  const voidVolumeFraction = media.fill_fraction * (1 - media.packing_fraction_2d);
+  return voidVolumeFraction > 0 ? slurryFillFraction / voidVolumeFraction : 0;
+}
+
+/**
  * Conservative static estimate of dem.rs's `max_substep_displacement_over_diameter` metric
  * (dem.rs:352-356), using the drum's nominal rim speed (rpm -> rad/s -> tangential speed at the
  * wall) as an upper bound on ball speed, since this is a params-only estimate with no live

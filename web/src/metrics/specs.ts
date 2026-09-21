@@ -24,6 +24,11 @@ export interface MetricContext {
 
 export type MetricGroupName = "Drum" | "Media" | "Grinding" | "Slurry" | "Solver";
 
+/** %Nc at/above which the charge is considered centrifuging (pinned to the wall, no free-fall/
+ * cascading region to measure a toe/shoulder edge from) -- see `unavailable` on `toe_angle_deg`/
+ * `shoulder_angle_deg` below. */
+const CENTRIFUGING_PERCENT_NC_THRESHOLD = 100;
+
 export interface MetricSpec {
   id: string;
   group: MetricGroupName;
@@ -39,6 +44,21 @@ export interface MetricSpec {
   sparkline?: boolean;
   /** Include this metric as a column in the CSV export (metrics/history.ts). */
   csv?: boolean;
+  /** Short reason (e.g. "Centrifuging", "Coarse-grained") this metric is not meaningful right
+   * now, or null when it is valid. Receives the value value() already extracted. */
+  unavailable?(value: number | null, ctx: MetricContext): string | null;
+  /** When unavailable() returns non-null, hide the whole row instead of showing the reason text
+   * in the value cell. */
+  hideWhenUnavailable?: boolean;
+}
+
+/** `unavailable` reason for any metric that scales directly with the coarse-graining factor `k`
+ * (impact counts as `1/k^2`, per-impact energies as `k^2`, docs/PHYSICS.md §9) and is therefore
+ * not comparable to a real mill whenever coarse-graining is active. `k` is exactly `1.0` when
+ * inactive, so `> 1` needs no epsilon. */
+export function coarseGrainingReason(ctx: MetricContext): string | null {
+  const k = ctx.metrics?.coarse_graining_factor;
+  return k !== undefined && k > 1 ? "Coarse-grained" : null;
 }
 
 function fixed(decimals: number): (v: number) => string {
@@ -82,6 +102,14 @@ export const METRIC_SPECS: MetricSpec[] = [
     format: fixed(1),
     sparkline: true,
     csv: true,
+    // Physically correct (metrics.rs's charge_toe_shoulder, CENTRIFUGE_GAP_THRESHOLD_RAD): once
+    // %Nc is at or above 100 the charge is pinned to the wall with no leading/trailing edge to
+    // measure, and this is by far the common cause of a null reading at that speed -- so a bare
+    // "-" reads as a broken readout rather than an expected state without this explanation.
+    unavailable: (value, ctx) =>
+      value === null && ctx.percentCritical !== null && ctx.percentCritical >= CENTRIFUGING_PERCENT_NC_THRESHOLD
+        ? "Centrifuging"
+        : null,
   },
   {
     id: "shoulder_angle_deg",
@@ -95,6 +123,10 @@ export const METRIC_SPECS: MetricSpec[] = [
     format: fixed(1),
     sparkline: true,
     csv: true,
+    unavailable: (value, ctx) =>
+      value === null && ctx.percentCritical !== null && ctx.percentCritical >= CENTRIFUGING_PERCENT_NC_THRESHOLD
+        ? "Centrifuging"
+        : null,
   },
   { id: "centroid_x", group: "Media", label: "Charge centroid X", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[0] ?? null, format: fixed(3), csv: true },
   { id: "centroid_y", group: "Media", label: "Charge centroid Y", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[1] ?? null, format: fixed(3), csv: true },
@@ -105,7 +137,20 @@ export const METRIC_SPECS: MetricSpec[] = [
   // --- Grinding (power draw / collisions / dissipation) -------------------------------------
   { id: "power_draw", group: "Grinding", label: "Power draw", unit: "W/m", value: m("power_draw_w"), format: fixed(2), sparkline: true, csv: true },
   { id: "torque", group: "Grinding", label: "Torque", unit: "N·m/m", value: m("torque_nm"), format: fixed(3), csv: true },
-  { id: "collision_rate", group: "Grinding", label: "Collision rate", unit: "1/s/m", value: m("collision_rate_per_s"), format: fixed(1), csv: true },
+  {
+    id: "collision_rate",
+    group: "Grinding",
+    label: "Collision rate",
+    unit: "1/s/m",
+    value: m("collision_rate_per_s"),
+    format: fixed(1),
+    csv: true,
+    // Impact count scales as 1/k^2 relative to the true (uncoarsened) population (docs/PHYSICS.md
+    // §9), so this reading cannot be compared to a real mill while coarse-graining is active --
+    // hide the row entirely rather than show a number that would be misread as physical.
+    unavailable: (_value, ctx) => coarseGrainingReason(ctx),
+    hideWhenUnavailable: true,
+  },
   { id: "dissipated_power", group: "Grinding", label: "Dissipated power", unit: "W/m", value: m("dissipated_power_w"), format: fixed(2), sparkline: true, csv: true },
 
   // --- Slurry -------------------------------------------------------------------------------

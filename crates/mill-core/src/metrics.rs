@@ -470,12 +470,18 @@ pub fn slurry_pool_depth_at_bottom(fluid: &FluidParticles, drum: &Drum) -> Optio
 /// bounding box (`[-radius_m, radius_m]` on each axis); for each occupied cell the mean dye value
 /// is computed, and the standard Lacey formula `M = (S0^2 - S^2) / (S0^2 - Sr^2)` is applied,
 /// where:
-/// - `S^2` is the variance of those per-cell means (unweighted across occupied cells -- a minor,
-///   documented simplification vs. weighting by cell particle count).
-/// - `S0^2 = p * (1 - p)` is the fully-segregated variance, `p` the overall mean dye fraction.
-/// - `Sr^2 = S0^2 / n_bar` is the fully-randomly-mixed variance, using the average particle count
-///   per *occupied* cell (`n_bar`) as the "samples per cell" term -- the standard approximation
-///   when cell occupancy is not uniform (exact Lacey assumes a fixed sample size per cell).
+/// - `S^2` is the **particle-count-weighted** variance of those per-cell means
+///   (`sum(n_i * (m_i - p)^2) / sum(n_i)`), so a cell holding a single stray particle (routine
+///   near a free surface or in a splash) contributes as little to the reading as its one particle
+///   warrants, rather than as much as a bulk cell holding dozens -- an earlier unweighted version
+///   let sparse outlier cells dominate the variance and understated the mixing index (an external
+///   review finding). `p` (the overall mean dye fraction) is exactly this weighting's mean of the
+///   per-cell means, since every particle is binned into exactly one occupied cell.
+/// - `S0^2 = p * (1 - p)` is the fully-segregated variance.
+/// - `Sr^2 = S0^2 / n_bar` is the fully-randomly-mixed variance, using the particle-count-weighted
+///   mean occupancy `n_bar = sum(n_i^2) / sum(n_i)` (the weighted-variance "effective sample
+///   size") as the "samples per cell" term -- the standard approximation when cell occupancy is
+///   not uniform (exact Lacey assumes a fixed sample size per cell).
 ///
 /// The result is clamped to `[0, 1]` (the raw formula can slightly over/undershoot from sampling
 /// noise). If `S0^2 - Sr^2` is ~0 (e.g. uniform dye with no possible segregation, or on average
@@ -505,27 +511,43 @@ pub fn mixing_index(fluid: &FluidParticles, drum: &Drum) -> Option<f32> {
     let p_mean = total_dye / n as f32;
 
     let mut cell_means = Vec::new();
-    let mut occupied_count_sum = 0u32;
+    let mut cell_counts = Vec::new();
     for idx in 0..dye_sum.len() {
         if count[idx] > 0 {
             cell_means.push(dye_sum[idx] / count[idx] as f32);
-            occupied_count_sum += count[idx];
+            cell_counts.push(count[idx]);
         }
     }
     let n_cells = cell_means.len();
     if n_cells < 2 {
         return None;
     }
-    let mean_of_means: f32 = cell_means.iter().sum::<f32>() / n_cells as f32;
+    // Every particle lands in exactly one (clamped) cell, so the occupied cells' counts sum to
+    // `n` and `p_mean` (`total_dye / n`) is already the particle-count-weighted mean of
+    // `cell_means` -- no separate unweighted `mean_of_means` is needed.
+    let weight_sum = cell_counts.iter().sum::<u32>() as f32;
+    // Particle-count-weighted variance of the per-cell means: a cell with a single stray
+    // particle (routine near a free surface or in a splash) contributes as little to the
+    // reading as its one particle warrants, instead of counting as much as a bulk cell holding
+    // dozens -- the unweighted version this replaces over-counted sparse cells and understated
+    // the mixing index (an external review finding).
     let observed_var: f32 = cell_means
         .iter()
-        .map(|m| (m - mean_of_means).powi(2))
+        .zip(&cell_counts)
+        .map(|(&mean, &n)| n as f32 * (mean - p_mean).powi(2))
         .sum::<f32>()
-        / n_cells as f32;
+        / weight_sum;
 
     let s0_sq = p_mean * (1.0 - p_mean);
-    let avg_per_cell = occupied_count_sum as f32 / n_cells as f32;
-    let sr_sq = s0_sq / avg_per_cell.max(1.0);
+    // Particle-count-weighted mean occupancy (`sum(n_i^2) / sum(n_i)`), the standard "effective
+    // sample size" companion to a weighted variance -- reduces to the previous plain mean
+    // occupancy only when every occupied cell happens to hold the same count.
+    let weighted_avg_per_cell: f32 = cell_counts
+        .iter()
+        .map(|&n| (n as f32) * (n as f32))
+        .sum::<f32>()
+        / weight_sum;
+    let sr_sq = s0_sq / weighted_avg_per_cell.max(1.0);
 
     let denom = s0_sq - sr_sq;
     if denom.abs() < 1e-9 {
@@ -800,6 +822,50 @@ mod tests {
         assert!(
             later > initial,
             "mixing index should have increased under tumbling: {initial} -> {later}"
+        );
+    }
+
+    #[test]
+    fn mixing_index_weights_by_cell_particle_count_not_cell_count() {
+        // A well-mixed bulk (many particles at dye=0.5 in one grid cell) plus two single-particle
+        // "outlier" cells at the segregation extremes (dye=0.0 and dye=1.0). The old unweighted
+        // formula let those two stray particles count as much as the entire bulk cell and read
+        // this as poorly mixed; the particle-count-weighted formula recognises the bulk dominates
+        // and reports a much higher index.
+        use crate::params::LiftersParams;
+
+        let radius_m = 1.0;
+        let n_bulk = 100;
+        let mut x = vec![Vec2::ZERO; n_bulk];
+        let mut dye = vec![0.5f32; n_bulk];
+        // Two single-particle outlier cells, in grid cells far from the bulk's (at the origin).
+        x.push(Vec2::new(-0.99, -0.99));
+        dye.push(0.0);
+        x.push(Vec2::new(0.99, 0.99));
+        dye.push(1.0);
+        let n = x.len();
+        let fluid = FluidParticles {
+            x,
+            v: vec![Vec2::ZERO; n],
+            dye,
+            particle_mass: 1.0,
+            h: 0.01,
+            rest_density: 1000.0,
+        };
+        let drum = Drum::new(
+            radius_m,
+            0.0,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+
+        let m = mixing_index(&fluid, &drum).expect("expected a mixing index");
+        assert!(
+            m > 0.9,
+            "weighted mixing index should recognise the bulk is well-mixed despite two stray \
+             single-particle outlier cells, got {m}"
         );
     }
 

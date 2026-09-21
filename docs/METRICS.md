@@ -19,9 +19,13 @@ after the initial settling transient (roughly `t > 15` s of simulated time).
 
 ### Power draw (W/m), Torque (N·m/m)
 
-The mill's instantaneous mechanical power/torque draw, from the drum wall's own friction work on
-the charge. **Healthy range**: a few hundred to a few thousand W/m depending on fill/speed/lifters;
-zero (or near it) if centrifuging (see `docs/PHYSICS.md` §8, `centrifuging_draws_less_power_than_cascading`).
+The mill's instantaneous mechanical power/torque draw: the drum wall's work against the ball
+charge (friction, plus a lifter face's normal-force work if `lifters.count > 0`) **and** the
+slurry's own viscous drag on the wall, if slurry is enabled (`docs/PHYSICS.md` §8). **Healthy
+range**: a few hundred to a few thousand W/m depending on fill/speed/lifters; zero (or near it) if
+centrifuging (see `docs/PHYSICS.md` §8, `centrifuging_draws_less_power_than_cascading`). With
+slurry enabled, expect a noticeably higher reading than a dry run at the same speed/fill — that
+extra draw is the wall dragging the slurry, not a defect.
 
 ### Dissipated power (W/m)
 
@@ -65,9 +69,33 @@ as-is pending the M6 performance pass creating headroom. A companion **Max ball-
 radius)** reads much smaller with no lifters (~1-2%) but **~31-33% with `lifters.count = 8`** — see
 `docs/PHYSICS.md` §9 for that specific, separately-noted finding.
 
+### True ball count, Simulated balls, Coarse-graining (k), Effective diameter
+
+`docs/PHYSICS.md` §3's mass-preserving substitution: when the true physical ball count exceeds
+`simulation.max_balls`, the solver simulates `Simulated balls` fewer, larger discs (`Effective
+diameter`, scaled by `k`) instead. `k = 1` means coarse-graining is inactive. **The shipped
+defaults are already coarse-grained** (`k ≈ 2.0` at a 1 m drum / 10 mm balls / `max_balls = 600`),
+so this is the common case, not an edge case.
+
+**Collision rate and the impact energy distribution chart are hidden whenever `k > 1`**, with a
+banner explaining why: both are derived from *simulated* impacts, whose count scales as `1/k^2` and
+whose energy scales as `k^2` relative to the true (uncoarsened) population, since a coarse-grained
+ball's mass is `k^2` times a true ball's (`docs/PHYSICS.md` §9). Every other metric on this panel
+(power draw, torque, total kinetic energy, toe/shoulder, overlap fractions) is unaffected, since
+total charge mass is preserved regardless of `k`. Raise `Max balls` above `True ball count` to
+disable coarse-graining and see genuine per-impact statistics.
+
 ---
 
 ## Slurry group
+
+### Mixing index
+
+Lacey mixing index (`0` = fully segregated, `1` = fully mixed) of the dye tracer field, weighted by
+each grid cell's particle count (`docs/PHYSICS.md` §8) — a cell holding a single stray particle
+(routine near a free surface or in a splash) contributes as little to the reading as its one
+particle warrants, rather than as much as a bulk cell holding dozens. An earlier, unweighted version
+let sparse outlier cells dominate the variance and understated the index.
 
 ### Max/mean compression error
 

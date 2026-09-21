@@ -10,6 +10,7 @@ import {
   criticalSpeedRpm,
   effectiveMedia,
   fluidParticleCountEstimate,
+  interstitialFilling,
   percentCriticalOf,
   rpmOf,
   substepDisplacementOverDiameter,
@@ -391,6 +392,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     // film looks like a few oversized blobs rather than a smooth coating once this exceeds ~0.5.
     const fluidDxM = diameterM / 2 / resolution;
     const fluidSpacingVsBall = eff.diameterM > 0 ? fluidDxM / eff.diameterM : 0;
+    const u = interstitialFilling(slurryFill, media);
 
     const rows: [string, string, boolean?][] = [
       ["Critical speed (Nc)", `${criticalSpeedRpm(diameterM).toFixed(1)} rpm`],
@@ -399,6 +401,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       ["Simulated balls (N_sim)", String(eff.ballCount)],
       ["Coarse-graining (k)", eff.scaleFactor.toFixed(3)],
       ["Effective ball diameter", `${(eff.diameterM * 1000).toFixed(2)} mm`],
+      ["Interstitial filling (U)", u.toFixed(3)],
       ["Fluid spacing vs ball diameter", fluidSpacingVsBall.toFixed(2), fluidSpacingVsBall > 1.0],
       ["Est. fluid particles", String(fluidCount)],
       ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.3],

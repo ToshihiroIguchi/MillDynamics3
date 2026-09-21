@@ -174,9 +174,15 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
      `x_i += w_i * d_lambda * n_hat`, `x_j -= w_j * d_lambda * n_hat`, accumulate `lambda_n`
      (computed from the *capped* `C_eff`, so a partially-recovered contact correctly carries less
      normal force this sub-step) for that `(i, j)` pair in `ContactBook`.
-   - Ball-wall/lifter: `C = drum.sdf_world(x_i) - r_i`; same `C_eff` cap; if `C < 0`,
-     `d_lambda = -C_eff / w_i` (wall has `w_wall = 0`, infinite mass), apply
-     `x_i += w_i * d_lambda * n_hat`, accumulate `lambda_n` for ball `i`.
+   - Ball-wall/lifter: `C = drum.sdf_world(x_i, drum_angle_next) - r_i`; same `C_eff` cap; if
+     `C < 0`, `d_lambda = -C_eff / w_i` (wall has `w_wall = 0`, infinite mass), apply
+     `x_i += w_i * d_lambda * n_hat`, accumulate `lambda_n` for ball `i`. `drum_angle_next =
+     drum_angle + drum.omega * dt` -- the drum's angle at the **end** of this sub-step, not its
+     start: balls have already been predicted to `t + dt` (step 1), so the boundary they are
+     tested/projected against must be where the (possibly rotating, lifter-bearing) wall actually
+     is at `t + dt`. Steps 5/6's own `drum.sdf_world`/`wall_velocity` calls use the same
+     `drum_angle_next` for the same reason; an earlier version evaluated all of these against the
+     sub-step's *start* angle, a one-sub-step kinematic lag an external review flagged.
    - **Why the cap.** Recovering a very deep overlap in full, in one iteration, hands step 4 a
      position delta that becomes an unphysically large separation velocity (`Δx/dt`) — the DEM
      half of the fluidised-charge energy-injection bug (ss9/git history). At `dem_iterations = 4`
@@ -201,13 +207,23 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
      sub-step — found via the energy-balance regression test in ss9/git history.
    - Ball-wall: same form (including the immediate velocity sync), with the wall's own
      `wall_velocity` substituted for the "other body"'s velocity and no wall-side rotational term;
-     `media.friction_ball_wall` is the clamp coefficient. The tangential *position* multiplier
-     `d_lambda_t` (not itself an impulse — see ss6's impulse-vs-force distinction) divided by `dt`
-     gives the actual tangential impulse the wall delivered; dotted with the wall's velocity there,
-     that gives the work done against wall friction this contact (`wall_work_j`, summed over all
-     ball-wall contacts) — the wall's *normal* impulse does no work since the wall's velocity is
-     purely tangential. An earlier version omitted the `/ dt` here and under-reported power draw by
-     a factor of `dt` (240x at this project's default sub-step) relative to `dissipated_energy_j`.
+     `media.friction_ball_wall` is the clamp coefficient. `wall_velocity` is sampled at the
+     **contact point** (`x_i - r*n_hat`), not the ball's centre — the wall is rigid but not a point,
+     so its velocity varies across the ball's own radius, and the contact point is the only
+     location where "zero relative tangential slip" is meaningful; sampling at the centre instead
+     (an earlier version's behaviour, an external review flagged) undercounted the wall's tangential
+     speed by `omega_ball * r`, reading a perfectly rolling ball as slipping. The tangential
+     *position* multiplier `d_lambda_t` (not itself an impulse — see ss6's impulse-vs-force
+     distinction) divided by `dt` gives the actual tangential impulse the wall delivered; dotted
+     with the wall's (contact-point) velocity, that gives the work done against wall friction this
+     contact. An earlier version omitted the `/ dt` here and under-reported power draw by a factor
+     of `dt` (240x at this project's default sub-step) relative to `dissipated_energy_j`.
+     **`wall_work_j`** additionally sums the wall's *normal* impulse dotted with its own
+     contact-point velocity (`(lambda_n/dt) * n_hat.dot(v_wall)`): zero for a smooth cylindrical
+     wall, whose normal is always radial while its velocity is purely tangential there, but nonzero
+     for a lifter face, whose normal has a large circumferential component and does real work
+     lifting the charge — a contribution an earlier version omitted entirely, materially
+     under-reporting power draw/torque on a lifters-enabled mill (an external review finding).
    - Velocities are reconstructed a second time from the total position/orientation change once
      more (redundant with the per-contact sync above in exact arithmetic; kept as a cheap
      self-healing resync against float summation-order drift, same as step 4).
@@ -219,9 +235,16 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
      `DemStepStats::collision_count`, with impact energy `E = 0.5 * (mass/2) * v_n_pre^2` (reduced
      mass `mass/2` for two equal masses) binned into `impact_energy_histogram`. Otherwise it's a
      resting/sliding contact and `e = 0`. Either way the target relative normal velocity is
-     `target = max(0, -e * v_n_pre)`, and the *actual* current relative normal velocity `v_n_now`
-     is driven to that target by an impulse split by inverse mass — **in both directions**, not
-     only when `v_n_now` falls short of `target`.
+     `target = max(0, -e * v_n_pre, v_n_pre)`, and the *actual* current relative normal velocity
+     `v_n_now` is driven to that target by an impulse split by inverse mass — **in both
+     directions**, not only when `v_n_now` falls short of `target`. The third term in `target`
+     (`max(..., v_n_pre)`) floors it at the pair's own pre-solve separation speed: without it, a
+     pair that entered this step *already separating* faster than `-e * v_n_pre` (e.g. from step
+     3's depenetration) would be decelerated below the speed it already had — an artificial
+     attraction between dry rigid discs, violating the one-sided normal-force (Signorini)
+     condition, which an external review flagged. This floor is inert for an approaching pair
+     (`v_n_pre <= 0`, so `v_n_pre` itself is `<= 0` and never binds), so it does not reopen the
+     energy-injection bug the bidirectional pass below exists to close.
    - Ball-wall: same, with the wall's "infinite mass" (reduced mass is just the ball's own,
      `E = 0.5 * mass * v_n_pre^2` for a fresh impact), `e = media.restitution_ball_wall`.
    - **Why bidirectional.** Step 3's depenetration recovers overlap by moving positions; step 4
@@ -240,7 +263,11 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
    angular deceleration is capped at `max_delta_omega = media.rolling_friction *
    (total_lambda_n/dt) * r / inertia * dt`, applied toward zero and clamped so it cannot overshoot
    past `omega = 0` (i.e. cannot reverse the sign of `omega` in one sub-step) — a dimensionless
-   torque-coefficient model of rolling friction.
+   torque-coefficient model of rolling friction. **Known simplification** (ss9): this damps every
+   ball's *world* `omega` toward zero rather than the *relative* spin at each contact, so it
+   applies no reaction torque to a ball-ball contact's partner (angular momentum is not conserved)
+   and, for a ball-wall contact, targets zero rather than `drum.omega` (fighting, rather than
+   assisting, a ball correctly rolling without slipping on a rotating drum).
 
 `DemStepStats` (per-substep diagnostics, all per-metre-of-mill-depth) returned by this function:
 `wall_work_j`, `collision_count`, `impact_energy_histogram` (12 log-spaced bins from `1e-6` J to
@@ -322,12 +349,20 @@ solve. `s_corr` artificial pressure is implemented but disabled.
      tunable cohesion term (ss6.1a step 3.6a, `slurry.surface_tension_n_m`), not an artefact of
      this constraint.
 4. **Ball overlap projection** (coupling step 1 — see ss6.1).
-5. **Boundary projection** (position only): for any particle with `drum.sdf_world(x) = d < 0`,
-   `x += -d * normal`; marks the particle `touched_wall` for the no-slip blend below.
+5. **Boundary projection** (position only): for any particle with
+   `drum.sdf_world(x, drum_angle_next) = d < 0`, `x += -d * normal`; marks the particle
+   `touched_wall` for the no-slip blend below. Uses `drum_angle_next = drum_angle + drum.omega *
+   dt` (the drum's angle at the **end** of this sub-step), not `drum_angle`, since particles have
+   already been predicted to `t + dt` in step 1 — the same one-sub-step lag fix as `dem.rs`'s
+   `DemState::step_with_external_forces` (ss4.2).
 6. **Velocity reconstruction**: `v = (x - x0) / dt` for every particle (`x0` = pre-predict
    position).
 7. **No-slip wall blending**: for particles marked `touched_wall`, `v = (1-beta)*v + beta*v_wall`
-   (`v_wall = drum.wall_velocity(x)`), `beta = slurry.wall_no_slip` clamped to `[0,1]`.
+   (`v_wall = drum.wall_velocity(x)`), `beta = slurry.wall_no_slip` clamped to `[0,1]`. The implied
+   impulse this delivers to each such particle (`mass * (v_new - v_old)`), dotted with the wall's
+   own velocity there, is summed into `FluidStepStats::wall_work_j` — the fluid-side counterpart of
+   `dem::DemStepStats::wall_work_j`, folded into `Simulation::power_draw_w`/`torque_nm` (ss8) so a
+   wet mill's motor load reflects viscous drag on the slurry, not only ball-wall friction.
 8. **Ball viscous drag** (coupling step 2 — see ss6.2).
 9. **Buoyancy** (coupling step 3 — see ss6.3).
 10. **Implicit Newtonian viscosity** (`mu = slurry.viscosity_pa_s`; skipped entirely, at zero
@@ -604,12 +639,21 @@ own step-2 neighbour grid at the ball's position:
 ```
 rho_local = sum_j m_j * W_poly6(|x_ball - x_j|^2, h)   (over nearby fluid particles j)
 rho_eff = min(rho_local, rest_density)
-impulse_on_ball = (0, -rho_eff * (pi * r^2) * GRAVITY * dt)   (acts through the centroid: no torque)
+g_eff = (0, GRAVITY) + omega^2 * x_ball        (apparent gravity in the fluid's rotating frame)
+impulse_on_ball = -rho_eff * (pi * r^2) * g_eff * dt   (acts through the centroid: no torque)
 ```
 
 Clamping to `rest_density` avoids over-buoyancy from a locally compacted pocket and tapers smoothly
 to zero as a ball nears the free surface (lower sampled density there) instead of an on/off cutoff.
-The reaction is applied immediately as a velocity change split across the contributing fluid
+`g_eff` is the general Archimedes formula `F = -rho * V * g_eff` applied with the *apparent* gravity
+a slurry parcel in near solid-body rotation with the drum actually feels: its own real acceleration
+is centripetal (`-omega^2 * x_ball`, `x_ball` measured from the drum's centre, the world origin --
+see `Drum::wall_velocity`), so `g_eff = g_vec - a_fluid = g_vec + omega^2 * x_ball`. At `omega = 0`
+this reduces exactly to the plain world-vertical expression; away from zero it adds the inward
+(centripetal) buoyancy a real rotating slurry pool exerts, which an earlier version omitted
+entirely -- every ball, regardless of density, was buoyed only against gravity, never pushed toward
+the drum's axis by the centrifugal pressure gradient that dominates near the wall at speed. The
+reaction is applied immediately as a velocity change split across the contributing fluid
 particles, weighted by each one's share `w_j / rho_local` of the sampled local density — this must
 run after step 6's velocity reconstruction, not before, or the reconstruction would overwrite it.
 This mechanism did not exist in the original coupling design (`docs/PLAN.md` ss3.4 describes
@@ -744,11 +788,15 @@ state after calling `compute`:
 - `power_draw_w`, `torque_nm`, `collision_rate_per_s`, `dissipated_power_w`,
   `impact_energy_histogram` (`ImpactEnergyHistogram { bin_edges_j, counts_per_s }`): EMA-smoothed
   (time constant `GRINDING_STATS_EMA_TAU_S = 1.0` s, i.e. `alpha = 1 - exp(-sub_dt/tau)` applied
-  every sub-step in `Simulation::update_grinding_stats`) from `DemStepStats`. `power_draw_w =
-  wall_work_j / sub_dt`; `torque_nm = power_draw_w / omega` (0 when `|omega| <= 1e-6`, since torque
-  is undefined rather than infinite at zero rotation); `collision_rate_per_s =
-  collision_count/sub_dt`; `dissipated_power_w = dissipated_energy_j/sub_dt`; each histogram bin's
-  EMA is `count/sub_dt`.
+  every sub-step in `Simulation::update_grinding_stats`) from `DemStepStats` plus, for
+  `power_draw_w`/`torque_nm` only, `FluidStepStats::wall_work_j` (ss6). `power_draw_w =
+  (dem_stats.wall_work_j + fluid_stats.wall_work_j) / sub_dt` -- the drum's total work rate against
+  both the ball charge (friction, and lifter normal force) and the slurry's own viscous drag on the
+  wall, not ball-wall friction alone; `torque_nm = power_draw_w / omega` (0 when `|omega| <= 1e-6`,
+  since torque is undefined rather than infinite at zero rotation); `collision_rate_per_s =
+  collision_count/sub_dt`; `dissipated_power_w = dissipated_energy_j/sub_dt` (DEM-side only -- see
+  ss9's note on why it excludes fluid-side dissipation); each histogram bin's EMA is
+  `count/sub_dt`.
 - `coupling_clamp_hits`: sum of `CouplingImpulses::clamp_hits` over every sub-step of the most
   recent `Simulation::step` call — reset each call, **not** EMA-smoothed (meant to read as "did
   this happen just now", not a smoothed rate).
@@ -765,6 +813,21 @@ state after calling `compute`:
 
 ## 9. Known limitations
 
+- **Rolling resistance (ss4.2 step 7) damps world `omega` toward zero, not the relative spin at
+  each contact.** It applies no reaction torque to a ball-ball contact's partner (so it does not
+  conserve angular momentum) and, for a ball-wall contact, targets zero rather than `drum.omega`
+  (so it fights, rather than assists, a ball correctly rolling without slipping on a rotating
+  drum). A per-contact, momentum-conserving, wall-frame-aware rewrite was tried (an external
+  review finding, symmetric ball-ball correction plus a `drum.omega`-referenced wall correction)
+  and reverted: it destabilised this crate's core cataracting/cascading-density regression tests
+  (`dem::tests::a_cascading_charge_stays_dense`,
+  `metrics::tests::compression_error_stays_bounded_under_violent_lifter_cataracting`), which guard
+  against the much more severe fluidised-charge energy-injection bug this solver was extensively
+  tuned against (`MAX_RECOVERY_FRACTION`, step 6's bidirectional restitution). At this project's
+  default `rolling_friction = 0.01` the simplification's practical effect is small (friction, step
+  5, is what actually drives a resting/rolling ball toward the wall's tangential speed; rolling
+  resistance only trims the residual spin on top), but revisiting it needs dedicated re-tuning
+  against those regressions, not a drive-by correctness fix.
 - **Continuous collision detection covers the wall/lifters, not ball-ball.**
   `Drum::toi_swept` (ss2) clamps a ball's predicted advance to its geometric time-of-impact against
   the wall/lifters before the non-penetration solve runs, gated to engage only when the predicted
@@ -824,3 +887,32 @@ state after calling `compute`:
   viscosity (ss5.3) also removes real mechanical energy from the balls (ss6.2's drag) that never
   appears in this metric. A coupled steady-state run legitimately shows
   `dissipated_power_w < power_draw_w`; this is not a missing-energy bug.
+- **Cohesion/adhesion accelerations are calibrated against `|g|`, not a first-principles surface-
+  tension unit conversion.** `COHESION_ACCEL_FACTOR`/`ADHESION_ACCEL_FACTOR` (pbf.rs ss6.1a)
+  express each mechanism's peak acceleration as a multiple of gravitational acceleration, so a
+  Bond-number similarity argument (`Bo = rho*g*L^2/gamma`) would not survive an arbitrary change of
+  `g`. `GRAVITY` is a compile-time constant in this crate (ss1), so no inconsistency can arise in
+  practice; this is a calibration choice, not a bug, but it means these two knobs are not
+  independently portable to a different gravity without re-deriving their scale.
+- **The coupling impulse clamp (ss6.4, `pbf.rs` step 8) is not momentum-conserving.** A ball's
+  impulse is clamped for stability *after* the fluid has already received the full (unclamped)
+  reaction, so each clamp hit loses momentum from the system as a whole -- the same trade-off the
+  fluid speed clamp (ss6.4) already makes deliberately. `coupling_clamp_hits` is surfaced as a
+  metric precisely so a run where this matters (persistently nonzero) is visible; a healthy run
+  keeps it rare (`coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`).
+- **2D areal packing (`packing_fraction_2d`, default `0.82`) is not 3D voidage.** Random close
+  packing of equal discs in 2D is denser (~18% void fraction) than random close packing of equal
+  spheres in 3D (~36-40% void fraction), so the same `slurry.fill_fraction` corresponds to a much
+  higher *interstitial* filling `U = slurry_area / (media.fill_fraction * (1 - packing_fraction_2d)
+  * drum_area)` than the equivalent 3D mill, and the simulated slurry pool reads correspondingly
+  deeper than a real one at the same nominal fill fraction. This is an unavoidable consequence of
+  the project's 2D cross-section scope (see the entry above), not a parameter-tuning bug; the params
+  panel surfaces `U` directly (docs/PARAMETERS.md) so its magnitude is visible rather than hidden
+  inside the fill-fraction number.
+- **Coarse-graining distorts per-impact statistics.** `Collision rate` and the impact-energy
+  histogram (ss4.2, ss8) are derived from *simulated* impacts, whose count scales as `1/k^2` and
+  whose energy scales as `k^2` relative to the true (uncoarsened) population (ss3's mass-preserving
+  substitution). Bulk quantities (power draw, torque, total kinetic energy, toe/shoulder) are
+  unaffected, since total charge mass is preserved regardless of `k`. The UI hides these two
+  readings, with an explanatory note, whenever `coarse_graining_factor > 1` (docs/METRICS.md)
+  rather than showing a number that cannot be compared to a real mill.
