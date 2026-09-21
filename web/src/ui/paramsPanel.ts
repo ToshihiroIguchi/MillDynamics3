@@ -99,12 +99,19 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
   function setStatus(state: "applied" | "edited" | "error"): void {
     status.classList.remove("is-applied", "is-edited", "is-error");
+    // Header itself (not just the status span) picks up the highlight: the header is
+    // `position: sticky` so it stays on-screen while the panel is scrolled, but a small
+    // grey-on-dark status span is still easy to miss in peripheral vision while typing further
+    // down -- a background tint on the whole sticky bar is not (user feedback: the Apply
+    // button/status is easy to lose track of while editing fields lower in the panel).
+    header.classList.remove("is-edited");
     if (state === "applied") {
       status.textContent = "Applied";
       status.classList.add("is-applied");
     } else if (state === "edited") {
       status.textContent = "Edited — not applied";
       status.classList.add("is-edited");
+      header.classList.add("is-edited");
     } else {
       status.textContent = "Error";
       status.classList.add("is-error");
@@ -121,6 +128,32 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   const detailsByGroup = new Map<string, HTMLDetailsElement>();
   let currentParams: ParamsJson = {};
   let mediaWarn: HTMLParagraphElement | null = null;
+  let presetSelect: HTMLSelectElement | null = null;
+  let presetNote: HTMLParagraphElement | null = null;
+
+  /**
+   * Resets the Quality preset dropdown to "(custom)" once `simulation.max_balls`/`resolution` no
+   * longer match the selected preset's values -- e.g. the user picked "Accuracy" and then hand-
+   * edited "Max balls" from 600 to 500. Without this the dropdown kept showing "Accuracy" after a
+   * manual edit made it wrong (reported by an external review: the displayed selection and the
+   * actual param values could silently disagree).
+   */
+  function syncPresetSelectWithFields(): void {
+    if (!presetSelect || presetSelect.value === "") return;
+    const preset = QUALITY_PRESETS.find((p) => p.id === presetSelect!.value);
+    if (!preset) return;
+    const maxBallsInput = inputs.get("simulation.max_balls") as HTMLInputElement | undefined;
+    const resolutionInput = inputs.get("simulation.resolution") as HTMLInputElement | undefined;
+    const matches =
+      maxBallsInput !== undefined &&
+      resolutionInput !== undefined &&
+      Number(maxBallsInput.value) === preset.maxBalls &&
+      Number(resolutionInput.value) === preset.resolution;
+    if (!matches) {
+      presetSelect.value = "";
+      if (presetNote) presetNote.hidden = true;
+    }
+  }
 
   for (const group of GROUPS) {
     const details = document.createElement("details");
@@ -143,7 +176,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       presetLabel.textContent = "Quality preset";
       presetRow.appendChild(presetLabel);
 
-      const presetSelect = document.createElement("select");
+      presetSelect = document.createElement("select");
       const placeholderOption = document.createElement("option");
       placeholderOption.value = "";
       placeholderOption.textContent = "(custom)";
@@ -157,7 +190,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       presetRow.appendChild(presetSelect);
       details.appendChild(presetRow);
 
-      const presetNote = document.createElement("p");
+      presetNote = document.createElement("p");
       presetNote.className = "params-note";
       presetNote.hidden = true;
       details.appendChild(presetNote);
@@ -168,23 +201,27 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       // see and confirm the derived-values readout (fluid particle count, fluid spacing vs. ball
       // diameter) below before committing to a reset.
       presetSelect.addEventListener("change", () => {
-        const preset = QUALITY_PRESETS.find((p) => p.id === presetSelect.value);
+        const preset = QUALITY_PRESETS.find((p) => p.id === presetSelect!.value);
         if (!preset) {
-          presetNote.hidden = true;
+          if (presetNote) presetNote.hidden = true;
           return;
         }
         const maxBallsInput = inputs.get("simulation.max_balls");
         const resolutionInput = inputs.get("simulation.resolution");
-        if (maxBallsInput) {
-          maxBallsInput.value = String(preset.maxBalls);
-          maxBallsInput.dispatchEvent(new Event("input", { bubbles: true }));
+        // Both values are set *before* either "input" event is dispatched: the generic field
+        // listener's `syncPresetSelectWithFields` call (added for the dropdown-desync fix above)
+        // compares both fields against the preset every time either one changes, so dispatching
+        // them one at a time would see max_balls already updated but resolution still stale,
+        // read that as a mismatch, and immediately reset the dropdown back to "(custom)" right
+        // after this handler had just set it.
+        if (maxBallsInput) maxBallsInput.value = String(preset.maxBalls);
+        if (resolutionInput) resolutionInput.value = String(preset.resolution);
+        if (maxBallsInput) maxBallsInput.dispatchEvent(new Event("input", { bubbles: true }));
+        if (resolutionInput) resolutionInput.dispatchEvent(new Event("input", { bubbles: true }));
+        if (presetNote) {
+          presetNote.textContent = preset.note;
+          presetNote.hidden = false;
         }
-        if (resolutionInput) {
-          resolutionInput.value = String(preset.resolution);
-          resolutionInput.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        presetNote.textContent = preset.note;
-        presetNote.hidden = false;
       });
     }
 
@@ -229,6 +266,9 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       input.addEventListener("input", () => {
         setStatus("edited");
         refreshDerived();
+        if (field.path === "simulation.max_balls" || field.path === "simulation.resolution") {
+          syncPresetSelectWithFields();
+        }
       });
       inputs.set(field.path, input);
       rowsByPath.set(field.path, row);

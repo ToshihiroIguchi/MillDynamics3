@@ -88,8 +88,11 @@ impl MillParams {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if !(self.diameter_m > 0.05 && self.diameter_m < 20.0) {
-            return Err("mill.diameter_m must be in (0.05, 20.0)".into());
+        // Lower bound lets small bench/lab jar mills (down to ~3 cm) through; nothing in dem.rs,
+        // pbf.rs, or coupling.rs assumes an absolute length scale (all geometry is SI and
+        // dimensionless ratios), so a smaller drum is not a distinct physics regime here.
+        if !(self.diameter_m > 0.02 && self.diameter_m < 20.0) {
+            return Err("mill.diameter_m must be in (0.02, 20.0)".into());
         }
         if !(self.speed_value.is_finite() && self.speed_value >= 0.0) {
             return Err("mill.speed_value must be finite and >= 0".into());

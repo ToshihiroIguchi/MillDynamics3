@@ -109,7 +109,7 @@ test("an out-of-range value shows a visible error without freezing the simulatio
 
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
-  // Drum diameter (schema min: 0.1) is in the "Mill" group, open by default.
+  // Drum diameter (schema min: 0.03) is in the "Mill" group, open by default.
   const diameterInput = await openField(page, "Drum diameter (m)");
   await diameterInput.fill("0");
 

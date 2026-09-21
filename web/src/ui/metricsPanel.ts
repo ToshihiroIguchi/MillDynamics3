@@ -83,14 +83,28 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
   ctx.textAlign = "left";
   ctx.fillText(`${maxCount.toFixed(1)}/s`, padLeft, 10);
 
-  ctx.textAlign = "center";
+  // Decade tick labels: anchored `center` except within one label-width of either canvas edge,
+  // where centering would draw half the text past the edge and clip it (this was most visible on
+  // the rightmost label, e.g. "1e+1" losing its last character -- reported by an external
+  // review). Switching anchor near the edges keeps every label fully inside the canvas instead.
   for (let i = 0; i < edges.length; i++) {
     const edge = edges[i];
     if (edge === undefined || edge <= 0) continue;
     const log10 = Math.log10(edge);
     if (Math.abs(log10 - Math.round(log10)) > 1e-6) continue;
+    const label = edge.toExponential(0);
     const x = padLeft + i * barW;
-    ctx.fillText(edge.toExponential(0), x, HIST_CSS_HEIGHT - 2);
+    const halfWidth = ctx.measureText(label).width / 2;
+    if (x + halfWidth > HIST_CSS_WIDTH) {
+      ctx.textAlign = "right";
+      ctx.fillText(label, HIST_CSS_WIDTH, HIST_CSS_HEIGHT - 2);
+    } else if (x - halfWidth < 0) {
+      ctx.textAlign = "left";
+      ctx.fillText(label, 0, HIST_CSS_HEIGHT - 2);
+    } else {
+      ctx.textAlign = "center";
+      ctx.fillText(label, x, HIST_CSS_HEIGHT - 2);
+    }
   }
 }
 
@@ -102,6 +116,15 @@ const COUPLING_CLAMP_HITS_WARN_THRESHOLD = 0;
 const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
 const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
 const MAX_BALL_OVERLAP_WARN_THRESHOLD = 0.5;
+
+// Toe/shoulder angle read `null` (rendered as a bare "-") whenever the charge has no substantial
+// gap to measure a leading/trailing edge from -- physically correct (metrics.rs's
+// `charge_toe_shoulder`, `CENTRIFUGE_GAP_THRESHOLD_RAD`) but, without a reason attached, a "-"
+// alone reads as a broken readout rather than an expected state at high speed (reported by an
+// external review). Centrifuging (media pinned to the wall, no free-fall/cascading region) is by
+// far the common cause once %Nc is at or above 100, so that's what these two rows say instead.
+const CENTRIFUGING_EXPLAINABLE_IDS = new Set(["toe_angle_deg", "shoulder_angle_deg"]);
+const CENTRIFUGING_PERCENT_NC_THRESHOLD = 100;
 
 const WARN_THRESHOLDS = new Map<string, number>([
   ["coupling_clamp_hits", COUPLING_CLAMP_HITS_WARN_THRESHOLD],
@@ -233,7 +256,12 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       const value = raw === undefined ? null : raw;
       const span = valueEls.get(spec.id);
       if (span) {
-        const text = value === null ? "-" : spec.format ? spec.format(value) : String(value);
+        const centrifuging =
+          value === null &&
+          CENTRIFUGING_EXPLAINABLE_IDS.has(spec.id) &&
+          ctx.percentCritical !== null &&
+          ctx.percentCritical >= CENTRIFUGING_PERCENT_NC_THRESHOLD;
+        const text = centrifuging ? "Centrifuging" : value === null ? "-" : spec.format ? spec.format(value) : String(value);
         if (span.textContent !== text) span.textContent = text;
       }
 

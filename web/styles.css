@@ -106,21 +106,25 @@ body.params-collapsed .params-panel {
   z-index: 10;
 }
 
-.toolbar button {
+.toolbar-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
   background: #1c2129;
   color: #e6e9ef;
   border: 1px solid #3a4048;
   border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 13px;
+  padding: 0;
   cursor: pointer;
 }
 
-.toolbar button:hover {
+.toolbar-icon-btn:hover {
   background: #262d38;
 }
 
-.toolbar button[aria-pressed="false"] {
+.toolbar-icon-btn[aria-pressed="false"] {
   color: #9aa3b0;
 }
 
@@ -136,14 +140,82 @@ body.params-collapsed .params-panel {
   padding: 6px 10px;
   border-radius: 4px;
   pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 /* Unmissable, not a subtle number: this simulator is not running at real time right now (see
-   ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). */
+   ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). Applied to the whole HUD backdrop so the
+   shortfall is visible even at a glance, not just when reading the speed line's text. */
 .hud-slow-motion {
   color: #ffd27a;
   background: rgba(64, 40, 12, 0.85);
   font-weight: 600;
+}
+
+.hud-speed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Graphical speed indicator, alongside (not instead of) the text figure: a status dot plus a
+   proportional bar for the achieved/required sub-step rate, so a slowdown reads at a glance
+   rather than requiring the "0.37x" figure to be parsed (user feedback). */
+.hud-speed-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5fd97a;
+  flex-shrink: 0;
+}
+
+.hud-speed-slow .hud-speed-dot {
+  background: #ffb648;
+  animation: hud-speed-dot-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes hud-speed-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.hud-speed-bar {
+  display: inline-block;
+  width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.hud-speed-bar-fill {
+  display: block;
+  height: 100%;
+  background: #5fd97a;
+  transition: width 0.2s ease-out;
+}
+
+.hud-speed-slow .hud-speed-bar-fill {
+  background: #ffb648;
+}
+
+.hud-speed-text {
+  white-space: nowrap;
+}
+
+/* Media-substitution badge (only shown while coarse-graining is active, ui/hud.ts) -- keeps the
+   fact that the simulated ball size differs from the entered one visible on the main screen even
+   with the params panel collapsed. */
+.hud-media {
+  color: #ffd27a;
 }
 
 .params-form {
@@ -160,6 +232,15 @@ body.params-collapsed .params-panel {
   padding: 12px;
   background: #12161c;
   border-bottom: 1px solid #3a4048;
+  transition: background 0.15s ease-out;
+}
+
+/* Tints the whole sticky header (not just the small status span) while there are unapplied
+   edits, so the fact that Apply is waiting stays noticeable in peripheral vision even while
+   scrolled down and editing fields further below (ui/paramsPanel.ts's `setStatus`). */
+.params-panel-header.is-edited {
+  background: rgba(64, 40, 12, 0.85);
+  border-bottom-color: #e8a33d;
 }
 
 .params-panel-header button {
@@ -189,6 +270,7 @@ body.params-collapsed .params-panel {
 
 .params-status.is-edited {
   color: #e8a33d;
+  font-weight: 600;
 }
 
 .params-status.is-error {

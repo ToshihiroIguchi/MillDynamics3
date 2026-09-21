@@ -6,7 +6,7 @@ This reference documents every user-facing simulation parameter. The table data 
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
-| `mill.diameter_m` | Drum diameter | m | 1.0 | 0.1–5 | 0.05 | Inner drum diameter. Validation range is (0.05, 20.0) m SI. |
+| `mill.diameter_m` | Drum diameter | m | 1.0 | 0.03–5 | 0.01 | Inner drum diameter; the low end covers small bench/lab jar mills (~3 cm). Validation range is (0.02, 20.0) m SI. |
 | `mill.speed_mode` | Speed mode | — | `rpm` | `percent_critical` / `rpm` | — | Whether speed is specified as absolute rpm or percentage of critical speed. |
 | `mill.speed_value` | Speed | — | 30.0 | 0–300 | 1 | Rotation speed: interpretation depends on `speed_mode`. Default (~70% Nc for the default 1.0 m drum). |
 | `mill.direction` | Direction | — | `counter_clockwise` | `counter_clockwise` / `clockwise` | — | Drum rotation direction viewed from the standard right-handed 2D frame (+x right, +y up). |

@@ -21,7 +21,9 @@ fails twice or the problem is numerical/physical.
 
 ## Project summary
 2D cross-section tumbling ball mill simulator: DEM balls + PBF slurry, Rust → WASM, Vite + TS
-frontend, Canvas 2D, native <dialog> modal for parameters. Default drum wall has **no lifters**.
+frontend, Canvas 2D, a persistent left-side parameters panel (`<aside class="params-panel">`,
+`web/src/ui/paramsPanel.ts`; replaced the earlier `<dialog>` modal). Default drum wall has
+**no lifters**.
 See docs/PLAN.md, docs/PHYSICS.md, docs/PARAMETERS.md.
 
 ## Repository
