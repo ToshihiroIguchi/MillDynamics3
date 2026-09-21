@@ -4,10 +4,11 @@ A browser-based simulator of a tumbling ball mill cross-section: grinding media 
 modeled as position-based (XPBD) rigid discs, and a viscous slurry modeled with Position Based Fluids (PBF),
 coupled two-way with buoyancy, viscous drag, and Akinci-style cohesion/adhesion. The simulation core is written in Rust
 and compiled to WebAssembly; the frontend is a framework-free Vite + TypeScript app rendering to Canvas 2D.
-Runs at real time (>= 1.0x) at the default "Realtime" quality preset; two coarser-grained alternatives
-(Balanced, Accuracy) trade that speed for fidelity -- see `docs/PARAMETERS.md`'s quality-preset table and
-`docs/PERF.md` for the measured trade-off each one makes. The HUD always reports the actually-achieved
-speed, not just the setting, and reads unmissably ("SLOW MOTION") whenever it falls behind.
+Targets real time (>= 1.0x) at the default "Realtime" quality preset on typical desktop hardware; two
+coarser-grained alternatives (Balanced, Accuracy) trade that speed for fidelity -- see
+`docs/PARAMETERS.md`'s quality-preset table and `docs/PERF.md` for the measured trade-off each one makes.
+The HUD always reports the actually-achieved speed, not just the setting, and a "SLOW MOTION" banner
+appears unmissably whenever the achieved rate falls behind.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the full design and milestone plan, and
 [`CLAUDE.md`](CLAUDE.md) for project conventions.

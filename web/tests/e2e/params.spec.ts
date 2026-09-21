@@ -80,6 +80,30 @@ test("applying an off-step value round-trips through the WASM core", async ({ pa
   await expect(densityInput).toHaveValue("7850");
 });
 
+test("applying a hot-appliable (resetRequired: false) field shows Applied, not a stuck Edited status", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.locator(".hud", { hasText: /rpm/ }).waitFor();
+
+  // Slurry viscosity (schema.ts: resetRequired: false) is in the "Slurry" group, collapsed by
+  // default. This field hot-applies via "setParams" (no "ready" reply from the worker), which is
+  // exactly the path that used to leave the status indicator stuck on "Edited -- not applied"
+  // even though the apply succeeded (main.ts never called paramsPanel.setParams() on that path).
+  const viscosityInput = await openField(page, "Viscosity (Pa·s)");
+  await viscosityInput.fill("12.5");
+
+  const status = page.locator(".params-status");
+  await expect(status).toHaveText("Edited — not applied");
+
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+
+  await expect(status).toHaveText("Applied");
+  await expect(status).toHaveClass(/is-applied/);
+  await expect(status).not.toHaveClass(/is-edited/);
+});
+
 test("an out-of-range value shows a visible error without freezing the simulation", async ({ page }) => {
   await page.goto("/");
 

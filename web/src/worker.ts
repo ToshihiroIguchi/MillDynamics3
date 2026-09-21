@@ -198,7 +198,11 @@ async function boot(initialParams?: ParamsJson): Promise<void> {
     // requirement rather than claiming a fictitious 1x.
     postFrame(sim, 1, 0, 1 / sim.fixedSubDt());
   } catch (err) {
-    post({ type: "error", message: String(err) });
+    // Leaves `sim` as `null`, but this is not a permanent freeze: "init" messages are not gated
+    // on `sim` being non-null, so the toolbar's Reset button (main.ts, wired to `{ type: "init",
+    // params: state.params ?? undefined }`) retries `boot()` and can recover. Say so, since the
+    // banner is otherwise the only thing the user sees and nothing else tells them Reset helps.
+    post({ type: "error", message: `${String(err)} Press Reset to retry.` });
   }
 }
 
