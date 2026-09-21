@@ -232,7 +232,7 @@ body.params-collapsed .params-panel {
   padding: 12px;
   background: #12161c;
   border-bottom: 1px solid #3a4048;
-  transition: background 0.15s ease-out;
+  transition: background 0.15s ease-out, border-color 0.15s ease-out;
 }
 
 /* Tints the whole sticky header (not just the small status span) while there are unapplied
@@ -241,6 +241,15 @@ body.params-collapsed .params-panel {
 .params-panel-header.is-edited {
   background: rgba(64, 40, 12, 0.85);
   border-bottom-color: #e8a33d;
+}
+
+/* Brief confirmation flash when an apply/revert settles to "applied" -- same peripheral-vision
+   reasoning as .is-edited above, but green (success) instead of orange (pending). Fades out via
+   the base rule's `transition` when ui/paramsPanel.ts's `setStatus` removes the class 600ms
+   later. */
+.params-panel-header.is-applied-flash {
+  background: rgba(20, 60, 30, 0.85);
+  border-bottom-color: #5fc97c;
 }
 
 .params-panel-header button {
@@ -253,8 +262,13 @@ body.params-collapsed .params-panel {
   cursor: pointer;
 }
 
-.params-panel-header button:hover {
+.params-panel-header button:hover:not(:disabled) {
   background: #262d38;
+}
+
+.params-panel-header button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .params-status {
@@ -275,6 +289,11 @@ body.params-collapsed .params-panel {
 
 .params-status.is-error {
   color: #e8546a;
+  font-weight: 600;
+}
+
+.params-status.is-applying {
+  color: #5b9cd9;
   font-weight: 600;
 }
 

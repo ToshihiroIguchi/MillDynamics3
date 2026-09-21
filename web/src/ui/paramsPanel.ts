@@ -97,8 +97,16 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   header.append(applyBtn, revertBtn, status);
   form.appendChild(header);
 
-  function setStatus(state: "applied" | "edited" | "error"): void {
-    status.classList.remove("is-applied", "is-edited", "is-error");
+  // Tracks whether setStatus() has ever run before -- guards the "applied" flash (below) so it
+  // doesn't fire on the very first setParams() call during panel initialization, only on later
+  // transitions that represent an actual user-triggered apply/revert settling.
+  let statusInitialized = false;
+  // Timeout id for the header's brief "applied" flash, so a rapid second "applied" transition
+  // (e.g. two quick hot-applies) restarts the fade instead of leaving two overlapping timeouts.
+  let appliedFlashTimeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  function setStatus(state: "applied" | "edited" | "error" | "applying"): void {
+    status.classList.remove("is-applied", "is-edited", "is-error", "is-applying");
     // Header itself (not just the status span) picks up the highlight: the header is
     // `position: sticky` so it stays on-screen while the panel is scrolled, but a small
     // grey-on-dark status span is still easy to miss in peripheral vision while typing further
@@ -108,14 +116,30 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     if (state === "applied") {
       status.textContent = "Applied";
       status.classList.add("is-applied");
+      // Brief flash on the header to confirm the apply landed -- same peripheral-vision reasoning
+      // as the "is-edited" tint above, but skipped on the very first call (initial panel
+      // population before the user has done anything).
+      if (statusInitialized) {
+        clearTimeout(appliedFlashTimeoutId);
+        header.classList.add("is-applied-flash");
+        appliedFlashTimeoutId = setTimeout(() => header.classList.remove("is-applied-flash"), 600);
+      }
     } else if (state === "edited") {
       status.textContent = "Edited — not applied";
       status.classList.add("is-edited");
       header.classList.add("is-edited");
+    } else if (state === "applying") {
+      status.textContent = "Applying…";
+      status.classList.add("is-applying");
     } else {
       status.textContent = "Error";
       status.classList.add("is-error");
     }
+    // Disabled while an apply is in flight (hot-apply resolves synchronously so this never
+    // renders a visible frame on that path; the async "init" reset path is the actual target --
+    // it can take noticeably long for large ball counts / high slurry resolution).
+    applyBtn.disabled = state === "applying";
+    statusInitialized = true;
   }
 
   const errorBanner = document.createElement("div");
@@ -464,6 +488,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     }
 
     clearInvalid();
+    setStatus("applying");
     let next = currentParams;
     for (const [path, input] of inputs) {
       const field = SCHEMA.find((f) => f.path === path);
