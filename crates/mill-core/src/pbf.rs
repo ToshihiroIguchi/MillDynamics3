@@ -835,7 +835,32 @@ impl FluidParticles {
                     // ball, needs none).
                     let arrest_speed = (-(self.v[i] - v_surface).dot(n_hat)).max(0.0);
                     let full_impulse_mag = mass * push_mag / dt;
-                    let impulse_mag = full_impulse_mag.min(mass * arrest_speed);
+                    // Bound the arrest impulse by the two-body (fluid particle <-> ball) reduced
+                    // mass, not the fluid particle's mass alone. `mass * arrest_speed` is the
+                    // impulse that brings the *particle's* normal velocity to the ball's surface
+                    // velocity while treating the ball as immovable (infinite mass) -- correct
+                    // only while the ball is much heavier than one fluid particle (every
+                    // already-validated coarse-grained/default configuration). Once
+                    // `Params::effective_media` stops coarse-graining, a real ball's mass (~ r^2)
+                    // shrinks much faster than a fixed-resolution fluid particle's own mass as the
+                    // true media diameter gets small, so a single fluid particle can outweigh the
+                    // ball; Newton's third law then hands that oversized, one-sided impulse
+                    // straight to the ball, producing a velocity change far beyond what one
+                    // legitimate contact should -- observed as media flung around independent of
+                    // the drum's own rotation once media count is raised enough to reach the true
+                    // (uncoarsened) diameter at a fluid resolution still sized for larger balls.
+                    // The reduced mass `mu = mass * balls.mass / (mass + balls.mass)` is the
+                    // standard two-body arrest impulse for an inelastic normal collision: it
+                    // reduces to the previous `mass`-only bound whenever `balls.mass >> mass` (a
+                    // no-op there), while capping the ball's own reaction near `balls.mass *
+                    // arrest_speed` -- an ordinary "collided with something heavier" response --
+                    // once a fluid particle outweighs the ball.
+                    let reduced_mass = if balls.mass > 0.0 {
+                        (mass * balls.mass) / (mass + balls.mass)
+                    } else {
+                        mass
+                    };
+                    let impulse_mag = full_impulse_mag.min(reduced_mass * arrest_speed);
                     push_velocity_excess[i] += ((full_impulse_mag - impulse_mag) / mass) * n_hat;
 
                     // `impulse_mag` is the fluid particle's actual momentum change (impulse) from
