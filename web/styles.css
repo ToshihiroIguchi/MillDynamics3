@@ -462,6 +462,89 @@ body.params-collapsed .params-panel {
   color: #9aa3b0;
 }
 
+/* Key-results block: the short, defended shortlist at the top of the panel (docs/METRICS.md's
+   "Panel layout" section), set off from the collapsible groups below with a rule so it reads as
+   the summary rather than just the first group. */
+.metrics-key {
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #3a4048;
+}
+
+.metric-row.is-key .metric-value {
+  font-size: 13px;
+}
+
+/* The Solver-health roll-up is a <button>, not a plain row -- reset native button chrome back to
+   plain metric-row styling, keeping the pointer cursor as the only visible affordance that it's
+   interactive (it does nothing when healthy/nothing is warned). */
+.metric-health-link {
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.metric-health-link:hover .metric-value {
+  text-decoration: underline;
+}
+
+/* Collapsible metric groups: same shape as ui/paramsPanel.ts's `.params-group` (the left panel's
+   equivalent accordion), so both side panels' collapsibles look identical. All five groups start
+   collapsed (see metricsPanel.ts's DEFAULT_GROUP_OPEN) -- the key-results block above already
+   carries what matters at a glance. */
+.metrics-group {
+  border: 1px solid #3a4048;
+  border-radius: 6px;
+  margin: 12px 0 0;
+}
+
+.metrics-group[hidden] {
+  display: none;
+}
+
+.metrics-group summary {
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #9aa3b0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.metrics-group > *:not(summary) {
+  padding: 0 10px;
+}
+
+.metrics-group > summary + * {
+  padding-top: 6px;
+}
+
+.metrics-group > :last-child {
+  padding-bottom: 10px;
+}
+
+/* Small muted badge on the Grinding group's summary (e.g. "k = 2.00"), so coarse-graining stays
+   discoverable while the group itself is collapsed -- see metricsPanel.ts's `groupChipEls`. */
+.metrics-summary-chip {
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #8fa0b7;
+  background: rgba(143, 160, 183, 0.12);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
 .metric-row {
   display: flex;
   justify-content: space-between;

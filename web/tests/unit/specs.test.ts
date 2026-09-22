@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { METRIC_GROUPS, METRIC_SPECS, type MetricContext, type MetricGroupName } from "../../src/metrics/specs";
+import { KEY_METRIC_IDS, METRIC_GROUPS, METRIC_SPECS, type MetricContext, type MetricGroupName } from "../../src/metrics/specs";
 import type { Metrics } from "../../src/metrics/types";
 
 const CONTEXT_ONLY_IDS = new Set([
@@ -34,6 +34,7 @@ const baseCtx: MetricContext = {
   rpm: 30,
   percentCritical: 71,
   criticalSpeedRpm: 42.3,
+  slurryEnabled: true,
 };
 
 describe("METRIC_SPECS with a metrics-less context", () => {
@@ -93,6 +94,60 @@ describe("sparkline specs", () => {
   });
 });
 
+describe("KEY_METRIC_IDS / key-flagged specs (ui/metricsPanel.ts's key-results block)", () => {
+  it("every KEY_METRIC_IDS entry has a matching spec flagged key: true", () => {
+    for (const id of KEY_METRIC_IDS) {
+      const spec = METRIC_SPECS.find((s) => s.id === id);
+      expect(spec, `no MetricSpec with id "${id}"`).toBeDefined();
+      expect(spec?.key, `spec "${id}" is in KEY_METRIC_IDS but not flagged key: true`).toBe(true);
+    }
+  });
+
+  it("no spec is flagged key: true outside of KEY_METRIC_IDS (the two views never drift)", () => {
+    const keyFlaggedIds = METRIC_SPECS.filter((s) => s.key).map((s) => s.id);
+    expect(new Set(keyFlaggedIds)).toEqual(new Set(KEY_METRIC_IDS));
+  });
+});
+
+describe("CSV column order (metrics/history.ts's toCsv, driven by METRIC_SPECS's own order)", () => {
+  it("matches the current, intentional column order -- a reorder of METRIC_SPECS that changes this\n" +
+    "silently changes every exported CSV's header row, so this guard must be updated deliberately", () => {
+    const csvIds = METRIC_SPECS.filter((s) => s.csv).map((s) => s.id);
+    expect(csvIds).toEqual([
+      "sim_time",
+      "achieved_speed",
+      "substeps_achieved_per_s",
+      "substeps_required_per_s",
+      "rpm",
+      "percent_critical",
+      "true_ball_count",
+      "simulated_ball_count",
+      "coarse_graining_factor",
+      "toe_angle_deg",
+      "shoulder_angle_deg",
+      "centroid_x",
+      "centroid_y",
+      "total_kinetic_energy",
+      "max_ball_overlap",
+      "max_ball_wall_overlap",
+      "power_draw",
+      "torque",
+      "collision_rate",
+      "dissipated_power",
+      "fluid_particle_count",
+      "pool_depth",
+      "mixing_index",
+      "max_compression_error",
+      "mean_compression_error",
+      "max_density_error",
+      "mean_density_error",
+      "mean_shear_rate",
+      "coupling_clamp_hits",
+      "substep_displacement",
+    ]);
+  });
+});
+
 // Minimal but complete Metrics fixture (every field of the interface needs a value) for
 // `unavailable` tests below that need a non-null `ctx.metrics`.
 const fakeMetrics: Metrics = {
@@ -132,10 +187,10 @@ const fakeMetrics: Metrics = {
 describe("unavailable / hideWhenUnavailable specs", () => {
   it("matches the exact set of ids flagged unavailable/hideWhenUnavailable in specs.ts", () => {
     const unavailableIds = METRIC_SPECS.filter((s) => s.unavailable).map((s) => s.id);
-    expect(unavailableIds).toEqual(["toe_angle_deg", "shoulder_angle_deg", "collision_rate"]);
+    expect(unavailableIds).toEqual(["toe_angle_deg", "shoulder_angle_deg", "collision_rate", "mixing_index"]);
 
     const hideWhenUnavailableIds = METRIC_SPECS.filter((s) => s.hideWhenUnavailable).map((s) => s.id);
-    expect(hideWhenUnavailableIds).toEqual(["collision_rate"]);
+    expect(hideWhenUnavailableIds).toEqual(["collision_rate", "mixing_index"]);
   });
 
   it("collision_rate: 'Coarse-grained' when k > 1, null at k = 1, null with no metrics", () => {
@@ -164,5 +219,17 @@ describe("unavailable / hideWhenUnavailable specs", () => {
       // Regression guard: a genuinely computed angle at >= 100% Nc must never be overwritten.
       expect(spec?.unavailable?.(12.3, { ...baseCtx, percentCritical: 120 })).toBeNull();
     }
+  });
+
+  it("mixing_index: 'Slurry off' only when slurryEnabled === false, null when true or unknown (null)", () => {
+    const spec = METRIC_SPECS.find((s) => s.id === "mixing_index");
+    expect(spec?.unavailable).toBeDefined();
+
+    expect(spec?.unavailable?.(null, { ...baseCtx, slurryEnabled: false })).toBe("Slurry off");
+    expect(spec?.unavailable?.(0.62, { ...baseCtx, slurryEnabled: false })).toBe("Slurry off");
+    expect(spec?.unavailable?.(0.62, { ...baseCtx, slurryEnabled: true })).toBeNull();
+    // Before the first params message arrives, slurryEnabled is null -- don't hide the row over
+    // an unknown state, only over a confirmed "off".
+    expect(spec?.unavailable?.(null, { ...baseCtx, slurryEnabled: null })).toBeNull();
   });
 });

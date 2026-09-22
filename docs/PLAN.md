@@ -436,7 +436,18 @@ rate (`FIXED_DT` x `substeps`), estimated cost.
 | Simulation | resolution 40 (particles across R); substeps 8; PBF iterations 3; DEM (XPBD) iterations 2; max balls 600; time scale 1.0; frame budget 12 ms; seed 1 |
 | Display | show fluid particles / surface polygon / dye / toe-shoulder / free-surface line / spin marker / velocity vectors; ball colour by speed |
 
-### 4.4 Toolbar & HUD
+### 4.4 Metrics right panel (`ui/metricsPanel.ts`) — persistent `<aside>`, symmetric with the params panel
+A **Key results** block (Power draw, Dissipated power, Toe angle, Shoulder angle, Total kinetic
+energy, Mixing index, and a Solver-health roll-up of the four warn-thresholded diagnostics) sits
+above every other metric, which lives in five collapsible `<details>` groups (**Drum**, **Media**,
+**Grinding**, **Slurry**, **Solver**), all closed by default and persisted per-browser like the
+params panel's own groups. Every displayed value, its unit, formatter, sparkline/CSV inclusion, and
+whether it's promoted to Key results is declared once in `metrics/specs.ts`'s `METRIC_SPECS` table
+(`key: true` + the explicit `KEY_METRIC_IDS` order), which also drives the CSV export's column
+order — see docs/METRICS.md's "Panel layout" section for which seven metrics are key and why, and
+docs/PHYSICS.md §8 for the underlying formulas.
+
+### 4.5 Toolbar & HUD
 Play/Pause (Space), Step (one frame), Reset, Parameters (opens modal), Presets menu, Screenshot (PNG via `canvas.toBlob`).
 HUD: sim time, rpm and %Nc, balls/fluid counts, fps, sim ms/frame, achieved time scale, toe/shoulder, slurry pool angles, mixing index.
 

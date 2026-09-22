@@ -20,6 +20,9 @@ export interface MetricContext {
   rpm: number | null;
   percentCritical: number | null;
   criticalSpeedRpm: number | null;
+  /** `params.slurry.enabled`, or `null` before the first params message arrives. Used to hide
+   * slurry-only key metrics (e.g. mixing_index) rather than show a permanent "-". */
+  slurryEnabled: boolean | null;
 }
 
 export type MetricGroupName = "Drum" | "Media" | "Grinding" | "Slurry" | "Solver";
@@ -50,7 +53,24 @@ export interface MetricSpec {
   /** When unavailable() returns non-null, hide the whole row instead of showing the reason text
    * in the value cell. */
   hideWhenUnavailable?: boolean;
+  /** Render this metric in the panel's top "Key results" block (ui/metricsPanel.ts) instead of
+   * only inside its group's collapsible `<details>`. Display order within the key block comes
+   * from `KEY_METRIC_IDS`, not from this table's order. */
+  key?: boolean;
 }
+
+/** The key-results block's metric ids, in display order. Kept as an explicit list (rather than
+ * `METRIC_SPECS.filter((s) => s.key)`) so the block's order is independent of where each spec
+ * happens to sit in the full table -- reordering METRIC_SPECS (e.g. to regroup Media rows) must
+ * not silently reorder the key block too. `specs.test.ts` asserts these two views never drift. */
+export const KEY_METRIC_IDS = [
+  "power_draw",
+  "dissipated_power",
+  "toe_angle_deg",
+  "shoulder_angle_deg",
+  "total_kinetic_energy",
+  "mixing_index",
+] as const;
 
 /** `unavailable` reason for any metric that scales directly with the coarse-graining factor `k`
  * (impact counts as `1/k^2`, per-impact energies as `k^2`, docs/PHYSICS.md §9) and is therefore
@@ -102,6 +122,7 @@ export const METRIC_SPECS: MetricSpec[] = [
     format: fixed(1),
     sparkline: true,
     csv: true,
+    key: true,
     // Physically correct (metrics.rs's charge_toe_shoulder, CENTRIFUGE_GAP_THRESHOLD_RAD): once
     // %Nc is at or above 100 the charge is pinned to the wall with no leading/trailing edge to
     // measure, and this is by far the common cause of a null reading at that speed -- so a bare
@@ -123,6 +144,7 @@ export const METRIC_SPECS: MetricSpec[] = [
     format: fixed(1),
     sparkline: true,
     csv: true,
+    key: true,
     unavailable: (value, ctx) =>
       value === null && ctx.percentCritical !== null && ctx.percentCritical >= CENTRIFUGING_PERCENT_NC_THRESHOLD
         ? "Centrifuging"
@@ -130,12 +152,12 @@ export const METRIC_SPECS: MetricSpec[] = [
   },
   { id: "centroid_x", group: "Media", label: "Charge centroid X", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[0] ?? null, format: fixed(3), csv: true },
   { id: "centroid_y", group: "Media", label: "Charge centroid Y", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[1] ?? null, format: fixed(3), csv: true },
-  { id: "total_kinetic_energy", group: "Media", label: "Total kinetic energy", unit: "J/m", value: m("total_kinetic_energy_j"), format: fixed(2), sparkline: true, csv: true },
+  { id: "total_kinetic_energy", group: "Media", label: "Total kinetic energy", unit: "J/m", value: m("total_kinetic_energy_j"), format: fixed(2), sparkline: true, csv: true, key: true },
   { id: "max_ball_overlap", group: "Media", label: "Max ball overlap (of radius)", value: m("max_ball_overlap_fraction"), format: percentOf1(2), csv: true },
   { id: "max_ball_wall_overlap", group: "Media", label: "Max ball-wall overlap (of radius)", value: m("max_ball_wall_overlap_fraction"), format: percentOf1(2), csv: true },
 
   // --- Grinding (power draw / collisions / dissipation) -------------------------------------
-  { id: "power_draw", group: "Grinding", label: "Power draw", unit: "W/m", value: m("power_draw_w"), format: fixed(2), sparkline: true, csv: true },
+  { id: "power_draw", group: "Grinding", label: "Power draw", unit: "W/m", value: m("power_draw_w"), format: fixed(2), sparkline: true, csv: true, key: true },
   { id: "torque", group: "Grinding", label: "Torque", unit: "N·m/m", value: m("torque_nm"), format: fixed(3), csv: true },
   {
     id: "collision_rate",
@@ -151,7 +173,7 @@ export const METRIC_SPECS: MetricSpec[] = [
     unavailable: (_value, ctx) => coarseGrainingReason(ctx),
     hideWhenUnavailable: true,
   },
-  { id: "dissipated_power", group: "Grinding", label: "Dissipated power", unit: "W/m", value: m("dissipated_power_w"), format: fixed(2), sparkline: true, csv: true },
+  { id: "dissipated_power", group: "Grinding", label: "Dissipated power", unit: "W/m", value: m("dissipated_power_w"), format: fixed(2), sparkline: true, csv: true, key: true },
 
   // --- Slurry -------------------------------------------------------------------------------
   { id: "fluid_particle_count", group: "Slurry", label: "Fluid particles", value: m("fluid_particle_count"), format: fixed(0), csv: true },
@@ -169,7 +191,20 @@ export const METRIC_SPECS: MetricSpec[] = [
   { id: "free_surface_angle", group: "Slurry", label: "Free-surface angle", unit: "°", value: (ctx) => (ctx.metrics?.free_surface_angle_rad != null ? (ctx.metrics.free_surface_angle_rad * 180) / Math.PI : null), format: fixed(1) },
   { id: "free_surface_offset", group: "Slurry", label: "Free-surface offset", unit: "m", value: m("free_surface_offset_m"), format: fixed(3) },
   { id: "pool_depth", group: "Slurry", label: "Pool depth (bottom)", unit: "m", value: m("pool_depth_m"), format: fixed(3), csv: true },
-  { id: "mixing_index", group: "Slurry", label: "Mixing index", value: m("mixing_index"), format: fixed(2), sparkline: true, csv: true },
+  {
+    id: "mixing_index",
+    group: "Slurry",
+    label: "Mixing index",
+    value: m("mixing_index"),
+    format: fixed(2),
+    sparkline: true,
+    csv: true,
+    key: true,
+    // Promoted to the key-results block (it's the only Slurry-group metric with direct process
+    // meaning), so it needs its own reason rather than a bare "-" when there is no slurry to mix.
+    unavailable: (_value, ctx) => (ctx.slurryEnabled === false ? "Slurry off" : null),
+    hideWhenUnavailable: true,
+  },
   { id: "max_compression_error", group: "Slurry", label: "Max compression error", value: m("max_fluid_compression_error_fraction"), format: percentOf1(2), sparkline: true, csv: true },
   { id: "mean_compression_error", group: "Slurry", label: "Mean compression error", value: m("mean_fluid_compression_error_fraction"), format: percentOf1(2), csv: true },
   { id: "max_density_error", group: "Slurry", label: "Density spread, max (incl. free surface)", value: m("max_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
