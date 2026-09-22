@@ -15,6 +15,38 @@ after the initial settling transient (roughly `t > 15` s of simulated time).
 
 ---
 
+## Panel layout: key results vs. details
+
+The panel (`web/src/ui/metricsPanel.ts`) opens on a small, fixed **Key results** block, followed by
+the five groups below as collapsible `<details>` (all closed by default). The block exists because
+the full metric table is ~30 rows, most of which either duplicate the HUD/params panel or matter
+only as an alarm, not as a number worth reading continuously -- see `web/src/metrics/specs.ts`'s
+`KEY_METRIC_IDS` for the authoritative list. Seven rows, in display order, each answering a
+question a user is actually asking of the run:
+
+| Row | Question it answers |
+|---|---|
+| **Power draw** | How much power does this mill draw? The primary engineering output. |
+| **Dissipated power** | How much of that is actually spent in media contacts -- and does it track Power draw (the dry-steady-state energy-balance check above)? |
+| **Toe angle** / **Shoulder angle** | What motion regime is the charge in (cascading/cataracting/centrifuging)? |
+| **Total kinetic energy** | Has the run settled past the initial transient yet -- the gate every "measured at defaults" figure on this page assumes? |
+| **Mixing index** | Is the slurry actually being mixed? Hidden when slurry is disabled. |
+| **Solver health** | Can the numbers above be trusted right now? Rolls up the four warn-thresholded diagnostics below (Max ball overlap, Substep displacement, Max/mean compression error, Coupling clamp hits) into `OK` or a named list; click it to open whichever collapsed group holds the offending row. |
+
+Two deliberate omissions, both discussed at length above:
+
+- **Collision rate and the impact energy distribution** are *not* promoted, even though in general
+  DEM-mill work the impact-energy spectrum is arguably the grinding KPI, because **the shipped
+  defaults are already coarse-grained** (`k ≈ 2`) and both are hidden by design in that state (see
+  *True ball count, Simulated balls, Coarse-graining (k), Effective diameter* above). A key row
+  that reads empty out of the box would be worse than leaving it in the Grinding group, whose
+  summary carries a `k = …` chip so the fact stays visible without opening it.
+- **Density spread, max/mean** stays inside Slurry, deliberately below the convergence number that
+  actually tracks failure (*Max/mean compression error*, folded into Solver health) -- see that
+  section above for why this is the single most commonly misread pair on this panel.
+
+---
+
 ## Grinding group
 
 ### Power draw (W/m), Torque (N·m/m)

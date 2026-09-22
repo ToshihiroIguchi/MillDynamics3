@@ -1,9 +1,20 @@
-// Right-side metrics panel (docs/PLAN.md ss4.4): grouped read-outs of every `MetricSpec`
-// (metrics/specs.ts), a rolling history feeding a few sparklines plus a CSV export, and a small
-// impact-energy histogram chart. All the data plumbing (spec table, history ring buffer, sparkline
-// renderer, `Metrics` type) lives elsewhere; this file only builds/updates the DOM.
+// Right-side metrics panel (docs/PLAN.md §4.4): a top "Key results" block (a short, defended
+// shortlist -- see the comment on `KEY_METRIC_IDS` in metrics/specs.ts for what's in it and why)
+// followed by every other `MetricSpec` grouped into collapsible `<details>` (closed by default,
+// mirroring ui/paramsPanel.ts's group pattern), a rolling history feeding a few sparklines plus a
+// CSV export, and a small impact-energy histogram chart. All the data plumbing (spec table,
+// history ring buffer, sparkline renderer, `Metrics` type) lives elsewhere; this file only
+// builds/updates the DOM.
 
-import { coarseGrainingReason, METRIC_GROUPS, METRIC_SPECS, type MetricContext, type MetricGroupName } from "../metrics/specs";
+import {
+  coarseGrainingReason,
+  KEY_METRIC_IDS,
+  METRIC_GROUPS,
+  METRIC_SPECS,
+  type MetricContext,
+  type MetricGroupName,
+  type MetricSpec,
+} from "../metrics/specs";
 import { MetricsHistory, type CsvColumn } from "../metrics/history";
 import type { ImpactEnergyHistogram } from "../metrics/types";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
@@ -25,6 +36,14 @@ function millOf(params: ParamsJson | null): { diameter_m: number; speed_mode: st
     return null;
   }
   return { diameter_m: mill.diameter_m, speed_mode: mill.speed_mode, speed_value: mill.speed_value };
+}
+
+/** `params.slurry.enabled`, or `null` before the first params message arrives -- feeds the
+ * Mixing index key row's `unavailable` reason (specs.ts) so it disappears cleanly rather than
+ * showing a permanent "-" once slurry is switched off. */
+function slurryEnabledOf(params: ParamsJson | null): boolean | null {
+  const slurry = params?.slurry as { enabled?: boolean } | undefined;
+  return slurry?.enabled ?? null;
 }
 
 const HIST_CSS_WIDTH = 300;
@@ -111,7 +130,9 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
 // Warning-highlight thresholds (raw metric values, not formatted strings): a row is flagged
 // `is-warn` once its value exceeds the threshold below. All ids below use the same "value is
 // greater than threshold" test -- coupling_clamp_hits's "warn on any hit" semantics is just the
-// threshold-0 case of that same rule, not a different rule.
+// threshold-0 case of that same rule, not a different rule. The Solver-health key-block roll-up
+// (below) reads this same map, so there is exactly one place these four diagnostics are defined
+// as "alarms" rather than "continuously-read numbers".
 const COUPLING_CLAMP_HITS_WARN_THRESHOLD = 0;
 const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
 const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
@@ -124,7 +145,46 @@ const WARN_THRESHOLDS = new Map<string, number>([
   ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],
 ]);
 
+const GROUPS_STORAGE_KEY = "milldynamics.metricsGroups";
+
+// All five groups start collapsed: the key-results block above them already carries the numbers
+// that matter at a glance (see specs.ts's `KEY_METRIC_IDS`), so everything else is opt-in detail.
+// Mirrors ui/paramsPanel.ts's per-group open/closed persistence pattern one-for-one, under its own
+// storage key (paramsPanel.ts's is "milldynamics.paramsGroups", a separate panel/preference).
+const DEFAULT_GROUP_OPEN: Record<MetricGroupName, boolean> = {
+  Drum: false,
+  Media: false,
+  Grinding: false,
+  Slurry: false,
+  Solver: false,
+};
+
+function readGroupOpenPrefs(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(GROUPS_STORAGE_KEY);
+    if (raw === null) return { ...DEFAULT_GROUP_OPEN };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: Record<string, boolean> = { ...DEFAULT_GROUP_OPEN };
+    for (const key of Object.keys(result)) {
+      if (typeof parsed[key] === "boolean") result[key] = parsed[key] as boolean;
+    }
+    return result;
+  } catch {
+    return { ...DEFAULT_GROUP_OPEN };
+  }
+}
+
+function writeGroupOpenPrefs(prefs: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(GROUPS_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // ignore (private browsing / disabled storage)
+  }
+}
+
 export function createMetricsPanel(container: HTMLElement): MetricsPanel {
+  const groupOpenPrefs = readGroupOpenPrefs();
+
   const header = document.createElement("div");
   header.className = "metrics-panel-header";
   const title = document.createElement("h2");
@@ -141,52 +201,125 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
   const valueEls = new Map<string, HTMLSpanElement>();
   const sparklineEls = new Map<string, HTMLCanvasElement>();
   const rowEls = new Map<string, HTMLElement>();
-  const groupHeadingEls = new Map<MetricGroupName, HTMLHeadingElement>();
+  const groupDetailsEls = new Map<MetricGroupName, HTMLDetailsElement>();
+  const groupChipEls = new Map<MetricGroupName, HTMLSpanElement>();
   let histogramCanvas: HTMLCanvasElement | null = null;
   let histogramWrapEl: HTMLElement | null = null;
   let coarseGrainingWarnEl: HTMLElement | null = null;
+  let lastWarnedIds: string[] = [];
 
-  for (const group of METRIC_GROUPS) {
-    const section = document.createElement("section");
-    const h3 = document.createElement("h3");
-    h3.textContent = group;
-    section.appendChild(h3);
-    groupHeadingEls.set(group, h3);
+  /** Builds one `.metric-row` for `spec`: label + value spans, and an optional sparkline canvas,
+   * registering all three into the maps above. Shared by the key-results block and the
+   * collapsible groups below so a row's DOM is only ever built in one place -- each metric still
+   * renders exactly once, just in one of two locations depending on `spec.key`. */
+  function buildRow(spec: MetricSpec, extraClass?: string): HTMLElement {
+    const row = document.createElement("div");
+    row.className = extraClass ? `metric-row ${extraClass}` : "metric-row";
 
-    for (const spec of METRIC_SPECS.filter((s) => s.group === group)) {
-      const row = document.createElement("div");
-      row.className = "metric-row";
+    const label = document.createElement("span");
+    label.className = "metric-label";
+    label.textContent = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
 
-      const label = document.createElement("span");
-      label.className = "metric-label";
-      label.textContent = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
+    const value = document.createElement("span");
+    value.className = "metric-value";
+    value.textContent = "-";
 
-      const value = document.createElement("span");
-      value.className = "metric-value";
-      value.textContent = "-";
+    row.appendChild(label);
+    row.appendChild(value);
 
-      row.appendChild(label);
-      row.appendChild(value);
-
-      if (spec.sparkline) {
-        const canvas = document.createElement("canvas");
-        canvas.className = "metric-sparkline";
-        row.appendChild(canvas);
-        sparklineEls.set(spec.id, canvas);
-      }
-
-      section.appendChild(row);
-      valueEls.set(spec.id, value);
-      rowEls.set(spec.id, row);
+    if (spec.sparkline) {
+      const canvas = document.createElement("canvas");
+      canvas.className = "metric-sparkline";
+      row.appendChild(canvas);
+      sparklineEls.set(spec.id, canvas);
     }
 
-    container.appendChild(section);
+    valueEls.set(spec.id, value);
+    rowEls.set(spec.id, row);
+    return row;
+  }
+
+  // --- Key results ------------------------------------------------------------------------------
+  const keySection = document.createElement("section");
+  keySection.className = "metrics-key";
+  const keyHeading = document.createElement("h3");
+  keyHeading.textContent = "Key results";
+  keySection.appendChild(keyHeading);
+
+  for (const id of KEY_METRIC_IDS) {
+    const spec = METRIC_SPECS.find((s) => s.id === id);
+    if (!spec) continue; // guarded by specs.test.ts: every KEY_METRIC_IDS entry must have a spec
+    keySection.appendChild(buildRow(spec, "is-key"));
+  }
+
+  // Solver-health roll-up: one line summarising the four WARN_THRESHOLDS diagnostics (below)
+  // instead of making the reader open three separately-collapsed groups to find them. A button
+  // (not a plain row) so clicking it can open whichever group(s) currently hold a warned row.
+  const healthRow = document.createElement("button");
+  healthRow.type = "button";
+  healthRow.className = "metric-row is-key is-health metric-health-link";
+  const healthLabel = document.createElement("span");
+  healthLabel.className = "metric-label";
+  healthLabel.textContent = "Solver health";
+  const healthValue = document.createElement("span");
+  healthValue.className = "metric-value";
+  healthValue.textContent = "OK";
+  healthRow.appendChild(healthLabel);
+  healthRow.appendChild(healthValue);
+  healthRow.addEventListener("click", () => {
+    let firstDetails: HTMLDetailsElement | null = null;
+    for (const id of lastWarnedIds) {
+      const spec = METRIC_SPECS.find((s) => s.id === id);
+      if (!spec) continue;
+      const details = groupDetailsEls.get(spec.group);
+      if (!details) continue;
+      details.open = true;
+      groupOpenPrefs[spec.group] = true;
+      firstDetails ??= details;
+    }
+    if (firstDetails) {
+      writeGroupOpenPrefs(groupOpenPrefs);
+      firstDetails.scrollIntoView({ block: "center" });
+    }
+  });
+  keySection.appendChild(healthRow);
+
+  container.appendChild(keySection);
+
+  // --- Collapsible groups -------------------------------------------------------------------------
+  for (const group of METRIC_GROUPS) {
+    const details = document.createElement("details");
+    details.className = "metrics-group";
+    details.open = groupOpenPrefs[group] ?? false;
+    details.addEventListener("toggle", () => {
+      groupOpenPrefs[group] = details.open;
+      writeGroupOpenPrefs(groupOpenPrefs);
+    });
+    groupDetailsEls.set(group, details);
+
+    const summary = document.createElement("summary");
+    summary.textContent = group;
+    if (group === "Grinding") {
+      // Keeps the fact that coarse-graining is active (and by how much) discoverable while the
+      // group is collapsed -- otherwise it's only visible after opening the group and reading the
+      // banner below, same reasoning as hud.ts's media-substitution badge.
+      const chip = document.createElement("span");
+      chip.className = "metrics-summary-chip";
+      chip.hidden = true;
+      summary.appendChild(chip);
+      groupChipEls.set(group, chip);
+    }
+    details.appendChild(summary);
+
+    for (const spec of METRIC_SPECS.filter((s) => s.group === group && !s.key)) {
+      details.appendChild(buildRow(spec));
+    }
 
     if (group === "Grinding") {
       const warnEl = document.createElement("div");
       warnEl.className = "metrics-warn";
       warnEl.hidden = true;
-      container.appendChild(warnEl);
+      details.appendChild(warnEl);
       coarseGrainingWarnEl = warnEl;
 
       const histWrap = document.createElement("div");
@@ -198,10 +331,12 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       canvas.className = "impact-histogram";
       histWrap.appendChild(histLabel);
       histWrap.appendChild(canvas);
-      container.appendChild(histWrap);
+      details.appendChild(histWrap);
       histogramCanvas = canvas;
       histogramWrapEl = histWrap;
     }
+
+    container.appendChild(details);
   }
 
   const history = new MetricsHistory(600, 0.1);
@@ -237,6 +372,7 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       rpm: mill ? rpmOf(mill) : null,
       percentCritical: mill ? percentCriticalOf(mill) : null,
       criticalSpeedRpm: mill ? criticalSpeedRpm(mill.diameter_m) : null,
+      slurryEnabled: slurryEnabledOf(state.params),
     };
 
     const values: Record<string, number | null> = {};
@@ -281,13 +417,14 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
       }
     }
 
-    // Generic guard: hide a group's heading if every row in it ended up hidden above (nothing left
-    // to head), so it never dangles above an empty group.
+    // Generic guard: hide a group's `<details>` if every non-key row in it ended up hidden above
+    // (nothing left to show), so it never dangles open above an empty group. Key-block rows are
+    // excluded from this check -- they aren't rendered inside the group at all.
     for (const group of METRIC_GROUPS) {
-      const heading = groupHeadingEls.get(group);
-      if (!heading) continue;
-      const groupSpecs = METRIC_SPECS.filter((s) => s.group === group);
-      heading.hidden = groupSpecs.length > 0 && groupSpecs.every((s) => rowEls.get(s.id)?.hidden === true);
+      const details = groupDetailsEls.get(group);
+      if (!details) continue;
+      const groupSpecs = METRIC_SPECS.filter((s) => s.group === group && !s.key);
+      details.hidden = groupSpecs.length > 0 && groupSpecs.every((s) => rowEls.get(s.id)?.hidden === true);
     }
 
     for (const spec of METRIC_SPECS) {
@@ -316,6 +453,30 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     if (histogramCanvas && kReason === null) {
       drawImpactHistogram(histogramCanvas, state.metrics?.impact_energy_histogram);
     }
+
+    const grindingChip = groupChipEls.get("Grinding");
+    if (grindingChip) {
+      grindingChip.hidden = kReason === null;
+      if (kReason !== null && state.metrics) {
+        grindingChip.textContent = `k = ${state.metrics.coarse_graining_factor.toFixed(2)}`;
+      }
+    }
+
+    // Solver-health roll-up: same WARN_THRESHOLDS rule as the per-row `is-warn` highlight above,
+    // just collected into the key block's one line instead of read off four separately-collapsed
+    // rows. `lastWarnedIds` is read by the row's own click handler (above) to open the right
+    // group(s).
+    const warnedSpecs = METRIC_SPECS.filter((s) => {
+      const threshold = WARN_THRESHOLDS.get(s.id);
+      if (threshold === undefined) return false;
+      const v = values[s.id];
+      return v !== null && v !== undefined && v > threshold;
+    });
+    lastWarnedIds = warnedSpecs.map((s) => s.id);
+    const isHealthWarn = warnedSpecs.length > 0;
+    const healthText = isHealthWarn ? `⚠ ${warnedSpecs.map((s) => s.label).join(", ")}` : "OK";
+    if (healthValue.textContent !== healthText) healthValue.textContent = healthText;
+    healthRow.classList.toggle("is-warn", isHealthWarn);
   }
 
   return {
