@@ -496,6 +496,31 @@ fn impulse_clamp(ball_mass: f32, dt: f32) -> f32 {
 /// instead of blow-ups.
 const FLUID_SPEED_SAFETY_FACTOR: f32 = 5.0;
 
+/// The fluid speed clamp's ceiling for a given drum (step 5.5/7.5 of
+/// [`FluidParticles::step_coupled`]) -- see [`FLUID_SPEED_SAFETY_FACTOR`]'s doc comment for the
+/// formula's rationale. A free function (not inlined at each call site) so both applications of
+/// the clamp -- the pre-coupling pass right after step 5's reconstruction, and the final backstop
+/// after step 7's viscosity solve -- share exactly one definition.
+fn fluid_speed_clamp_v_max(drum: &Drum) -> f32 {
+    FLUID_SPEED_SAFETY_FACTOR
+        * (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt())
+}
+
+/// Clamps every particle's speed to `v_max`, zeroing any non-finite velocity outright (see
+/// [`FLUID_SPEED_SAFETY_FACTOR`]'s doc comment for why this exists and why it is not
+/// momentum-conserving). Shared by both applications of the clamp in
+/// [`FluidParticles::step_coupled`].
+fn clamp_fluid_speed(v: &mut [Vec2], v_max: f32) {
+    for v in v.iter_mut() {
+        let speed = v.length();
+        if !speed.is_finite() {
+            *v = Vec2::ZERO;
+        } else if speed > v_max {
+            *v *= v_max / speed;
+        }
+    }
+}
+
 /// Slurry (fluid) particle population. All particles share one kernel radius/mass/rest density
 /// (see [`FluidParticles::seed_lattice`]); `dye` is a pure Lagrangian tracer (no diffusion) used
 /// for mixing visualization/metrics (docs/PLAN.md ss3.3/3.5).
@@ -796,6 +821,16 @@ impl FluidParticles {
         // exchange no momentum at all, only a position correction. Any part of the push beyond the
         // physically-justified impulse is tracked in `push_velocity_excess` and subtracted back
         // out of the fluid's own velocity after step 5's position-to-velocity reconstruction.
+        //
+        // 2026-09-22 unphysical-scatter investigation: removing this step's ball-side reaction
+        // entirely (treating `balls` as a purely passive boundary, like the drum wall) was tried
+        // here and reverted -- it measurably regressed
+        // `metrics::tests::compression_error_stays_bounded_under_violent_lifter_cataracting`
+        // (worst compression error 0.123 vs. the previously-passing ~0.091 bound), i.e. this
+        // step's direct per-contact reaction is doing real stabilising work under violent
+        // cataracting that steps 6.5/6.6's own (differently time-scaled) exchange does not
+        // replace. See `C:\Users\toshi\.claude\plans\quirky-floating-wadler.md` for the full
+        // record of what was tried.
         let mut push_velocity_excess = vec![Vec2::ZERO; n];
         if let Some(ball_grid) = &ball_grid {
             let contact_radius = balls.radius + OVERLAP_PUSH_MARGIN * h;
@@ -1064,6 +1099,20 @@ impl FluidParticles {
         for (v, &delta) in self.v.iter_mut().zip(&adhesion_velocity_delta) {
             *v += delta;
         }
+
+        // --- 5.5 Fluid speed clamp, pre-coupling pass (see step 7.5 below for the full
+        // rationale and the constant this shares) -- moved here, ahead of steps 6/6.5/6.6, so
+        // those ball<->fluid exchanges never read a still-unclamped `self.v`. Step 5's `v = (x -
+        // x0) / dt` reconstruction is bounded, in the worst case, only by step 4's wall
+        // projection (~`2 * radius_m / dt`, ~240 m/s at this project's defaults) -- steps 6.5/6.6
+        // sample exactly this `self.v` (via `v_bar`/`rho_local`'s neighbour velocities) to decide
+        // how hard to pull on a ball, so an unclamped reconstruction artefact here could
+        // previously feed a wildly inflated `v_rel`/`omega_bar` into the ball's relaxation before
+        // anything caught it -- only being clamped *after* the ball had already been kicked, at
+        // step 7.5, too late to prevent that specific sub-step's damage. A second application
+        // after step 7's viscosity solve (below) remains, since viscosity can itself still push a
+        // particle back over the ceiling.
+        clamp_fluid_speed(&mut self.v, fluid_speed_clamp_v_max(drum));
 
         // --- 6. No-slip wall velocity blending -------------------------------------------------
         let beta = slurry.wall_no_slip.clamp(0.0, 1.0);
@@ -1414,27 +1463,16 @@ impl FluidParticles {
         let mean_shear_rate_per_s =
             mean_shear_rate(&self.x, &self.v, &neighbors, &density, mass, h);
 
-        // --- 7.5 Fluid speed clamp (stability backstop) --------------------------------------
-        // Step 5 reconstructs `v = (x - x0) / dt` from *position* corrections, so a particle
-        // persistently squeezed -- e.g. trapped between a centrifuged ball layer and the wall
-        // at high rotation speed -- gains `correction / dt` of speed every sub-step, with
-        // nothing to stop it until step 4's wall projection caps it at roughly
-        // `2 * radius_m / dt` (~240 m/s at this project's defaults) -- finite, but ~40x the
-        // physically attainable speed, and a fluid field running that fast shreds the rendered
-        // free surface into incoherent noise (`crate::surface`). Note: momentum removed here is
-        // deliberately *not* returned to any ball (unlike step 6.5's exchange) -- a small
-        // conservation violation confined to states that are already unphysical, the right
-        // trade for an operation that must never itself inject energy.
-        let v_max = FLUID_SPEED_SAFETY_FACTOR
-            * (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt());
-        for v in self.v.iter_mut() {
-            let speed = v.length();
-            if !speed.is_finite() {
-                *v = Vec2::ZERO;
-            } else if speed > v_max {
-                *v *= v_max / speed;
-            }
-        }
+        // --- 7.5 Fluid speed clamp, final pass (stability backstop) --------------------------
+        // Second application of the same clamp step 5.5 above already applied once, ahead of the
+        // ball coupling -- viscosity (step 7) can itself still push a particle back over the
+        // ceiling, and this is the last chance to catch a persistently-squeezed particle (e.g.
+        // trapped between a centrifuged ball layer and the wall at high rotation speed) before it
+        // reaches the renderer. Note: momentum removed here is deliberately *not* returned to any
+        // ball (unlike step 6.5's exchange) -- a small conservation violation confined to states
+        // that are already unphysical, the right trade for an operation that must never itself
+        // inject energy.
+        clamp_fluid_speed(&mut self.v, fluid_speed_clamp_v_max(drum));
 
         // --- 8. Clamp accumulated coupling impulses for stability (docs/PLAN.md ss3.4) --------
         if !balls.is_empty() {

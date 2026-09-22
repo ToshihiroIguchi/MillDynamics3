@@ -162,6 +162,10 @@ pub struct Metrics {
     /// [`crate::Simulation::step`] call. A healthy run stays at (or very near) `0` once the
     /// charge has settled. See [`crate::coupling::CouplingImpulses::clamp_hits`].
     pub coupling_clamp_hits: u32,
+    /// Number of balls whose speed was clamped by the ball speed safety backstop over the most
+    /// recent [`crate::Simulation::step`] call. A healthy run stays at (or very near) `0`. See
+    /// [`crate::dem::BALL_SPEED_SAFETY_FACTOR`].
+    pub ball_speed_clamp_hits: u32,
     /// Diameter actually simulated per ball (m), post coarse-graining if any. See
     /// [`crate::params::EffectiveMedia::diameter_m`].
     pub effective_ball_diameter_m: f32,
@@ -240,6 +244,7 @@ pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f
         dissipated_power_w: 0.0,
         impact_energy_histogram: ImpactEnergyHistogram::default(),
         coupling_clamp_hits: 0,
+        ball_speed_clamp_hits: 0,
         effective_ball_diameter_m: 0.0,
         simulated_ball_count: 0,
         true_ball_count: 0,

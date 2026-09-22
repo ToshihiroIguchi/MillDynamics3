@@ -350,6 +350,16 @@ how the rest of the solver already applies position/velocity corrections directl
 5. The clamped impulse is applied as a direct velocity change in the ball solver's predict step
    (`DemState::step_with_external_forces`, ss3.2 step 1). Balls then advance their one sub-step;
    new positions/velocities become the moving boundary for the fluid's next sub-step.
+6. **Fluid/ball speed clamps** (stability backstops, distinct from point 4's impulse clamp; added
+   2026-09-22, docs/PHYSICS.md ss9's low-fill unphysical-scatter entry). The fluid speed clamp
+   (`step_coupled`'s step "7.5", pre-existing) now also runs as step "5.5", immediately after the
+   fluid's own velocity reconstruction and *before* points 2-3's ball<->fluid exchange above reads
+   `self.v` — so that exchange never sees a still-unclamped reconstruction artefact; step "7.5"
+   remains as a second, final application after the viscosity solve. A mirroring ball speed clamp
+   (`DemState::step_with_external_forces`'s step "8", `BALL_SPEED_SAFETY_FACTOR`) was added
+   alongside it, since balls previously had no speed ceiling at all. Both are pure last-resort
+   backstops, not model parameters; see docs/PHYSICS.md ss9 for what was measured and for two more
+   aggressive fixes that were tried and reverted in the same investigation.
 
 ### 3.5 Free surface & metrics (`surface.rs`, `metrics.rs`)
 - Scalar field `φ` on a `G×G` grid (G = 128, spanning the drum bbox): splat each fluid particle with a smooth kernel of

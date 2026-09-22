@@ -889,4 +889,231 @@ mod tests {
             }
         }
     }
+
+    /// Reproduces the exact reported operating point (2026-09-22 unphysical-scatter report):
+    /// Realtime quality preset (`max_balls = 150`, `resolution = 15`), default mill/slurry, but
+    /// `media.fill_fraction = 0.10` -- below the project default (0.30) every preset measurement
+    /// and every `cascading_charge_*`/`a_coupled_charge_*` regression above was validated at. At
+    /// this fill fraction coarse-graining is *weaker* (`k` drops from ~4.05 at J=0.30 to ~2.34
+    /// here), so the simulated ball diameter shrinks (~23.4 mm) while the fluid lattice spacing
+    /// stays fixed by `resolution` alone (~33.3 mm) -- a fluid particle wider than a ball
+    /// (`dx / d_eff ~= 1.43`), the exact regime `web/src/ui/paramsPanel.ts`'s
+    /// `fluidSpacingVsBall > 1.0` warning already flags as part of the fluidised-charge bug's
+    /// root cause. Runs the real coupled solver directly (not `Simulation`, so every per-sub-step
+    /// diagnostic is available) and returns:
+    /// - `max_ball_speed`: the fastest any ball moves during the measurement window (m/s);
+    /// - `max_centroid_distance_ratio`: the farthest any single ball ends up from the charge's
+    ///   own centroid, normalized by the population's RMS spread from that centroid -- a compact
+    ///   cascading/mixed charge keeps this bounded; an ejected, isolated ball is a sustained
+    ///   outlier;
+    /// - `mean_mechanical_energy_slope_w`: the ball population's total mechanical energy
+    ///   (`dem::mechanical_energy_j`), linear-fit slope over the measurement window (W) -- should
+    ///   not trend upward in a steady cascading regime.
+    fn low_fill_cataracting_charge_diagnostics() -> (f32, f32, f32) {
+        use crate::dem;
+        use crate::params::{
+            Direction, MediaParams as Media, MillParams, Params, SimulationParams,
+            SlurryParams as Slurry, SpeedMode,
+        };
+
+        let params = Params {
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::Rpm,
+                speed_value: 30.0, // ~71% Nc for a 1.0 m drum, matching the report
+                direction: Direction::CounterClockwise,
+            },
+            media: Media {
+                fill_fraction: 0.10,
+                ..Media::default()
+            },
+            slurry: Slurry::default(),
+            lifters: LiftersParams::default(), // count = 0, smooth wall
+            simulation: SimulationParams {
+                max_balls: 150,
+                resolution: 15,
+                ..SimulationParams::default()
+            },
+        };
+        params.validate().unwrap();
+
+        let effective = params.effective_media();
+        let radius_m = params.mill.radius_m();
+        let omega = params.mill.omega();
+        let mut dem = DemState::new(&effective, radius_m, params.simulation.seed);
+        let mut fluid = FluidParticles::seed_lattice(
+            &params.slurry,
+            radius_m,
+            params.simulation.resolution,
+            &dem.balls.x,
+            dem.balls.radius,
+        );
+        let sub_dt = 1.0 / (60.0 * params.simulation.substeps as f32);
+        let mut drum_angle = 0.0f32;
+
+        // Settling phase (not measured): the fresh lattice's initial contact/fall transient is
+        // not representative of steady-state behaviour, same rationale as every sibling test in
+        // this module and in `dem.rs`/`lib.rs`.
+        for _ in 0..(5.0 / sub_dt) as u32 {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            step(
+                &mut dem,
+                &mut fluid,
+                &drum,
+                drum_angle,
+                &params.media,
+                &params.slurry,
+                params.simulation.dem_iterations,
+                params.simulation.pbf_iterations,
+                sub_dt,
+            );
+            drum_angle = (drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
+        }
+
+        // Measurement phase.
+        let measure_seconds = 5.0f32;
+        let n_measurement_steps = (measure_seconds / sub_dt) as u32;
+        let mut max_ball_speed = 0.0f32;
+        let mut max_centroid_distance = 0.0f32;
+        let mut sum_sq_centroid_distance = 0.0f32;
+        let mut n_centroid_samples = 0u32;
+        // One (t, energy) sample per simulated second, for a simple linear-fit slope.
+        let mut energy_samples: Vec<(f32, f32)> = Vec::new();
+        let samples_stride = (1.0 / sub_dt) as u32;
+        for i in 0..n_measurement_steps {
+            let drum = Drum::new(radius_m, omega, params.lifters);
+            step(
+                &mut dem,
+                &mut fluid,
+                &drum,
+                drum_angle,
+                &params.media,
+                &params.slurry,
+                params.simulation.dem_iterations,
+                params.simulation.pbf_iterations,
+                sub_dt,
+            );
+            drum_angle = (drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
+
+            for v in &dem.balls.v {
+                max_ball_speed = max_ball_speed.max(v.length());
+            }
+
+            let centroid =
+                dem.balls.x.iter().fold(Vec2::ZERO, |acc, &p| acc + p) / dem.balls.len() as f32;
+            let mut max_this_step = 0.0f32;
+            for &p in &dem.balls.x {
+                let d = (p - centroid).length();
+                sum_sq_centroid_distance += d * d;
+                n_centroid_samples += 1;
+                max_this_step = max_this_step.max(d);
+            }
+            max_centroid_distance = max_centroid_distance.max(max_this_step);
+
+            if i % samples_stride.max(1) == 0 {
+                let t = i as f32 * sub_dt;
+                energy_samples.push((t, dem::mechanical_energy_j(&dem.balls)));
+            }
+        }
+
+        let rms_spread = (sum_sq_centroid_distance / n_centroid_samples.max(1) as f32).sqrt();
+        let max_centroid_distance_ratio = if rms_spread > 1e-6 {
+            max_centroid_distance / rms_spread
+        } else {
+            0.0
+        };
+
+        // Simple ordinary-least-squares slope of energy vs. time (W). A settled/steady cascading
+        // charge should have a slope near zero (energy input from the wall roughly balances
+        // dissipation); a persistent positive slope means the charge is gaining energy from
+        // somewhere the accounting doesn't attribute to the wall.
+        let n = energy_samples.len().max(1) as f32;
+        let mean_t: f32 = energy_samples.iter().map(|(t, _)| *t).sum::<f32>() / n;
+        let mean_e: f32 = energy_samples.iter().map(|(_, e)| *e).sum::<f32>() / n;
+        let mut num = 0.0f32;
+        let mut den = 0.0f32;
+        for &(t, e) in &energy_samples {
+            num += (t - mean_t) * (e - mean_e);
+            den += (t - mean_t) * (t - mean_t);
+        }
+        let mean_mechanical_energy_slope_w = if den > 1e-9 { num / den } else { 0.0 };
+
+        (
+            max_ball_speed,
+            max_centroid_distance_ratio,
+            mean_mechanical_energy_slope_w,
+        )
+    }
+
+    #[test]
+    fn low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid() {
+        // Direct regression for the 2026-09-22 unphysical-scatter report at this exact
+        // configuration. Two architectural changes attempting a *deeper* fix were tried here and
+        // reverted after they regressed this crate's own existing, tuned regressions -- see
+        // `C:\Users\toshi\.claude\plans\quirky-floating-wadler.md` for the full record:
+        // - step 3.5's ball reaction cannot simply be removed (treating `balls` as a passive
+        //   boundary like the drum wall): that measurably worsened
+        //   `metrics::tests::compression_error_stays_bounded_under_violent_lifter_cataracting`
+        //   (0.123 vs. the previously-passing ~0.091 bound) -- it is doing real stabilising work
+        //   under violent cataracting that step 6.5/6.6's differently-time-scaled exchange does
+        //   not replace.
+        // - step 6.5's entrained fluid mass cannot simply be capped at the ball's own physical
+        //   added mass: `pbf::tests::ball_drag_matches_two_dimensional_stokes_scaling` (and its
+        //   sibling below) specifically calibrate this closure's *large*-`m_ent` limit against
+        //   real 2D Stokes drag (an effectively-infinite fluid reservoir, `m_ent >> balls.mass`,
+        //   is the physically correct regime there, not a discretisation artefact to suppress).
+        //
+        // What landed instead, validated against the *entire* existing suite (`cargo test -p
+        // mill-core`, 120/120 passing) with no regression:
+        // - the fluid speed clamp (`pbf.rs` step 5.5/7.5) now also runs immediately after step
+        //   5's velocity reconstruction, before steps 6/6.5/6.6 read `self.v` -- so the ball<->
+        //   fluid exchange never sees a still-unclamped reconstruction artefact;
+        // - a ball speed safety backstop (`dem.rs` step 8, [`crate::dem::BALL_SPEED_SAFETY_
+        //   FACTOR`]) mirroring the fluid's own, since none existed for balls at all.
+        //
+        // Measured effect at this exact configuration (Realtime preset, `max_balls=150`,
+        // `resolution=15`, `media.fill_fraction=0.10`): the ball population's total mechanical
+        // energy slope over a 5s measurement window went from **+16.9 W/m (net energy gain --
+        // the "gas" failure mode)** before this fix to **-11.1 W/m (net dissipation, the
+        // physically expected sign)** after. Peak instantaneous ball speed did *not* measurably
+        // improve in this aggregate statistic (~4-5 m/s either way, ball-speed-clamp backstop
+        // never engaged in this run) -- this fix closes the specific unbounded-energy-injection
+        // defect it targets, but does not, by itself, fully explain the screenshot's visually
+        // dramatic single-ball ejections; see the fix plan's final notes for recommended
+        // follow-up (Phase 2's resolution/`d_eff` envelope guard, visual confirmation in the
+        // rebuilt app).
+        let (max_ball_speed, max_centroid_distance_ratio, energy_slope_w) =
+            low_fill_cataracting_charge_diagnostics();
+        eprintln!(
+            "low_fill_cataracting_charge_diagnostics: max_ball_speed={max_ball_speed} m/s, \
+             max_centroid_distance_ratio={max_centroid_distance_ratio}, \
+             energy_slope_w={energy_slope_w} W/m"
+        );
+        // The real, tightened bound: catches a regression back to the net-energy-gain "gas"
+        // failure mode (measured +16.9 W/m before this fix) while allowing the ordinary
+        // measurement noise a 5s window has (measured -11.1 W/m after the fix); comfortably below
+        // this project's own dissipated-power scale (O(10^3) W/m at typical ball counts, see
+        // `docs/METRICS.md`), so a real regression trips this long before it would ever look like
+        // legitimate dissipation.
+        assert!(
+            energy_slope_w < 5.0,
+            "ball population's mechanical energy is trending upward faster than measurement \
+             noise should allow -- looks like the coupling is injecting net energy again: \
+             energy_slope_w={energy_slope_w} W/m"
+        );
+        // Sanity ceilings only (not yet a tight bound -- see this test's doc comment above for
+        // why peak speed specifically was not driven down further at this effort level): well
+        // above every measured value (4-5 m/s) but far below the ball speed safety backstop's own
+        // ceiling (~24 m/s at this configuration), so a genuine blow-up still trips this first.
+        assert!(
+            max_ball_speed < 15.0,
+            "ball speed far exceeds anything measured for this configuration (looks like a \
+             regression, not ordinary cataracting motion): max_ball_speed={max_ball_speed}"
+        );
+        assert!(
+            max_centroid_distance_ratio < 10.0,
+            "a ball is sitting far outside the charge's own spread (looks like an isolated \
+             ejected ball, not ordinary cataracting motion): ratio={max_centroid_distance_ratio}"
+        );
+    }
 }

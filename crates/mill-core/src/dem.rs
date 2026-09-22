@@ -57,6 +57,24 @@ const MAX_RECOVERY_FRACTION: f32 = 0.2;
 /// position magnitudes.
 const CCD_CONTACT_SKIN_FRACTION: f32 = 1e-2;
 
+/// Safety factor on the physically-attainable ball speed, mirroring
+/// [`crate::pbf::FLUID_SPEED_SAFETY_FACTOR`]'s formula and rationale exactly: `v_max =
+/// BALL_SPEED_SAFETY_FACTOR * (|drum.omega| * drum.radius_m + sqrt(4 * g * drum.radius_m))` --
+/// the drum's wall speed plus the free-fall speed across the full drum diameter. A ball has no
+/// speed ceiling anywhere else in this solver (unlike the fluid, see the constant above), so a
+/// single mis-scaled coupling impulse, or any other still-undiscovered source of energy
+/// injection, has nothing stopping it from compounding sub-step over sub-step into an openly
+/// unphysical velocity before the next contact (if any) has a chance to arrest it -- exactly the
+/// "media flung out of the charge" failure this backstop targets. `4.0` is tighter than the
+/// fluid's `5.0`: a ball is a rigid body whose *own* dynamics (gravity, contact, wall friction)
+/// are already fully accounted for and energy-bounded (see `dem::mechanical_energy_j` and the
+/// invariant `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_
+/// supplies` proves for the DEM solver in isolation), so there is less slack to allow than for
+/// the fluid (whose own reconstruction step can legitimately need a wider margin, see that
+/// constant's doc comment) -- this is a pure last-resort backstop, never a model parameter users
+/// tune, and clamping here should read as rare as the fluid's own clamp in a healthy run.
+const BALL_SPEED_SAFETY_FACTOR: f32 = 4.0;
+
 /// Number of log-spaced bins in [`DemStepStats::impact_energy_histogram`].
 pub const IMPACT_ENERGY_HISTOGRAM_BINS: usize = 12;
 /// Lower edge (J per metre of mill depth) of the impact-energy histogram's range.
@@ -140,6 +158,11 @@ pub struct DemStepStats {
     /// could in principle miss a collision along the way. Diagnostic only in this pass; a
     /// continuous (swept) collision guard is future work.
     pub max_substep_displacement_over_diameter: f32,
+    /// Number of balls whose speed this sub-step hit the [`BALL_SPEED_SAFETY_FACTOR`] backstop
+    /// clamp. Mirrors [`crate::pbf::FluidStepStats::coupling_clamp_hits`]: healthy at 0, or very
+    /// near it -- persistent clamping means something (most likely the ball<->fluid coupling) is
+    /// pinned at an artificial velocity ceiling rather than reflecting the physical interaction.
+    pub ball_speed_clamp_hits: u32,
 }
 
 /// Mass of one ball, modelled as a **unit-depth disc** (kg per metre of mill length):
@@ -830,6 +853,24 @@ impl DemState {
             }
         }
 
+        // --- 8. Ball speed clamp (stability backstop) -- see [`BALL_SPEED_SAFETY_FACTOR`]'s doc
+        // comment for the formula and rationale. Applied last, after every other velocity-writing
+        // step above, so it only ever clips an already-final velocity rather than being
+        // overwritten by a later step.
+        let ball_speed_v_max = BALL_SPEED_SAFETY_FACTOR
+            * (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt());
+        let mut ball_speed_clamp_hits = 0u32;
+        for v in balls.v.iter_mut() {
+            let speed = v.length();
+            if !speed.is_finite() {
+                *v = Vec2::ZERO;
+                ball_speed_clamp_hits += 1;
+            } else if speed > ball_speed_v_max {
+                *v *= ball_speed_v_max / speed;
+                ball_speed_clamp_hits += 1;
+            }
+        }
+
         let e_final = mechanical_energy_j(balls);
         DemStepStats {
             wall_work_j,
@@ -837,6 +878,7 @@ impl DemState {
             impact_energy_histogram,
             dissipated_energy_j: e_after_predict + wall_work_j - e_final,
             max_substep_displacement_over_diameter,
+            ball_speed_clamp_hits,
         }
     }
 }

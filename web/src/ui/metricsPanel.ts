@@ -129,17 +129,19 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
 
 // Warning-highlight thresholds (raw metric values, not formatted strings): a row is flagged
 // `is-warn` once its value exceeds the threshold below. All ids below use the same "value is
-// greater than threshold" test -- coupling_clamp_hits's "warn on any hit" semantics is just the
-// threshold-0 case of that same rule, not a different rule. The Solver-health key-block roll-up
-// (below) reads this same map, so there is exactly one place these four diagnostics are defined
-// as "alarms" rather than "continuously-read numbers".
+// greater than threshold" test -- coupling_clamp_hits's (and ball_speed_clamp_hits's) "warn on
+// any hit" semantics is just the threshold-0 case of that same rule, not a different rule. The
+// Solver-health key-block roll-up (below) reads this same map, so there is exactly one place
+// these five diagnostics are defined as "alarms" rather than "continuously-read numbers".
 const COUPLING_CLAMP_HITS_WARN_THRESHOLD = 0;
+const BALL_SPEED_CLAMP_HITS_WARN_THRESHOLD = 0;
 const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
 const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
 const MAX_BALL_OVERLAP_WARN_THRESHOLD = 0.5;
 
 const WARN_THRESHOLDS = new Map<string, number>([
   ["coupling_clamp_hits", COUPLING_CLAMP_HITS_WARN_THRESHOLD],
+  ["ball_speed_clamp_hits", BALL_SPEED_CLAMP_HITS_WARN_THRESHOLD],
   ["substep_displacement", SUBSTEP_DISPLACEMENT_WARN_THRESHOLD], // confirmed against metrics/specs.ts
   ["max_compression_error", MAX_COMPRESSION_ERROR_WARN_THRESHOLD],
   ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],
@@ -252,7 +254,7 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     keySection.appendChild(buildRow(spec, "is-key"));
   }
 
-  // Solver-health roll-up: one line summarising the four WARN_THRESHOLDS diagnostics (below)
+  // Solver-health roll-up: one line summarising the five WARN_THRESHOLDS diagnostics (below)
   // instead of making the reader open three separately-collapsed groups to find them. A button
   // (not a plain row) so clicking it can open whichever group(s) currently hold a warned row.
   const healthRow = document.createElement("button");
@@ -463,7 +465,7 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     }
 
     // Solver-health roll-up: same WARN_THRESHOLDS rule as the per-row `is-warn` highlight above,
-    // just collected into the key block's one line instead of read off four separately-collapsed
+    // just collected into the key block's one line instead of read off five separately-collapsed
     // rows. `lastWarnedIds` is read by the row's own click handler (above) to open the right
     // group(s).
     const warnedSpecs = METRIC_SPECS.filter((s) => {
