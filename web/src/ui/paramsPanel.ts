@@ -16,6 +16,7 @@ import {
   substepDisplacementOverDiameter,
   trueBallCount,
 } from "../params/derived";
+import { MEDIA_MATERIALS } from "../params/materials";
 import { QUALITY_PRESETS } from "../params/presets";
 import { fromDisplayValue, GROUPS, getPath, SCHEMA, toDisplayValue, withPath } from "../params/schema";
 
@@ -155,6 +156,8 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   let mediaWarn: HTMLParagraphElement | null = null;
   let presetSelect: HTMLSelectElement | null = null;
   let presetNote: HTMLParagraphElement | null = null;
+  let materialSelect: HTMLSelectElement | null = null;
+  let materialNote: HTMLParagraphElement | null = null;
 
   /**
    * Resets the Quality preset dropdown to "(custom)" once `simulation.max_balls`/`resolution` no
@@ -177,6 +180,33 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     if (!matches) {
       presetSelect.value = "";
       if (presetNote) presetNote.hidden = true;
+    }
+  }
+
+  /**
+   * Keeps the Media material dropdown in sync with `media.density_kg_m3`: selects the material
+   * whose density matches the current field value (and shows its note), or falls back to
+   * "(custom)" when no material matches -- e.g. the user picked "Stainless steel" and then
+   * hand-edited "Media density" away from 7700, or a freshly-loaded params object's density
+   * happens to equal a known material's value. Unlike `syncPresetSelectWithFields` (which only
+   * resets an already-selected preset), this searches all of `MEDIA_MATERIALS` every time since
+   * there is a single backing field to match against, so it also handles selecting the right
+   * material on initial load.
+   */
+  function syncMaterialSelectWithFields(): void {
+    if (!materialSelect) return;
+    const densityInput = inputs.get("media.density_kg_m3") as HTMLInputElement | undefined;
+    const material =
+      densityInput !== undefined ? MEDIA_MATERIALS.find((m) => m.densityKgM3 === Number(densityInput.value)) : undefined;
+    if (material) {
+      materialSelect.value = material.id;
+      if (materialNote) {
+        materialNote.textContent = material.note;
+        materialNote.hidden = false;
+      }
+    } else {
+      materialSelect.value = "";
+      if (materialNote) materialNote.hidden = true;
     }
   }
 
@@ -250,6 +280,51 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       });
     }
 
+    if (group === "Media") {
+      const materialRow = document.createElement("label");
+      materialRow.className = "params-row";
+      const materialLabel = document.createElement("span");
+      materialLabel.textContent = "Media material";
+      materialRow.appendChild(materialLabel);
+
+      materialSelect = document.createElement("select");
+      const materialPlaceholderOption = document.createElement("option");
+      materialPlaceholderOption.value = "";
+      materialPlaceholderOption.textContent = "(custom)";
+      materialSelect.appendChild(materialPlaceholderOption);
+      for (const material of MEDIA_MATERIALS) {
+        const opt = document.createElement("option");
+        opt.value = material.id;
+        opt.textContent = material.label;
+        materialSelect.appendChild(opt);
+      }
+      materialRow.appendChild(materialSelect);
+      details.appendChild(materialRow);
+
+      materialNote = document.createElement("p");
+      materialNote.className = "params-note";
+      materialNote.hidden = true;
+      details.appendChild(materialNote);
+
+      // Sets media.density_kg_m3's *displayed* (not-yet-applied) value, exactly as if the user had
+      // typed it in directly -- Apply still commits (and still resets; the field is
+      // `resetRequired`, see schema.ts).
+      materialSelect.addEventListener("change", () => {
+        const material = MEDIA_MATERIALS.find((m) => m.id === materialSelect!.value);
+        if (!material) {
+          if (materialNote) materialNote.hidden = true;
+          return;
+        }
+        const densityInput = inputs.get("media.density_kg_m3");
+        if (densityInput) densityInput.value = String(material.densityKgM3);
+        if (densityInput) densityInput.dispatchEvent(new Event("input", { bubbles: true }));
+        if (materialNote) {
+          materialNote.textContent = material.note;
+          materialNote.hidden = false;
+        }
+      });
+    }
+
     for (const field of SCHEMA.filter((f) => f.group === group)) {
       const row = document.createElement("label");
       row.className = "params-row";
@@ -293,6 +368,9 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         refreshDerived();
         if (field.path === "simulation.max_balls" || field.path === "simulation.resolution") {
           syncPresetSelectWithFields();
+        }
+        if (field.path === "media.density_kg_m3") {
+          syncMaterialSelectWithFields();
         }
       });
       inputs.set(field.path, input);
@@ -518,6 +596,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     }
     clearInvalid();
     refreshDerived();
+    syncMaterialSelectWithFields();
     setStatus("applied");
   }
 
