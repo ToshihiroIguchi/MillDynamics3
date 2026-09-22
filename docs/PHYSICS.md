@@ -572,14 +572,26 @@ an entrained mass `m_ent = sum_i particle_mass * phi_i` and a weighted mean flui
 (sum_i particle_mass * phi_i * v_i) / m_ent`:
 
 ```
-tau   = rho_ball * r^2 / (4 * mu)                     (Stokes-regime disc relaxation-time closure)
-beta  = slurry.ball_no_slip * (1 - exp(-dt / tau))     (unchanged closure)
-a_lin = beta * m_ent / (balls.mass + m_ent)            <= 1 for every mu, dt
-dv_b  = a_lin * (v_bar - v_b)
+tau_stokes = rho_ball * r^2 / (4 * mu)                     (Stokes-regime disc relaxation time)
+tau_form   = balls.mass / (rest_density * C_D * (2r) * |v_rel|)   (2D-cylinder form-drag time)
+1/tau_eff  = 1/tau_stokes + 1/tau_form
+beta       = slurry.ball_no_slip * (1 - exp(-dt / tau_eff))
+a_lin      = beta * m_ent / (balls.mass + m_ent)            <= 1 for every mu, dt
+dv_b       = a_lin * (v_bar - v_b)
 ```
 
 `rho_ball = balls.mass / (pi * balls.radius^2)`; `mu = slurry.viscosity_pa_s` is the *physical*
-slurry viscosity. The reaction is distributed back across the same weighted fluid neighbours
+slurry viscosity; `v_rel = v_bar - v_b`; `C_D = BALL_FORM_DRAG_COEFFICIENT = 1.0` (a circular
+cylinder's standard high-`Re` drag coefficient). `tau_stokes` alone is the correct regime at this
+project's default 50 Pa*s (ball `Re ~ 1`), but at water-like viscosity a ball's speed (1-5 m/s)
+reaches `Re ~ 10^2-10^4`, where drag is form- (not viscosity-) dominated and `tau_stokes` alone
+under-predicts it by orders of magnitude -- an external review's finding. Combining the two
+regimes as reciprocal relaxation times means the smaller (faster-relaxing) of the two dominates,
+matching how the two drag laws' relative magnitudes actually compare, while keeping the same
+`beta`-based closure and hence the same `a_lin <= 1` / `a_rot <= 1` conservation bounds as before.
+`tau_form` depends on the ball's own relative speed, so `beta` (and hence `tau_eff`) is now
+computed per ball rather than hoisted out as a single scalar for the whole population. The reaction
+is distributed back across the same weighted fluid neighbours
 (`dv_i = -(balls.mass / m_ent) * dv_b * phi_i`), so linear momentum is conserved exactly
 (`sum_i particle_mass * dv_i == -balls.mass * dv_b`). The angular part mirrors this using
 `balls.inertia` and a tangential taper field in place of `balls.mass` and `v_bar`, plus a
@@ -639,21 +651,31 @@ own step-2 neighbour grid at the ball's position:
 ```
 rho_local = sum_j m_j * W_poly6(|x_ball - x_j|^2, h)   (over nearby fluid particles j)
 rho_eff = min(rho_local, rest_density)
-g_eff = (0, GRAVITY) + omega^2 * x_ball        (apparent gravity in the fluid's rotating frame)
+omega_local = (sum_j w_j * cross2(x_j, v_j)/|x_j|^2) / sum_j w_j, clamped to [-|omega|, |omega|]
+g_eff = (0, GRAVITY) + omega_local^2 * x_ball  (apparent gravity in the *fluid's own* rotating frame)
 impulse_on_ball = -rho_eff * (pi * r^2) * g_eff * dt   (acts through the centroid: no torque)
 ```
 
+(`w_j = m_j * W_poly6(...)`, the same weights used for `rho_local`; `omega` is `drum.omega`.)
 Clamping to `rest_density` avoids over-buoyancy from a locally compacted pocket and tapers smoothly
 to zero as a ball nears the free surface (lower sampled density there) instead of an on/off cutoff.
 `g_eff` is the general Archimedes formula `F = -rho * V * g_eff` applied with the *apparent* gravity
-a slurry parcel in near solid-body rotation with the drum actually feels: its own real acceleration
-is centripetal (`-omega^2 * x_ball`, `x_ball` measured from the drum's centre, the world origin --
-see `Drum::wall_velocity`), so `g_eff = g_vec - a_fluid = g_vec + omega^2 * x_ball`. At `omega = 0`
-this reduces exactly to the plain world-vertical expression; away from zero it adds the inward
-(centripetal) buoyancy a real rotating slurry pool exerts, which an earlier version omitted
-entirely -- every ball, regardless of density, was buoyed only against gravity, never pushed toward
-the drum's axis by the centrifugal pressure gradient that dominates near the wall at speed. The
-reaction is applied immediately as a velocity change split across the contributing fluid
+a slurry parcel actually feels in its own (possibly accelerating) rest frame: a parcel in solid-body
+rotation has real acceleration `-omega_local^2 * x_ball` (`x_ball` measured from the drum's centre,
+the world origin -- see `Drum::wall_velocity`), so `g_eff = g_vec - a_fluid = g_vec + omega_local^2
+* x_ball`. `omega_local` is the *measured* kernel-weighted mean angular rate of the sampled fluid
+neighbourhood, not `drum.omega` itself: an earlier version used `drum.omega` unconditionally, which
+was correct for slurry genuinely centrifuged against the wall but gave every ball in a bottom pool
+held mostly by gravity (not in solid-body rotation with the drum -- an external review's finding) a
+large fictitious inward pull, since `omega_local` there is far below `drum.omega`. The `|drum.omega|`
+clamp is a physical ceiling (a wall-driven pool cannot out-rotate the wall in steady state) that also
+makes this term strictly non-increasing relative to the pre-fix `drum.omega^2 * x_ball` version, so
+the fix can only remove a fictitious force, never add a new one. At `omega_local = 0` (a still pool,
+or `drum.omega = 0`) this reduces to the plain world-vertical expression; a genuinely centrifuged
+pool still gets the full inward buoyancy this mechanism was added for -- see this section's earlier
+history: an even-earlier version omitted the centripetal term entirely, buoying every ball only
+against gravity regardless of rotation speed. The reaction is applied immediately as a velocity
+change split across the contributing fluid
 particles, weighted by each one's share `w_j / rho_local` of the sampled local density — this must
 run after step 6's velocity reconstruction, not before, or the reconstruction would overwrite it.
 This mechanism did not exist in the original coupling design (`docs/PLAN.md` ss3.4 describes
@@ -736,7 +758,11 @@ wasm/frontend boundary.
 derives:
 
 - **Toe/shoulder angles** (`charge_toe_shoulder`): balls within `WALL_MARGIN_BALL_RADII (2.5) *
-  balls.radius` of the wall approximate the charge's outer layer; if there are at least
+  balls.radius` of the wall, per `drum.sdf_world` (so a ball riding a lifter's tip counts as
+  wall-adjacent, not just one near the plain circular wall between lifters -- an earlier version
+  compared against the bare undecorated-circle distance and missed lifter-borne balls; identical
+  to that version when `lifters.count == 0`), approximate the charge's outer layer; if there are at
+  least
   `MIN_WALL_BALLS (6)` such balls and their angular gap exceeds `CENTRIFUGE_GAP_THRESHOLD_RAD (0.3
   * pi)` (i.e. not centrifuged), the two ends of the largest angular gap in that wall-adjacent
   population are the toe/shoulder (assignment to toe vs. shoulder depends on `drum.omega`'s sign).
@@ -916,3 +942,34 @@ state after calling `compute`:
   unaffected, since total charge mass is preserved regardless of `k`. The UI hides these two
   readings, with an explanatory note, whenever `coarse_graining_factor > 1` (docs/METRICS.md)
   rather than showing a number that cannot be compared to a real mill.
+- **Restitution (ss4.2 step 6) can apply a tensile (pulling) normal impulse to a ball-ball or
+  ball-wall pair.** An external review read this as violating Signorini's non-tensile contact
+  condition (`F_n >= 0`). Step 6 drives the *relative normal velocity* to
+  `target = max(-e*v_n_pre, 0, v_n_pre)` -- in both directions, not just topped up when it falls
+  short. When step 3's bounded depenetration has already pushed a pair apart faster than `target`
+  justifies (`v_n_now > target`), `delta_v_n = target - v_n_now < 0` and the impulse pulls them back
+  together -- but the *result* of that impulse is the pair's relative normal velocity landing
+  exactly at `target >= 0`, never negative. No pair is ever left approaching after this step, so no
+  interpenetration or adhesion follows from it; this is the deliberate energy cap
+  `MAX_RECOVERY_FRACTION` and this step's own doc comments describe (closing the fluidised-charge
+  energy-injection bug), not a Signorini violation at the velocity level a downstream step could
+  observe.
+- **`RESTITUTION_VELOCITY_THRESHOLD` (0.02 m/s) looks smaller than one sub-step's gravity increment
+  (`g*dt ~= 0.041 m/s` at 240 Hz), suggesting a settled bed would misread as colliding every
+  sub-step.** It does not: `v_pre` (the approach speed step 6 tests against the threshold) is
+  snapshotted *before* step 1 applies gravity, and step 6 itself drives every contact's actual
+  relative normal velocity to (for a resting contact) exactly `0`, not merely toward it. A settled
+  bed therefore enters each new sub-step already at `v_n_pre ~= 0`, not `-g*dt`, and is correctly
+  read as resting rather than as a fresh impact.
+- **`morris_weights` (ss5.3) evaluates the Morris viscosity Laplacian with `spiky_grad`, a kernel
+  gradient that does not vanish at the origin.** Morris's (1997) second-order argument assumes a
+  kernel whose gradient does go to zero there; using one that doesn't is a theoretical mismatch an
+  external review correctly flagged. In this discretisation it stays benign: the coefficient
+  `c_ij = m_j*2*mu/(rho_i*rho_j) * |x_ij . grad_W_ij| / (|x_ij|^2 + eta^2)` has a numerator that is
+  `O(|x_ij|)` (Spiky's gradient magnitude itself is `O(h - |x_ij|)`, finite at the origin, but the
+  dot product `x_ij . grad_W_ij` still carries one explicit factor of `|x_ij|`), so `c_ij -> 0` as
+  `|x_ij| -> 0` despite the non-vanishing gradient, and `c_ij >= 0` for every pair regardless --
+  `L` stays symmetric positive semi-definite, the only property `solve_implicit_viscosity`'s
+  conjugate-gradient solve relies on. Swapping in an origin-vanishing kernel gradient is possible
+  but would change the discretisation's effective viscosity scale, so it is a recalibration, not a
+  drop-in correctness fix.

@@ -101,6 +101,15 @@ const VISCOSITY_CG_MAX_ITERS: u32 = 50;
 /// viscosity).
 const VISCOSITY_ETA_FACTOR: f32 = 0.01;
 
+/// Drag coefficient for a 2D cylinder (a ball's cross-section) in the form-drag term folded into
+/// step 6.5's ball relaxation time -- see that step's doc comment. `1.0` is the standard
+/// high-Reynolds-number (`Re ~ 10^3-10^5`, past the drag crisis) value for a circular cylinder in
+/// crossflow; this project's ball speeds (up to a few m/s) sit in that regime once the fluid is
+/// low-viscosity enough for form drag to matter at all (at this project's default 50 Pa*s,
+/// `Re ~ 1` and the Stokes term already dominates, so this constant's exact value has negligible
+/// effect there).
+const BALL_FORM_DRAG_COEFFICIENT: f32 = 1.0;
+
 /// 2D Poly6 kernel (docs/PLAN.md ss3.3: `4/(pi h^8)`), evaluated from squared distance.
 fn poly6(r2: f32, h: f32) -> f32 {
     if r2 >= h * h || r2 < 0.0 {
@@ -1051,10 +1060,26 @@ impl FluidParticles {
             }
         }
 
-        // --- 6.5 Ball viscous drag (docs/PLAN.md ss3.4 step 2, docs/PHYSICS.md ss6.2): each ball
-        // relaxes toward its locally-entrained fluid mass via a Stokes-regime relaxation time
-        // `tau = rho_ball * r^2 / (4 * mu)`, `beta = ball_no_slip * (1 - exp(-dt / tau))`, same
-        // closure as before. The exchange is a **centre-of-mass relaxation between the ball and
+        // --- 6.5 Ball drag, Stokes + form (docs/PLAN.md ss3.4 step 2, docs/PHYSICS.md ss6.2):
+        // each ball relaxes toward its locally-entrained fluid mass via a relaxation time that
+        // combines two regimes in series (`1/tau_eff = 1/tau_stokes + 1/tau_form`):
+        //
+        //   tau_stokes = rho_ball * r^2 / (4 * mu)                          linear (viscous) drag
+        //   tau_form   = balls.mass / (rest_density * C_D * (2r) * |v_rel|) quadratic (form) drag
+        //
+        // `tau_stokes` alone (the project's only drag term before this) is the correct regime at
+        // this project's default viscosity (50 Pa*s gives ball Reynolds numbers ~1), but at
+        // water-like viscosity a ball's speed (1-5 m/s) puts `Re` in the `10^2-10^4` range, where
+        // drag is form-dominated (`F ~ C_D * rho * (2r) * v^2`, `C_D ~= 1` past the drag crisis --
+        // [`BALL_FORM_DRAG_COEFFICIENT`]) and `tau_stokes` alone under-predicts drag by orders of
+        // magnitude. Combining the two as reciprocal relaxation times (rather than summing forces
+        // directly) means the smaller of the two time scales dominates, exactly as the two drag
+        // laws' relative magnitudes would dictate, while keeping the same `beta = ball_no_slip *
+        // (1 - exp(-dt / tau_eff))` relaxation closure -- and hence the same `a_lin <= 1`,
+        // `a_rot <= 1` conservation bounds -- as the pure-Stokes version. `tau_form` depends on
+        // this ball's `v_rel = v_bar - balls.v[b]`, so unlike `tau_stokes` it cannot be hoisted
+        // out of the per-ball loop below; it is computed right after `v_bar`. The exchange is a
+        // **centre-of-mass relaxation between the ball and
         // its entrained fluid mass**, not a per-particle blend: an earlier version applied `beta`
         // independently to *every* nearby fluid particle and let the ball absorb the sum of all
         // those reactions, which amplifies the ball's actual response by the entrained/ball mass
@@ -1095,16 +1120,18 @@ impl FluidParticles {
         // so its own relaxation is computed (and bounded) against reality rather than against a
         // stale snapshot every other overlapping ball is *also* independently correcting.
         let mu = slurry.viscosity_pa_s.max(0.0);
-        if !balls.is_empty() && balls.radius > 0.0 {
+        // `mu > 1e-6` stays the outer gate deliberately: `viscosity_pa_s == 0` means "no ball
+        // drag at all" (the fluid has literally no drag mechanism, form or otherwise, without
+        // it), not just "no Stokes term" -- see this step's doc comment.
+        if !balls.is_empty() && balls.radius > 0.0 && mu > 1e-6 {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
             let rho_ball = balls.mass / (std::f32::consts::PI * balls.radius * balls.radius);
-            let beta = if mu > 1e-6 && rho_ball > 0.0 {
-                let tau = (rho_ball * balls.radius * balls.radius / (4.0 * mu)).max(1e-9);
-                beta_b * (1.0 - (-dt / tau).exp())
+            let inv_tau_stokes = if rho_ball > 0.0 {
+                1.0 / (rho_ball * balls.radius * balls.radius / (4.0 * mu)).max(1e-9)
             } else {
                 0.0
             };
-            if beta > 0.0 {
+            if beta_b > 0.0 && inv_tau_stokes > 0.0 {
                 let h_c = balls.radius + h;
                 let w_hc0 = poly6(0.0, h_c).max(1e-12);
                 // Coupling-only grid, sized to this step's actual query radius (`h_c`), queried
@@ -1157,8 +1184,21 @@ impl FluidParticles {
 
                     let r_bar = r_sum / m_ent;
                     let v_bar = v_sum / m_ent;
+                    let v_rel = v_bar - balls.v[b];
+                    // Form drag's contribution to `1/tau_eff` (see this step's doc comment);
+                    // zero at `v_rel == 0` (no relative speed, no form drag) rather than a
+                    // divide-by-zero, and folded in as a reciprocal time scale so whichever of
+                    // Stokes/form drag is currently faster dominates the combined relaxation.
+                    let speed_rel = v_rel.length();
+                    let inv_tau_form = if speed_rel > 1e-6 && rest_density > 0.0 {
+                        rest_density * BALL_FORM_DRAG_COEFFICIENT * (2.0 * balls.radius) * speed_rel
+                            / balls.mass
+                    } else {
+                        0.0
+                    };
+                    let beta = beta_b * (1.0 - (-dt * (inv_tau_stokes + inv_tau_form)).exp());
                     let a_lin = beta * m_ent / (balls.mass + m_ent);
-                    let dv_b = a_lin * (v_bar - balls.v[b]);
+                    let dv_b = a_lin * v_rel;
 
                     // Angular relaxation, and the tangential field that distributes its reaction
                     // back to the fluid with zero net linear momentum (mean-subtracted around
@@ -1278,16 +1318,44 @@ impl FluidParticles {
                 // General Archimedes buoyancy is `F = -rho * V * g_eff`, where `g_eff` is the
                 // *apparent* gravity in the fluid's own (possibly accelerating) rest frame: for
                 // slurry in near solid-body rotation with the drum, a fluid parcel's actual
-                // acceleration is centripetal (`-omega^2 * d`, `d` the position relative to the
-                // drum's centre, which is the world origin -- see `Drum::wall_velocity`), so
-                // `g_eff = g_vec - a_fluid = g_vec + omega^2 * d`. At `omega = 0` this reduces
-                // exactly to the previous world-vertical-only expression; away from zero it adds
-                // the inward (centripetal) buoyancy a real rotating slurry pool exerts, which an
-                // external review found completely absent -- every ball, however dense, was
-                // buoyed only against gravity, never pushed toward the drum's axis by the
-                // centrifugal pressure gradient dominating near the wall at speed.
+                // acceleration is centripetal (`-omega_local^2 * d`, `d` the position relative to
+                // the drum's centre, which is the world origin -- see `Drum::wall_velocity`), so
+                // `g_eff = g_vec - a_fluid = g_vec + omega_local^2 * d`. `omega_local` is this
+                // ball's neighbourhood's own kernel-weighted mean angular rate about the drum
+                // centre (`sum_j w_j * cross2(x_j, v_j) / |x_j|^2` over the same `weights` sampled
+                // above for `rho_local`, divided by their total weight), clamped to
+                // `|drum.omega|` -- **not** `drum.omega` itself. A bottom slurry pool held in
+                // place mostly by gravity is not in solid-body rotation with the drum (its own
+                // measured angular rate can be far below `drum.omega`), so using the drum's rate
+                // unconditionally gave every submerged ball a large fictitious inward pull even in
+                // a near-stationary pool -- an external review found this specific case. Using the
+                // fluid's own measured rate instead makes the term self-correcting: it is ~0 for a
+                // stationary pool (no fictitious inward pull) and rises toward the previous
+                // `drum.omega^2 * d` term exactly where that term was actually justified -- slurry
+                // genuinely centrifuged against a fast-spinning wall. The `|drum.omega|` clamp is
+                // a physical ceiling (a wall-driven pool cannot out-rotate the wall in steady
+                // state) that also makes this change strictly non-increasing relative to the
+                // previous unconditional term, so it can only remove a fictitious force, never add
+                // a new one. At `drum.omega == 0` this is `0` either way, matching the original
+                // world-vertical-only expression.
+                let mut omega_num = 0.0f32;
+                let mut omega_den = 0.0f32;
+                for &(ju, w) in &weights {
+                    let d = self.x[ju];
+                    let d2 = d.length_squared();
+                    if d2 <= 1e-12 {
+                        continue;
+                    }
+                    omega_num += w * cross2(d, self.v[ju]) / d2;
+                    omega_den += w;
+                }
+                let omega_local = if omega_den > 0.0 {
+                    (omega_num / omega_den).clamp(-drum.omega.abs(), drum.omega.abs())
+                } else {
+                    0.0
+                };
                 let g_vec = Vec2::new(0.0, GRAVITY);
-                let centripetal = drum.omega * drum.omega * balls.x[b];
+                let centripetal = omega_local * omega_local * balls.x[b];
                 let g_eff = g_vec + centripetal;
                 // Acts through the ball's centroid, so it contributes no angular impulse.
                 let impulse_on_ball = -rho_eff * area * g_eff * dt;
@@ -1537,10 +1605,23 @@ mod tests {
         // per-particle blend, which was off by the entrained/ball mass ratio, ~9x at this
         // project's own defaults). This directly checks that calibration, and that increasing
         // viscosity roughly linearly increases the drag response.
+        //
+        // A larger ball and a moderate relative speed than the sibling form-drag test below,
+        // chosen so both `mu_low`/`mu_high` land in a window where the Stokes term dominates the
+        // form-drag term added alongside it (form drag scales with `v_rel^2`, Stokes with `mu`;
+        // `docs/PHYSICS.md` ss6.2) while staying well clear of the `a_lin <= 1` saturation ceiling
+        // (which scales with `mu` independent of `v_rel`) -- see
+        // `ball_drag_gains_form_drag_at_high_relative_speed_and_low_viscosity` below for the
+        // regime where form drag *should* dominate instead. A small ball at this project's usual
+        // 1+ m/s speeds cannot satisfy both constraints at once (form-drag dominance needs
+        // `mu >> rest_density * r * v / (2*pi)`, saturation-avoidance needs
+        // `mu << rho_ball * r^2 / (4*dt)`, and for a 5 mm ball at 1 m/s those ranges don't
+        // overlap); a bigger ball relaxes the saturation ceiling faster (`~r^2`) than it tightens
+        // the form-drag bound (`~r`), opening a viable window.
         let drum = still_drum(2.0); // large, unused directly (no wall contact at the origin)
-        let ball_radius_m = 0.005;
+        let ball_radius_m = 0.03;
         let ball_density = 6000.0;
-        let fluid_velocity = Vec2::new(1.0, 0.0);
+        let fluid_velocity = Vec2::new(0.3, 0.0);
         let dt = 1.0 / 240.0;
 
         let stokes_drag_impulse = |mu: f32| -> f32 {
@@ -1559,8 +1640,8 @@ mod tests {
             impulses.impulses[0].length()
         };
 
-        let mu_low = 0.5f32;
-        let mu_high = 5.0f32;
+        let mu_low = 10.0f32;
+        let mu_high = 100.0f32;
         let impulse_low = stokes_drag_impulse(mu_low);
         let impulse_high = stokes_drag_impulse(mu_high);
 
@@ -1578,6 +1659,48 @@ mod tests {
             impulse_high > impulse_low * 3.0,
             "drag should scale up substantially with viscosity: \
              impulse(mu={mu_low})={impulse_low}, impulse(mu={mu_high})={impulse_high}"
+        );
+    }
+
+    #[test]
+    fn ball_drag_gains_form_drag_at_high_relative_speed_and_low_viscosity() {
+        // Regression for an external review finding (docs/PHYSICS.md ss6.2): at water-like
+        // viscosity and a ball speed typical of this project's media (1-5 m/s), the ball Reynolds
+        // number reaches ~10^2-10^4, where drag is form- (not viscosity-) dominated and the
+        // pure-Stokes term alone under-predicts it by orders of magnitude. A 1 cm-radius ball at
+        // 2 m/s in 0.001 Pa*s (water) fluid should be damped far harder than the pure-Stokes
+        // prediction `4*pi*mu*v*dt` -- that prediction is a fraction of a micro-newton-second here
+        // (`tau_stokes` in the hundreds of seconds), while the combined (Stokes + form) drag this
+        // step now applies should be many orders of magnitude larger.
+        let drum = still_drum(2.0);
+        let ball_radius_m = 0.01;
+        let ball_density = 6000.0;
+        let mu = 0.001;
+        let fluid_velocity = Vec2::new(2.0, 0.0);
+        let dt = 1.0 / 240.0;
+        let slurry = SlurryParams {
+            viscosity_pa_s: mu,
+            fill_fraction: 0.0, // unused here (fluid is placed manually)
+            wettability: 0.0,   // isolate drag from adhesion, as the sibling test above does
+            ..SlurryParams::default()
+        };
+        let (balls, mut fluid) =
+            ball_in_uniform_fluid_patch(ball_radius_m, ball_density, &slurry, fluid_velocity);
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
+        let impulse = impulses.impulses[0].length();
+
+        let pure_stokes_prediction = 4.0 * std::f32::consts::PI * mu * fluid_velocity.x * dt;
+        assert!(
+            impulse > pure_stokes_prediction * 100.0,
+            "expected form drag to dominate at this Re, making the actual impulse ({impulse}) far \
+             exceed the pure-Stokes prediction ({pure_stokes_prediction}); got only {}x",
+            impulse / pure_stokes_prediction
+        );
+        // Sanity: still bounded by `a_lin <= 1` (never overshoots the fluid's own velocity).
+        let cap = balls.mass * fluid_velocity.x;
+        assert!(
+            impulse <= cap * 1.0001,
+            "impulse {impulse} exceeds the a_lin<=1 ceiling {cap}"
         );
     }
 
@@ -1616,12 +1739,17 @@ mod tests {
     }
 
     #[test]
-    fn buoyancy_is_purely_vertical_at_rest_and_inward_while_spinning() {
+    fn buoyancy_is_purely_vertical_at_rest_and_inward_while_the_fluid_itself_co_rotates() {
         // Buoyancy in a rotating frame should add an inward (toward the drum's axis) component
-        // once the drum spins, on top of the always-present vertical (gravity) component -- and
-        // must reduce exactly to the world-vertical-only expression at `omega = 0`. Isolated from
-        // every other coupling mechanism (drag, adhesion, cohesion, wall no-slip) so only the
-        // buoyancy impulse (step 6.6) is measured.
+        // once the *fluid itself* is measured rotating, on top of the always-present vertical
+        // (gravity) component -- and must reduce exactly to the world-vertical-only expression
+        // when there is no measured fluid rotation. Isolated from every other coupling mechanism
+        // (drag, adhesion, cohesion, wall no-slip) so only the buoyancy impulse (step 6.6) is
+        // measured.
+        //
+        // This uses `omega_local` (measured from the fluid's own velocity field), not
+        // `drum.omega` directly -- see `buoyancy_ignores_drum_rotation_when_the_pool_itself_is_
+        // still` below for the companion regression this distinction exists for.
         let ball_radius_m = 0.01;
         let ball_density = 6000.0;
         let slurry = SlurryParams {
@@ -1639,12 +1767,18 @@ mod tests {
         let offset = Vec2::new(0.3, 0.0);
         let dt = 1.0 / 480.0;
 
-        let buoyant_impulse_x = |omega: f32| -> f32 {
+        let buoyant_impulse_x = |omega: f32, co_rotate_fluid: bool| -> f32 {
             let (mut balls, mut fluid) =
                 ball_in_uniform_fluid_patch(ball_radius_m, ball_density, &slurry, Vec2::ZERO);
             balls.x[0] += offset;
             for x in fluid.x.iter_mut() {
                 *x += offset;
+            }
+            if co_rotate_fluid {
+                // Solid-body rotation about the drum centre (the world origin): v = omega * perp(x).
+                for (x, v) in fluid.x.iter().zip(fluid.v.iter_mut()) {
+                    *v = omega * Vec2::new(-x.y, x.x);
+                }
             }
             let drum = Drum::new(
                 10.0,
@@ -1658,15 +1792,68 @@ mod tests {
             impulses.impulses[0].x
         };
 
-        let still = buoyant_impulse_x(0.0);
-        let spinning = buoyant_impulse_x(4.0);
+        let still = buoyant_impulse_x(0.0, false);
+        let spinning_and_co_rotating = buoyant_impulse_x(4.0, true);
         assert!(
             still.abs() < 1e-6,
             "no rotation: expected ~zero horizontal buoyant impulse, got {still}"
         );
         assert!(
-            spinning < -1e-6,
-            "spinning drum: expected an inward (negative x) buoyant impulse, got {spinning}"
+            spinning_and_co_rotating < -1e-6,
+            "drum spinning with the fluid measured co-rotating: expected an inward (negative x) \
+             buoyant impulse, got {spinning_and_co_rotating}"
+        );
+    }
+
+    #[test]
+    fn buoyancy_ignores_drum_rotation_when_the_pool_itself_is_still() {
+        // Regression for an external review finding: buoyancy's centripetal term used to use
+        // `drum.omega` directly, regardless of whether the sampled fluid was actually rotating.
+        // A slurry pool held at the drum's bottom mostly by gravity is *not* in solid-body
+        // rotation with the drum (its own measured angular rate can be far below `drum.omega`),
+        // so that gave every submerged ball a large fictitious inward pull even in a pool that,
+        // per its own velocity field, is not rotating at all. `omega_local` (measured from the
+        // sampled neighbourhood's own velocities, not assumed from `drum.omega`) fixes this: a
+        // fast-spinning drum with a *stationary* fluid patch must read as ~0 centripetal
+        // buoyancy, not the large value a `drum.omega`-only formula would give.
+        let ball_radius_m = 0.01;
+        let ball_density = 6000.0;
+        let slurry = SlurryParams {
+            viscosity_pa_s: 0.0,
+            ball_no_slip: 0.0,
+            wettability: 0.0,
+            surface_tension_n_m: 0.0,
+            wall_no_slip: 0.0,
+            fill_fraction: 0.0,
+            ..SlurryParams::default()
+        };
+        let offset = Vec2::new(0.3, 0.0);
+        let dt = 1.0 / 480.0;
+        let (mut balls, mut fluid) =
+            ball_in_uniform_fluid_patch(ball_radius_m, ball_density, &slurry, Vec2::ZERO);
+        balls.x[0] += offset;
+        for x in fluid.x.iter_mut() {
+            *x += offset;
+        }
+        // Fluid velocities are left at zero (a still pool) while the drum spins fast.
+        let drum = Drum::new(
+            10.0,
+            4.0,
+            LiftersParams {
+                count: 0,
+                ..LiftersParams::default()
+            },
+        );
+        let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
+        // Threshold set well above float noise (observed ~1e-6) but ~50x below the fictitious
+        // impulse the pre-fix `drum.omega`-only formula would have given here (~5.6e-3, by this
+        // scenario's own numbers: rho_eff ~ rest_density, area = pi*r^2, centripetal =
+        // drum.omega^2 * offset.x = 16 * 0.3 = 4.8 m/s^2, dt = 1/480).
+        assert!(
+            impulses.impulses[0].x.abs() < 1e-4,
+            "a fast-spinning drum with a measurably still fluid pool should give ~zero \
+             centripetal buoyancy (not one derived from drum.omega alone), got {}",
+            impulses.impulses[0].x
         );
     }
 

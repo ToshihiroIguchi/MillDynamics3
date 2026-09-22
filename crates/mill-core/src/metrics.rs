@@ -191,7 +191,7 @@ pub struct Metrics {
 /// `radius_m`/`omega`/`lifters`), and `drum_angle` should be the simulation's current drum
 /// rotation angle.
 pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> Metrics {
-    let (toe_angle_rad, shoulder_angle_rad) = charge_toe_shoulder(balls, drum);
+    let (toe_angle_rad, shoulder_angle_rad) = charge_toe_shoulder(balls, drum, drum_angle);
     let charge_centroid_m = charge_centroid(balls);
     let (pool_angle_min_rad, pool_angle_max_rad) =
         match slurry_pool_angular_extent(fluid, drum, drum_angle) {
@@ -305,10 +305,15 @@ fn largest_gap_cluster_bounds(angles: &[f32]) -> (f32, f32, f32) {
 }
 
 /// Toe (leading edge) and shoulder (trailing edge) angles of the ball charge's outer layer,
-/// approximated by balls within `WALL_MARGIN_BALL_RADII * balls.radius` of the drum wall (same
-/// approach as dem.rs's `cascading_below_critical_speed_forms_a_toe_and_shoulder` test). `None`
-/// for both if there are too few such balls to assess, or if the charge is centrifuged (the
-/// wall-adjacent balls have no substantial angular gap, i.e. they ring the whole wall).
+/// approximated by balls within `WALL_MARGIN_BALL_RADII * balls.radius` of the drum wall, per
+/// [`Drum::sdf_world`] (same wall-distance convention as [`slurry_pool_angular_extent`] and
+/// [`max_ball_wall_overlap_fraction`], so a ball riding on a lifter's tip is correctly counted as
+/// wall-adjacent rather than only a ball near the plain circular wall between lifters -- an
+/// earlier version compared against `drum.radius_m - p.length()`, the bare distance to the
+/// undecorated circle, which an external review found undercounted lifter-borne balls; the two
+/// are identical whenever `lifters.count == 0`, this project's default). `None` for both if there
+/// are too few such balls to assess, or if the charge is centrifuged (the wall-adjacent balls
+/// have no substantial angular gap, i.e. they ring the whole wall).
 ///
 /// Toe/shoulder assignment depends on `drum.omega`'s sign: the toe is the cluster boundary the
 /// rotation direction carries material *into* (re-entering the charge after the free-fall gap),
@@ -316,7 +321,11 @@ fn largest_gap_cluster_bounds(angles: &[f32]) -> (f32, f32, f32) {
 /// `omega >= 0` (CCW, increasing `atan2` angle is the direction of travel -- see
 /// [`to_vertical_degrees`]'s doc comment) that is `(cluster_start, cluster_end)`; for `omega < 0`
 /// it is the reverse.
-pub fn charge_toe_shoulder(balls: &Balls, drum: &Drum) -> (Option<f32>, Option<f32>) {
+pub fn charge_toe_shoulder(
+    balls: &Balls,
+    drum: &Drum,
+    drum_angle: f32,
+) -> (Option<f32>, Option<f32>) {
     if balls.is_empty() {
         return (None, None);
     }
@@ -324,7 +333,7 @@ pub fn charge_toe_shoulder(balls: &Balls, drum: &Drum) -> (Option<f32>, Option<f
     let mut angles: Vec<f32> = balls
         .x
         .iter()
-        .filter(|p| drum.radius_m - p.length() < wall_margin)
+        .filter(|&&p| drum.sdf_world(p, drum_angle).0 < wall_margin)
         .map(|p| p.y.atan2(p.x).rem_euclid(TAU))
         .collect();
     if angles.len() < MIN_WALL_BALLS {
@@ -736,7 +745,7 @@ mod tests {
             drum_angle += params.mill.omega() * dt;
         }
 
-        let (toe, shoulder) = charge_toe_shoulder(&state.balls, &drum);
+        let (toe, shoulder) = charge_toe_shoulder(&state.balls, &drum, drum_angle);
         let toe = toe.expect("expected a toe angle for a cascading (non-centrifuged) charge");
         let shoulder =
             shoulder.expect("expected a shoulder angle for a cascading (non-centrifuged) charge");
@@ -754,6 +763,74 @@ mod tests {
         assert!(
             (10.0..=100.0).contains(&shoulder_deg),
             "shoulder angle {shoulder_deg} deg from vertical outside the loose acceptance range (docs/PLAN.md ~40-60 deg)"
+        );
+    }
+
+    #[test]
+    fn charge_toe_shoulder_counts_a_ball_riding_a_lifter_tip_as_wall_adjacent() {
+        // Regression for an external review finding: `charge_toe_shoulder` used to filter
+        // wall-adjacent balls by the bare distance to the *undecorated* circle
+        // (`drum.radius_m - p.length()`), which misses a ball resting on a lifter's tip -- a
+        // lifter protrudes *inward* from the base circle (geometry.rs's `sdf_lifters`), so such a
+        // ball sits well inside `drum.radius_m` and reads as far from the wall under that plain
+        // measure even though it is genuinely touching solid geometry there. `drum.sdf_world`
+        // (the fix) correctly reports it as near-wall.
+        use crate::params::LiftersParams;
+
+        let radius_m = 0.5;
+        let lifters = LiftersParams {
+            count: 8,
+            height_m: 0.05,
+            base_width_m: 0.05,
+            top_width_m: 0.02,
+            phase_deg: 0.0,
+        };
+        let drum = Drum::new(radius_m, 0.5, lifters);
+        let ball_r = 0.01;
+        let wall_margin = WALL_MARGIN_BALL_RADII * ball_r; // 0.025
+
+        // Five balls hugging the plain circle (radial gap 0.005 m), clustered well away from any
+        // lifter's angular footprint, satisfying both the old and new filters on their own.
+        let mut x: Vec<Vec2> = (0..5)
+            .map(|i| {
+                let angle = 1.0 + i as f32 * 0.05; // between the lifters at 0.785 and 1.571 rad
+                Vec2::new(angle.cos(), angle.sin()) * (radius_m - 0.005)
+            })
+            .collect();
+
+        // A sixth ball sitting on lifter 0's tip (phase 0 rad): radially well short of
+        // `radius_m` (`r_top = radius_m - height_m = 0.45`), so the plain-circle distance
+        // (`radius_m - 0.44 = 0.06`) is far outside `wall_margin`, but `sdf_world` -- which
+        // follows the lifter's actual (inward) surface -- reports it as near (~0.01 m).
+        let lifter_tip_ball = Vec2::new(0.44, 0.0);
+        let (d_lifter, _) = drum.sdf_world(lifter_tip_ball, 0.0);
+        assert!(
+            d_lifter < wall_margin,
+            "test setup: lifter-tip ball should read near-wall under sdf_world (got {d_lifter})"
+        );
+        assert!(
+            radius_m - lifter_tip_ball.length() >= wall_margin,
+            "test setup: lifter-tip ball must be far from the plain circle (the old, wrong filter)"
+        );
+        x.push(lifter_tip_ball);
+
+        let n = x.len();
+        let balls = Balls {
+            x,
+            v: vec![Vec2::ZERO; n],
+            theta: vec![0.0; n],
+            omega: vec![0.0; n],
+            radius: ball_r,
+            mass: crate::dem::ball_mass(2.0 * ball_r, 7800.0),
+            inertia: crate::dem::ball_inertia(crate::dem::ball_mass(2.0 * ball_r, 7800.0), ball_r),
+        };
+
+        let (toe, shoulder) = charge_toe_shoulder(&balls, &drum, 0.0);
+        assert!(
+            toe.is_some() && shoulder.is_some(),
+            "expected a toe/shoulder reading once the lifter-tip ball pushes the wall-adjacent \
+             count to MIN_WALL_BALLS; got {toe:?}/{shoulder:?} (the pre-fix plain-circle filter \
+             would only find 5 such balls and report None)"
         );
     }
 
