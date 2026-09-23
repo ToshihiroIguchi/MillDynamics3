@@ -1052,3 +1052,24 @@ state after calling `compute`:
   injection number but **not implemented as code in this pass**: auto-raising
   `simulation.resolution` so the fluid lattice spacing never exceeds the coarse-grained effective
   ball diameter (keep `dx/d_eff <= 1`).
+
+  **Follow-up (2026-09-23): the auto-raise is now implemented.** `Params::effective_fluid_resolution`
+  (`params.rs`, right after `Params::effective_media`) computes `min_resolution =
+  ceil(mill.radius_m() / effective_media().diameter_m)` and returns
+  `simulation.resolution.max(min_resolution).min(200)`; `Simulation::new` (`lib.rs`) now calls this
+  method instead of reading `simulation.resolution` directly when seeding the fluid lattice
+  (`pbf::FluidParticles::seed_lattice`). This was motivated by a second, related repro: raising
+  `simulation.max_balls` to 1500 while leaving `simulation.resolution` at the Realtime preset's
+  default of 15 (everything else at `Params::default()`) shrinks `d_eff` via coarse-graining until
+  `dx/d_eff = 2.60`, well past 1; `effective_fluid_resolution` auto-raises the fluid lattice
+  resolution actually used to seed the population to 40 in this case, bringing the ratio back down to
+  `~0.98`. Measured at this exact repro: `coupling_clamp_hits` drops from 7944 to 13 over the same
+  measurement window (~600x), and peak ball speed stops climbing (capped rather than still rising
+  past 7.8 m/s). This is a no-op for all three official quality presets (Realtime 150/15, Balanced
+  300/25, Accuracy 600/40, `web/src/params/presets.ts`) since each already satisfies `dx <= d_eff` at
+  its own defaults (docs/PERF.md's browser table) — it only engages once a custom
+  `max_balls`/`simulation.resolution` combination (or a smaller `media.ball_diameter_m`) pushes the
+  ratio past 1, and when it does engage it costs real extra fluid-solver time (`~resolution^2`
+  particles), a disclosed correctness-over-a-previously-silent-broken-performance-assumption
+  trade-off. Regression test:
+  `tests::simulation_new_auto_raises_fluid_resolution_when_coarse_graining_shrinks_balls`.

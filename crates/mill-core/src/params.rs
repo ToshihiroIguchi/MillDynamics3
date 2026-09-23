@@ -494,6 +494,44 @@ impl Params {
             }
         }
     }
+
+    /// Resolution actually used to seed the fluid lattice ([`crate::pbf::FluidParticles::seed_lattice`]),
+    /// raised above `simulation.resolution` when needed so the fluid lattice spacing
+    /// (`dx = mill.radius_m() / resolution`) never exceeds the (possibly coarse-grained) effective
+    /// ball diameter ([`Params::effective_media`]).
+    ///
+    /// `dx > effective ball diameter` is not just an accuracy trade-off (the parameters panel's own
+    /// "Fluid spacing vs ball diameter" warning, `web/src/ui/paramsPanel.ts`) but a stability one:
+    /// once a single fluid particle spans several balls (or several fluid particles overlap one
+    /// ball), the ball<->fluid coupling's per-contact clamps ([`crate::coupling`]) saturate on
+    /// nearly every sub-step instead of the rare cases they are designed for, and the *sum* of many
+    /// individually-bounded clamps is not itself bounded -- observed as `dissipated_power_w` growing
+    /// far past `power_draw_w` (a net energy-injection "gas" runaway, the same signature as the
+    /// original fluidised-charge bug) and media flung out of the charge. Raising resolution here
+    /// (measured: dropping `coupling_clamp_hits` by ~600x and capping peak ball speed at the exact
+    /// repro that motivated this) is the fix; two more targeted attempts at bounding the coupling
+    /// itself regardless of resolution (removing the ball-side overlap-push reaction, capping
+    /// entrained fluid mass) were tried previously and reverted because they broke real physics
+    /// (violent-cataracting compression-error bounds, the large-entrainment Stokes-drag limit) --
+    /// see the "unphysical scatter" investigation this method resolves.
+    ///
+    /// Clamped at `simulation.resolution`'s own validated maximum (200) so a pathological
+    /// combination (e.g. `max_balls` close to `N_true` with a very small `media.ball_diameter_m`)
+    /// cannot make the fluid lattice unboundedly expensive; in that residual regime the ratio may
+    /// still exceed 1 and the parameters panel's warning remains the user-facing signal. This
+    /// trades simulation speed for stability/correctness -- a much higher resolution than the user
+    /// requested means many more fluid particles (`~resolution^2`, see docs/PERF.md), so a
+    /// `max_balls` far above what `simulation.resolution` was tuned for (e.g. a quality preset's
+    /// `resolution`) can now run dramatically slower than that preset's own measured achieved speed.
+    pub fn effective_fluid_resolution(&self) -> u32 {
+        let radius_m = self.mill.radius_m();
+        let d_eff = self.effective_media().diameter_m;
+        if !(radius_m > 0.0 && d_eff > 0.0) {
+            return self.simulation.resolution;
+        }
+        let min_resolution = (radius_m / d_eff).ceil() as u32;
+        self.simulation.resolution.max(min_resolution).min(200)
+    }
 }
 
 /// The media population actually handed to the DEM solver, after [`Params::effective_media`]
@@ -684,5 +722,47 @@ mod tests {
         };
         let ratio = denser.true_ball_count() / base.true_ball_count();
         assert!((ratio - 0.907 / base.media.packing_fraction_2d).abs() < 1e-3);
+    }
+
+    #[test]
+    fn effective_fluid_resolution_matches_requested_when_already_fine_enough() {
+        // Params::default() (max_balls = 600, resolution = 40) was validated to sit comfortably
+        // under the "fluid spacing vs ball diameter" warning (see docs/PERF.md's browser table:
+        // ~0.62 at these exact defaults), so the auto-raise should be a no-op here.
+        let params = Params::default();
+        assert_eq!(
+            params.effective_fluid_resolution(),
+            params.simulation.resolution
+        );
+    }
+
+    #[test]
+    fn effective_fluid_resolution_raises_when_coarse_graining_shrinks_balls_below_lattice_spacing()
+    {
+        // Realtime preset's resolution (15) paired with a much higher max_balls (1500) than its
+        // own default (150) -- the 2026-09-23 report's exact repro.
+        let mut params = Params::default();
+        params.simulation.max_balls = 1500;
+        params.simulation.resolution = 15;
+
+        let d_eff = params.effective_media().diameter_m;
+        let radius_m = params.mill.radius_m();
+        let resolution = params.effective_fluid_resolution();
+        assert!(resolution > params.simulation.resolution);
+        assert!(radius_m / resolution as f32 <= d_eff + 1e-6);
+    }
+
+    #[test]
+    fn effective_fluid_resolution_is_capped_at_the_validated_maximum() {
+        // A pathological combination (max_balls far above N_true, i.e. no coarse-graining, with a
+        // tiny ball diameter) would otherwise demand an unboundedly fine (expensive) fluid lattice;
+        // the cap keeps this method's output always valid per `SimulationParams::validate`.
+        let mut params = Params::default();
+        params.media.ball_diameter_m = 0.0006;
+        params.simulation.max_balls = 50_000;
+        params.simulation.resolution = 4;
+
+        let resolution = params.effective_fluid_resolution();
+        assert!(resolution <= 200);
     }
 }

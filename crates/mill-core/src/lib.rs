@@ -89,11 +89,15 @@ impl Simulation {
         let radius_m = params.mill.radius_m();
         let effective = params.effective_media();
         let dem = DemState::new(&effective, radius_m, params.simulation.seed);
+        // Use `effective_fluid_resolution`, not the raw `simulation.resolution`, so a coarse-grained
+        // ball population never leaves the fluid lattice too coarse to resolve the ball<->fluid
+        // coupling stably -- see that method's doc comment.
+        let resolution = params.effective_fluid_resolution();
         let fluid = if params.slurry.enabled {
             FluidParticles::seed_lattice(
                 &params.slurry,
                 radius_m,
-                params.simulation.resolution,
+                resolution,
                 &dem.balls.x,
                 dem.balls.radius,
             )
@@ -104,7 +108,7 @@ impl Simulation {
                     ..params.slurry
                 },
                 radius_m,
-                params.simulation.resolution,
+                resolution,
                 &[],
                 0.0,
             )
@@ -142,9 +146,10 @@ impl Simulation {
     /// - `mill.diameter_m`, `media.*` (ball geometry), `simulation.seed`, `simulation.max_balls` --
     ///   change derived quantities immediately but do **not** reseed or resize the already-created
     ///   ball population.
-    /// - `simulation.resolution` -- baked into the fluid lattice's spacing/kernel radius/particle
-    ///   mass at `seed_lattice` time (`pbf.rs`); an existing fluid population's `h`/mass do not
-    ///   change.
+    /// - `simulation.resolution` (and anything [`Params::effective_fluid_resolution`] depends on,
+    ///   i.e. `media`/`mill`/`simulation.max_balls`, insofar as they change the effective ball
+    ///   diameter) -- baked into the fluid lattice's spacing/kernel radius/particle mass at
+    ///   `seed_lattice` time (`pbf.rs`); an existing fluid population's `h`/mass do not change.
     /// - `slurry.enabled` -- only read once, at construction (`Simulation::new`), to decide
     ///   whether to seed the fluid at all; toggling it here neither seeds nor clears the
     ///   population.
@@ -897,5 +902,69 @@ mod tests {
         let json = serde_json::to_string(&m).expect("Metrics should serialize");
         assert!(json.contains("power_draw_w"));
         assert!(json.contains("impact_energy_histogram"));
+    }
+
+    /// Regression test for the 2026-09-23 report: raising `simulation.max_balls` well above the
+    /// Realtime preset's default (150) while leaving `simulation.resolution` at the preset's own
+    /// value (15) shrinks the coarse-grained effective ball diameter (`Params::effective_media`)
+    /// well below the fluid lattice spacing, reproducing the same "media flying out of the charge"
+    /// energy-injection failure mode as [[project_unphysical_scatter_2026_09]] (there triggered by
+    /// a low `media.fill_fraction` instead). `Params::effective_fluid_resolution` is the fix:
+    /// `Simulation::new` must seed the fluid at a resolution high enough to keep the lattice
+    /// spacing at or below the effective ball diameter, not the raw user-requested resolution.
+    #[test]
+    fn simulation_new_auto_raises_fluid_resolution_when_coarse_graining_shrinks_balls() {
+        let mut params = Params::default();
+        params.simulation.max_balls = 1500;
+        params.simulation.resolution = 15;
+        params.validate().unwrap();
+
+        let radius_m = params.mill.radius_m();
+        let d_eff = params.effective_media().diameter_m;
+        let raw_dx = radius_m / params.simulation.resolution as f32;
+        assert!(
+            raw_dx > d_eff,
+            "test setup should reproduce the reported under-resolved regime: raw_dx={raw_dx} \
+             should exceed d_eff={d_eff}"
+        );
+
+        let effective_resolution = params.effective_fluid_resolution();
+        assert!(
+            effective_resolution > params.simulation.resolution,
+            "expected the fluid resolution to be auto-raised above the requested 15, got \
+             {effective_resolution}"
+        );
+        let effective_dx = radius_m / effective_resolution as f32;
+        assert!(
+            effective_dx <= d_eff,
+            "auto-raised resolution should bring the fluid lattice spacing at or below the \
+             effective ball diameter: effective_dx={effective_dx}, d_eff={d_eff}"
+        );
+
+        let mut sim = Simulation::new(params).unwrap();
+        // A few seconds of sim time -- enough for the original bug to show a clearly growing
+        // dissipated/power-draw imbalance (see the memory this test guards against), short enough
+        // to keep the test fast at this ball count.
+        for _ in 0..(3 * 60) {
+            sim.step(1.0 / 60.0);
+        }
+
+        let power_draw = sim.power_draw_w();
+        let dissipated = sim.dissipated_power_w();
+        assert!(power_draw.is_finite() && power_draw >= 0.0);
+        assert!(dissipated.is_finite() && dissipated >= 0.0);
+        // Loose sanity bound (not a tight physical one -- see the dry-charge test above for that):
+        // the original bug ran dissipated power up to ~25x power draw and still climbing after
+        // less than a second; this just needs to catch a regression back to that runaway, not
+        // pin down the exact steady-state ratio.
+        if power_draw > 1.0 {
+            let ratio = dissipated / power_draw;
+            assert!(
+                ratio < 10.0,
+                "dissipated power should not be running away relative to power draw -- looks \
+                 like the under-resolved-fluid energy-injection bug is back: \
+                 power_draw_w={power_draw}, dissipated_power_w={dissipated}, ratio={ratio}"
+            );
+        }
     }
 }

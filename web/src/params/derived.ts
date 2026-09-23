@@ -58,6 +58,20 @@ export function effectiveMedia(
   return { trueDiameterM, diameterM: trueDiameterM, densityKgM3, ballCount: Math.max(0, Math.round(nTrue)), scaleFactor: 1 };
 }
 
+/** Mirrors `Params::effective_fluid_resolution` (params.rs:526-534). `diameterM` is the mill's drum diameter. */
+export function effectiveFluidResolution(
+  diameterM: number,
+  media: MediaLike,
+  maxBalls: number,
+  resolution: number,
+): number {
+  const radiusM = diameterM * 0.5;
+  const eff = effectiveMedia(diameterM, media, maxBalls);
+  if (!(radiusM > 0) || !(eff.diameterM > 0)) return resolution;
+  const minResolution = Math.ceil(radiusM / eff.diameterM);
+  return Math.min(200, Math.max(resolution, minResolution));
+}
+
 /**
  * Mirrors the target particle count computed by `FluidParticles::seed_lattice` (pbf.rs:388-396).
  * Note `slurryFillFraction` is `slurry.fill_fraction`, a different field from `media.fill_fraction`.

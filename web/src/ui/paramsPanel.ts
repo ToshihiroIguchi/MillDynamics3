@@ -8,6 +8,7 @@
 import type { ParamsJson } from "../protocol";
 import {
   criticalSpeedRpm,
+  effectiveFluidResolution,
   effectiveMedia,
   fluidParticleCountEstimate,
   interstitialFilling,
@@ -458,7 +459,8 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
     const nTrue = trueBallCount(diameterM, media);
     const eff = effectiveMedia(diameterM, media, maxBalls);
-    const fluidCount = fluidParticleCountEstimate(diameterM / 2, resolution, slurryFill);
+    const effectiveResolution = effectiveFluidResolution(diameterM, media, maxBalls, resolution);
+    const fluidCount = fluidParticleCountEstimate(diameterM / 2, effectiveResolution, slurryFill);
     const substepDisp = substepDisplacementOverDiameter(mill, substeps, eff.diameterM);
     // Mirrors pbf.rs's `dx = drum_radius_m / resolution`, same dx used internally by
     // fluidParticleCountEstimate above. A ratio > 1 means a single fluid particle is wider than a
@@ -468,7 +470,10 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     // fluidised-charge bug's root cause, and (h = 2*dx, so this ratio is h/(2*ball_diameter), a
     // fixed multiple of the h/r wetting-resolution ratio) directly explains why a thin wetting
     // film looks like a few oversized blobs rather than a smooth coating once this exceeds ~0.5.
-    const fluidDxM = diameterM / 2 / resolution;
+    // Uses `effectiveResolution` (Params::effective_fluid_resolution), the resolution actually used
+    // to seed the fluid lattice, not the raw `resolution` input -- see the new "Effective slurry
+    // resolution" row below for when the two differ.
+    const fluidDxM = diameterM / 2 / effectiveResolution;
     const fluidSpacingVsBall = eff.diameterM > 0 ? fluidDxM / eff.diameterM : 0;
     const u = interstitialFilling(slurryFill, media);
 
@@ -481,6 +486,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       ["Effective ball diameter", `${(eff.diameterM * 1000).toFixed(2)} mm`],
       ["Interstitial filling (U)", u.toFixed(3)],
       ["Fluid spacing vs ball diameter", fluidSpacingVsBall.toFixed(2), fluidSpacingVsBall > 1.0],
+      ["Effective slurry resolution", `${effectiveResolution}`, effectiveResolution > resolution],
       ["Est. fluid particles", String(fluidCount)],
       ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.3],
     ];
