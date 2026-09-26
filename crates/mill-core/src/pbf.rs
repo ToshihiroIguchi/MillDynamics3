@@ -521,6 +521,23 @@ fn clamp_fluid_speed(v: &mut [Vec2], v_max: f32) {
     }
 }
 
+/// Total mechanical energy (J, translational KE + gravitational PE) of the fluid population.
+/// Shares its convention with [`crate::dem::mechanical_energy_j`] (both use `GRAVITY.abs()`, so
+/// the two can be summed directly for a whole-system invariant check -- see
+/// `crate::coupling::tests::coupled_charge_never_gains_more_energy_than_the_wall_supplies`, its
+/// only caller today); fluid particles are point masses with no rotational degree of freedom,
+/// unlike balls.
+#[cfg(test)]
+pub(crate) fn mechanical_energy_j(fluid: &FluidParticles) -> f32 {
+    let mass = fluid.particle_mass;
+    let mut e = 0.0f32;
+    for i in 0..fluid.x.len() {
+        e += 0.5 * mass * fluid.v[i].length_squared();
+        e += mass * GRAVITY.abs() * fluid.x[i].y;
+    }
+    e
+}
+
 /// Slurry (fluid) particle population. All particles share one kernel radius/mass/rest density
 /// (see [`FluidParticles::seed_lattice`]); `dye` is a pure Lagrangian tracer (no diffusion) used
 /// for mixing visualization/metrics (docs/PLAN.md ss3.3/3.5).
@@ -1208,6 +1225,13 @@ impl FluidParticles {
         // it), not just "no Stokes term" -- see this step's doc comment.
         if !balls.is_empty() && balls.radius > 0.0 && balls.true_radius > 0.0 && mu > 1e-6 {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
+            // Cap on the per-fluid-particle velocity kick the angular reaction (`c_rot` below)
+            // may inject in one sub-step -- see that term's own comment for why this is needed.
+            // Reuses the fluid speed clamp's own physically-anchored scale (drum wall speed +
+            // free-fall-across-the-diameter speed) rather than an arbitrary fixed constant, at a
+            // fraction of it (this is a per-*reaction* bound, well below the whole-fluid speed
+            // ceiling it shares a formula with).
+            let rot_reaction_speed_cap = 0.2 * fluid_speed_clamp_v_max(drum);
             let rho_ball = balls.mass / (std::f32::consts::PI * balls.radius * balls.radius);
             // `inv_tau_stokes`/`inv_tau_form` (the drag *rate*) use the true (uncoarsened)
             // particle's own size/mass, not the coarse-grained `balls.radius`/`balls.mass` -- a
@@ -1357,7 +1381,36 @@ impl FluidParticles {
                         }
                         if s.abs() > 0.1 * s_scale {
                             dw_b = candidate_dw;
-                            c_rot = -i_b * dw_b / s;
+                            let raw_c_rot = -i_b * dw_b / s;
+                            // Measured (2026-09-26, after the true-radius drag fix raised `beta`
+                            // toward saturation): even past the `0.1 * s_scale` degeneracy gate
+                            // above, `s` can still be small enough relative to what `dw_b` needs
+                            // that `raw_c_rot` reaches into the thousands, injecting a
+                            // single-substep velocity kick of 10+ m/s into the (few) contributing
+                            // fluid particles -- a genuine energy-creation bug (full-system
+                            // mechanical energy exceeding cumulative wall work by thousands of
+                            // joules in one sub-step, see docs/PHYSICS.md ss6.2's
+                            // "coarse-graining independence" note), not merely a large but
+                            // legitimate correction: those same few particles' now-huge velocity
+                            // is what the *next* sub-step samples back as this (or a neighbouring)
+                            // ball's own local `omega_bar`, closing a resonant feedback loop that
+                            // drove some balls' spin to 1000+ rad/s in testing. Capping the
+                            // resulting per-particle velocity change (not just gating on `s` being
+                            // "not too degenerate") is the direct fix -- the same accepted
+                            // trade-off as the fluid speed clamp above (step 5.5/7.5) and the
+                            // ball-side impulse clamp (step 8): the exact-conservation identity
+                            // this term computes is intentionally broken, on the rare sub-step
+                            // where it would otherwise blow up, rather than ever injecting an
+                            // unphysical kick. `max_lever` bounds `|perp_i - p_bar|` for any item
+                            // (both `perp_i` and `p_bar` have magnitude at most `h_c`, since every
+                            // `r_i` contributing to `items` was gated at `r2 < h_c*h_c` above).
+                            let max_lever = 2.0 * h_c;
+                            let c_rot_cap = if max_lever > 1e-9 {
+                                rot_reaction_speed_cap / max_lever
+                            } else {
+                                0.0
+                            };
+                            c_rot = raw_c_rot.clamp(-c_rot_cap, c_rot_cap);
                         }
                     }
 
@@ -1516,6 +1569,13 @@ impl FluidParticles {
         clamp_fluid_speed(&mut self.v, fluid_speed_clamp_v_max(drum));
 
         // --- 8. Clamp accumulated coupling impulses for stability (docs/PLAN.md ss3.4) --------
+        // Note: the fluid side of every upstream mechanism (3.5/3.6/6.5/6.6) already applied its
+        // Newton's-third-law reaction directly to `self.v`, unclamped, so whenever this ball-side
+        // clamp fires it is (like the fluid speed clamp above) a small, deliberately accepted
+        // conservation violation -- confirmed bounded and rare in practice (measured
+        // `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`)
+        // rather than the source of the 2026-09-26 energy-injection investigation (that turned
+        // out to be step 6.5's `c_rot`, see its own comment above).
         if !balls.is_empty() {
             let clamp = impulse_clamp(balls.mass, dt);
             let angular_clamp = clamp * balls.radius;

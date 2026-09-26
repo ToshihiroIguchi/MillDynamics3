@@ -60,14 +60,15 @@ const CCD_CONTACT_SKIN_FRACTION: f32 = 1e-2;
 /// Safety factor on the physically-attainable ball speed, mirroring
 /// [`crate::pbf::FLUID_SPEED_SAFETY_FACTOR`]'s formula and rationale exactly: `v_max =
 /// BALL_SPEED_SAFETY_FACTOR * (|drum.omega| * drum.radius_m + sqrt(4 * g * drum.radius_m))` --
-/// the drum's wall speed plus the free-fall speed across the full drum diameter. A ball has no
-/// speed ceiling anywhere else in this solver (unlike the fluid, see the constant above), so a
-/// single mis-scaled coupling impulse, or any other still-undiscovered source of energy
-/// injection, has nothing stopping it from compounding sub-step over sub-step into an openly
-/// unphysical velocity before the next contact (if any) has a chance to arrest it -- exactly the
-/// "media flung out of the charge" failure this backstop targets. `4.0` is tighter than the
-/// fluid's `5.0`: a ball is a rigid body whose *own* dynamics (gravity, contact, wall friction)
-/// are already fully accounted for and energy-bounded (see `dem::mechanical_energy_j` and the
+/// the drum's wall speed plus the free-fall speed across the full drum diameter. Before this
+/// backstop (and its angular counterpart just below, added 2026-09-26 -- see that code's own
+/// comment), a ball had no speed ceiling anywhere else in this solver (unlike the fluid, see the
+/// constant above), so a single mis-scaled coupling impulse, or any other still-undiscovered
+/// source of energy injection, has nothing stopping it from compounding sub-step over sub-step
+/// into an openly unphysical velocity before the next contact (if any) has a chance to arrest it
+/// -- exactly the "media flung out of the charge" failure this backstop targets. `4.0` is tighter
+/// than the fluid's `5.0`: a ball is a rigid body whose *own* dynamics (gravity, contact, wall
+/// friction) are already fully accounted for and energy-bounded (see `dem::mechanical_energy_j` and the
 /// invariant `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_
 /// supplies` proves for the DEM solver in isolation), so there is less slack to allow than for
 /// the fluid (whose own reconstruction step can legitimately need a wider margin, see that
@@ -158,10 +159,14 @@ pub struct DemStepStats {
     /// could in principle miss a collision along the way. Diagnostic only in this pass; a
     /// continuous (swept) collision guard is future work.
     pub max_substep_displacement_over_diameter: f32,
-    /// Number of balls whose speed this sub-step hit the [`BALL_SPEED_SAFETY_FACTOR`] backstop
-    /// clamp. Mirrors [`crate::pbf::FluidStepStats::coupling_clamp_hits`]: healthy at 0, or very
-    /// near it -- persistent clamping means something (most likely the ball<->fluid coupling) is
-    /// pinned at an artificial velocity ceiling rather than reflecting the physical interaction.
+    /// Number of balls whose *linear or angular* speed this sub-step hit the
+    /// [`BALL_SPEED_SAFETY_FACTOR`] backstop clamp (one counter for both -- see that step's own
+    /// comment for why spin needed the same ceiling). Mirrors
+    /// [`crate::pbf::FluidStepStats::coupling_clamp_hits`]: healthy at 0, or very near it --
+    /// persistent clamping means something (most likely the ball<->fluid coupling, or an
+    /// unbounded DEM friction/contact torque, see 2026-09-26's `low_fill_cataracting_charge_does_
+    /// not_gain_energy_from_the_fluid` finding) is pinned at an artificial ceiling rather than
+    /// reflecting the physical interaction.
     pub ball_speed_clamp_hits: u32,
 }
 
@@ -911,6 +916,36 @@ impl DemState {
                 ball_speed_clamp_hits += 1;
             } else if speed > ball_speed_v_max {
                 *v *= ball_speed_v_max / speed;
+                ball_speed_clamp_hits += 1;
+            }
+        }
+        // Angular counterpart (2026-09-26): unlike linear speed above, spin had no ceiling
+        // anywhere in this solver. Measured (`low_fill_cataracting_charge_does_not_gain_energy_
+        // from_the_fluid`, media.fill_fraction=0.10): a ball's own spin reached ~950 rad/s over a
+        // 5s run at exactly the config where step 6.5's coupling correction (`pbf.rs`) is most
+        // often skipped outright (its degeneracy gate `s.abs() > 0.1 * s_scale` failing, `applied
+        // = false`) rather than merely bounded -- so an already-fast-spinning ball's rotation is
+        // left to accumulate, uncorrected, from ordinary DEM friction/contact torque alone over
+        // many sub-steps. Bounding the ball's surface (tip) speed `|omega| * radius` to a
+        // physically-attainable ceiling is the direct fix. Deliberately *not*
+        // `ball_speed_v_max / radius` (that reuses `BALL_SPEED_SAFETY_FACTOR = 4.0`'s generous
+        // linear margin, which came out to ~2050 rad/s here -- looser than the ~950 rad/s
+        // regression this backstop targets, so it never engaged): a ball's spin has no equivalent
+        // free-fall contribution to budget for (unlike translation, gravity does not spin a
+        // ball), so this uses the *undamped* wall-speed-plus-free-fall scale directly (no extra
+        // safety multiple on top), giving a tighter but still generous ceiling.
+        let ball_omega_max = if balls.radius > 1e-9 {
+            (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt())
+                / balls.radius
+        } else {
+            0.0
+        };
+        for omega in balls.omega.iter_mut() {
+            if !omega.is_finite() {
+                *omega = 0.0;
+                ball_speed_clamp_hits += 1;
+            } else if omega.abs() > ball_omega_max {
+                *omega = omega.signum() * ball_omega_max;
                 ball_speed_clamp_hits += 1;
             }
         }
