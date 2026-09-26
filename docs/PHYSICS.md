@@ -185,9 +185,9 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
      sub-step's *start* angle, a one-sub-step kinematic lag an external review flagged.
    - **Why the cap.** Recovering a very deep overlap in full, in one iteration, hands step 4 a
      position delta that becomes an unphysically large separation velocity (`Δx/dt`) — the DEM
-     half of the fluidised-charge energy-injection bug (ss9/git history). At `dem_iterations = 4`
-     the cap still allows recovering up to `0.8` diameters of overlap per sub-step, so ordinary
-     small overlaps are unaffected; it only throttles the pathological case.
+     half of the fluidised-charge energy-injection bug (ss9/git history). At the current default
+     `dem_iterations = 2` the cap still allows recovering up to `0.4` diameters of overlap per
+     sub-step, so ordinary small overlaps are unaffected; it only throttles the pathological case.
 4. **Reconstruct velocities**: `v = (x - x0) / dt`, `omega = angle_diff(theta, theta0) / dt`.
 5. **Friction** (Coulomb-clamped position correction, iterating contacts in a deterministic sorted
    order, with `v`/`omega` kept in sync *per contact* rather than reconstructed once at the end):

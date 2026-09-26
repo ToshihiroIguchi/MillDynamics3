@@ -1611,7 +1611,8 @@ mod tests {
         // project's own measured baseline for a *healthy* settled pile at these parameters (see
         // git history for the calibration run): residual jitter around
         // `RESTITUTION_VELOCITY_THRESHOLD` and residual overlap from running only
-        // `simulation.dem_iterations` (4) Gauss-Seidel iterations on a loaded stack are both
+        // `simulation.dem_iterations` (2, the current default) Gauss-Seidel iterations on a loaded
+        // stack are both
         // expected and are not what this test is checking for -- the reported bug was two
         // orders of magnitude beyond either.
         use crate::params::{LiftersParams, MediaParams, MillParams, Params, SpeedMode};
