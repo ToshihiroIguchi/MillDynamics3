@@ -599,17 +599,25 @@ an entrained mass `m_ent = sum_i particle_mass * phi_i` and a weighted mean flui
 (sum_i particle_mass * phi_i * v_i) / m_ent`:
 
 ```
-tau_stokes = rho_ball * r^2 / (4 * mu)                     (Stokes-regime disc relaxation time)
-tau_form   = balls.mass / (rest_density * C_D * (2r) * |v_rel|)   (2D-cylinder form-drag time)
+tau_stokes = rho_ball * r_true^2 / (4 * mu)                       (Stokes-regime disc relaxation time)
+tau_form   = mass_true / (rest_density * C_D * (2*r_true) * |v_rel|)   (2D-cylinder form-drag time)
 1/tau_eff  = 1/tau_stokes + 1/tau_form
 beta       = slurry.ball_no_slip * (1 - exp(-dt / tau_eff))
 a_lin      = beta * m_ent / (balls.mass + m_ent)            <= 1 for every mu, dt
 dv_b       = a_lin * (v_bar - v_b)
 ```
 
-`rho_ball = balls.mass / (pi * balls.radius^2)`; `mu = slurry.viscosity_pa_s` is the *physical*
-slurry viscosity; `v_rel = v_bar - v_b`; `C_D = BALL_FORM_DRAG_COEFFICIENT = 1.0` (a circular
-cylinder's standard high-`Re` drag coefficient). `tau_stokes` alone is the correct regime at this
+`rho_ball = balls.mass / (pi * balls.radius^2)` (the *material* density, recovered exactly
+regardless of coarse-graining, since coarse-graining scales mass and area together); `mu =
+slurry.viscosity_pa_s` is the *physical* slurry viscosity; `v_rel = v_bar - v_b`; `C_D =
+BALL_FORM_DRAG_COEFFICIENT = 1.0` (a circular cylinder's standard high-`Re` drag coefficient).
+`r_true`/`mass_true = rho_ball * pi * r_true^2` are the *true* (uncoarsened) individual media
+particle's own radius/mass (`Balls::true_radius`, `crates/mill-core/src/dem.rs`) -- **not** the
+coarse-grained `balls.radius`/`balls.mass` used everywhere else in this section (`h_c`, `m_ent`,
+the momentum bookkeeping in `dv_i`/`coupling.impulses`/`coupling.angular_impulses` below). See
+"Coarse-graining independence" below for why the two drag-rate terms specifically need the true
+size while everything else correctly keeps using the coarse one. `tau_stokes` alone is the correct
+regime at this
 project's default 50 Pa*s (ball `Re ~ 1`), but at water-like viscosity a ball's speed (1-5 m/s)
 reaches `Re ~ 10^2-10^4`, where drag is form- (not viscosity-) dominated and `tau_stokes` alone
 under-predicts it by orders of magnitude -- an external review's finding. Combining the two
@@ -677,6 +685,48 @@ positive-definite part instead (`|s| > 0.1 * sum_i mass*phi_i^2*|r_i|^2`), which
 near-total cancellation regardless of scale; when it fails, the rotational reaction (both `dw_b` and
 its fluid-side redistribution) is skipped for that ball this sub-step, same as the pre-existing
 degenerate case. Regression test: `coupling::tests::a_coupled_charge_in_a_still_drum_settles_with_slurry_on`.
+
+**Coarse-graining independence (2026-09-26).** Follow-up to a "balls floating/launching at high
+`max_balls`" investigation (see ss9): the tunnelling-risk hypothesis that investigation's previous
+round left open was directly measured and retracted (zero ball-ball position-order-flip or deep-
+overlap events even at `max_substep_displacement_over_diameter` ~= 1, well above the level the
+user's own screenshots showed) -- but a genuine, separate bug was found instead, in this section.
+Before this fix, `tau_stokes`/`tau_form` above used the *coarse-grained* `balls.radius`/`balls.mass`
+(the same ones DEM contact mechanics correctly uses), which meant `simulation.max_balls` -- a pure
+performance/resolution knob that is only supposed to trade off simulated ball count against
+accuracy of the DEM contact network, never the *physics* itself -- silently changed the physical
+strength of ball<->fluid drag. Measured directly (a controlled single-ball-in-a-uniform-fluid-patch
+harness, this project's default media/viscosity): the one-sub-step drag relaxation fraction
+(`|dv_b| / |v_rel|`) was **0.82 at the true 10mm particle diameter, but only 0.63 at `max_balls=600`
+(20.25mm coarse diameter) and 0.26 at the 150-ball preset's default (40.5mm coarse diameter)** --
+the *default*, most-used configuration was under-predicting real drag by roughly 3x, not the
+high-`max_balls` configuration over-predicting it, the opposite of what the "floating at high
+`max_balls`" symptom's surface appearance suggested.
+
+The fix (`Balls::true_radius`, `crates/mill-core/src/dem.rs`; `rho_ball`/`tau_stokes`/`tau_form`
+above) uses the true particle size/mass for the drag-*rate* terms only. Everything else in this
+step -- the entrainment kernel's own geometric footprint `h_c = balls.radius + h`, and every
+momentum-bookkeeping quantity (`dv_i`'s `balls.mass`, `coupling.impulses`'s `balls.mass * dv_b`,
+`coupling.angular_impulses`'s `i_b`) -- deliberately keeps using the coarse-grained values. A first
+attempt also swapped `a_lin`/`a_rot`'s own ball-side mass/inertia term (`balls.mass + m_ent` ->
+`mass_true + m_ent`) to the true values and was wrong: `m_ent` is sampled over the *coarse* ball's
+actual (larger) footprint, so pairing it with the tiny, now-fixed true mass over-corrected `a_lin`
+toward saturation *harder* at larger `max_balls` (measured 0.82 -> 0.88 -> 0.95 -> 0.98 at
+increasing coarse radius) -- backwards from the intent. Reverting just that one term (keeping
+`a_lin = beta * m_ent / (balls.mass + m_ent)` on the coarse mass, since a locally-uniform fluid
+field means this specific ratio is already scale-invariant under coarse-graining -- both `m_ent`
+and `balls.mass` grow by the same `scale_factor^2` together) gives the intended result: **0.8177,
+0.8177, 0.8178 at `scale_factor` 1x/2x/4x respectively**, matching the true-particle baseline
+(0.8179) to within measurement noise. Regression test:
+`pbf::tests::ball_drag_relaxation_fraction_is_independent_of_coarse_graining`.
+
+One existing regression tightened its bound against the *old*, physically-weaker drag and needed
+updating, not the fix reverting: `metrics::tests::compression_error_stays_bounded_under_violent_
+lifter_cataracting` (`max_balls=150`, lifters, violent cataracting) measured worst compression
+error rising from ~0.091 to ~0.183 with the corrected (genuinely stronger) coupling -- still
+comfortably inside `docs/METRICS.md`'s own documented **10-20% healthy range for active splashing/
+impact events**, so the bound moved `0.12 -> 0.20` (the top of that documented range) rather than
+treating the new reading as a regression to chase.
 
 ### 6.3 Buoyancy (pbf.rs step 6.6)
 

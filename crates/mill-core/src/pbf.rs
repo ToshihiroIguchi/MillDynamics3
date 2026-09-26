@@ -1141,6 +1141,15 @@ impl FluidParticles {
         //   tau_stokes = rho_ball * r^2 / (4 * mu)                          linear (viscous) drag
         //   tau_form   = balls.mass / (rest_density * C_D * (2r) * |v_rel|) quadratic (form) drag
         //
+        // `r`/`balls.mass` in both formulas above (and in `a_lin`/`a_rot`'s own ball-side inertia
+        // term below) are the *true* uncoarsened particle's own radius/mass/inertia
+        // (`balls.true_radius` and `mass_true`/`i_true` derived from it just below), **not** the
+        // coarse-grained `balls.radius`/`balls.mass`/`balls.inertia` used everywhere else in this
+        // file (contact mechanics, the entrainment kernel's own geometric footprint `h_c`, and the
+        // total-momentum bookkeeping against the fluid later in this step) -- see
+        // [`crate::dem::Balls::true_radius`]'s doc comment for why, and the measured effect of
+        // getting this wrong (2026-09-26).
+        //
         // `tau_stokes` alone (the project's only drag term before this) is the correct regime at
         // this project's default viscosity (50 Pa*s gives ball Reynolds numbers ~1), but at
         // water-like viscosity a ball's speed (1-5 m/s) puts `Re` in the `10^2-10^4` range, where
@@ -1197,11 +1206,23 @@ impl FluidParticles {
         // `mu > 1e-6` stays the outer gate deliberately: `viscosity_pa_s == 0` means "no ball
         // drag at all" (the fluid has literally no drag mechanism, form or otherwise, without
         // it), not just "no Stokes term" -- see this step's doc comment.
-        if !balls.is_empty() && balls.radius > 0.0 && mu > 1e-6 {
+        if !balls.is_empty() && balls.radius > 0.0 && balls.true_radius > 0.0 && mu > 1e-6 {
             let beta_b = slurry.ball_no_slip.clamp(0.0, 1.0);
             let rho_ball = balls.mass / (std::f32::consts::PI * balls.radius * balls.radius);
+            // `inv_tau_stokes`/`inv_tau_form` (the drag *rate*) use the true (uncoarsened)
+            // particle's own size/mass, not the coarse-grained `balls.radius`/`balls.mass` -- a
+            // real particle's drag relaxation rate is a property of its own true size, independent
+            // of how many true particles a DEM super-ball happens to represent (see
+            // [`Balls::true_radius`]'s doc comment for the measured effect of getting this wrong).
+            // `a_lin`/`a_rot`'s own mass/inertia-weighting further down deliberately keeps using
+            // the coarse `balls.mass`/`i_b` instead (see that line's comment for why). `mass_true`
+            // is computed from `rho_ball` (the *material* density, recovered exactly from the
+            // coarse mass/radius regardless of coarse-graining, since both scale together) rather
+            // than via `ball_mass` directly, avoiding a second, redundant re-derivation of the same
+            // material density from `true_radius` alone.
+            let mass_true = rho_ball * std::f32::consts::PI * balls.true_radius * balls.true_radius;
             let inv_tau_stokes = if rho_ball > 0.0 {
-                1.0 / (rho_ball * balls.radius * balls.radius / (4.0 * mu)).max(1e-9)
+                1.0 / (rho_ball * balls.true_radius * balls.true_radius / (4.0 * mu)).max(1e-9)
             } else {
                 0.0
             };
@@ -1265,12 +1286,30 @@ impl FluidParticles {
                     // Stokes/form drag is currently faster dominates the combined relaxation.
                     let speed_rel = v_rel.length();
                     let inv_tau_form = if speed_rel > 1e-6 && rest_density > 0.0 {
-                        rest_density * BALL_FORM_DRAG_COEFFICIENT * (2.0 * balls.radius) * speed_rel
-                            / balls.mass
+                        rest_density
+                            * BALL_FORM_DRAG_COEFFICIENT
+                            * (2.0 * balls.true_radius)
+                            * speed_rel
+                            / mass_true
                     } else {
                         0.0
                     };
                     let beta = beta_b * (1.0 - (-dt * (inv_tau_stokes + inv_tau_form)).exp());
+                    // `a_lin`'s mass-weighting uses the *coarse* `balls.mass`/`m_ent`, not
+                    // `mass_true` -- unlike `beta`'s rate terms above, this ratio represents how
+                    // the actually-simulated ball and its actually-sampled entrained fluid mass
+                    // divide a relaxation between them, and (assuming the local fluid field is
+                    // roughly uniform over one super-ball's footprint, the same approximation
+                    // coarse-graining itself already relies on) is scale-invariant under
+                    // coarse-graining anyway: a super-ball representing k^2 true particles has
+                    // both `balls.mass` and `m_ent` (sampled over its own larger footprint) scale
+                    // up by roughly the same k^2, leaving their ratio unchanged. Using `mass_true`
+                    // here instead (tried, then reverted) paired a fixed *tiny* true-particle mass
+                    // against `m_ent` still sampled over the *coarse* footprint's much larger
+                    // extent, overcorrecting `a_lin` toward saturation harder at larger `max_balls`
+                    // than the true-particle-only case -- backwards from the intent, see
+                    // [`crate::dem::Balls::true_radius`]'s doc comment for the measured before/
+                    // after/over-corrected numbers.
                     let a_lin = beta * m_ent / (balls.mass + m_ent);
                     let dv_b = a_lin * v_rel;
 
@@ -1286,6 +1325,8 @@ impl FluidParticles {
                     let mut p_bar = Vec2::ZERO;
                     if i_ent > 1e-12 {
                         let omega_bar = l_sum / i_ent;
+                        // Coarse `i_b`, not `i_true` -- same rationale as `a_lin` above using
+                        // `balls.mass`, not `mass_true` (see that line's comment).
                         let a_rot = beta * i_ent / (i_b + i_ent);
                         let candidate_dw = a_rot * (omega_bar - balls.omega[b]);
                         p_bar = Vec2::new(-r_bar.y, r_bar.x);
@@ -1616,6 +1657,7 @@ mod tests {
             radius: ball_radius_m,
             mass,
             inertia,
+            true_radius: ball_radius_m,
         };
 
         // Fluid lattice spacing large enough (relative to the ball) that `h_c = ball_radius + h`
@@ -1723,6 +1765,56 @@ mod tests {
             "drag should scale up substantially with viscosity: \
              impulse(mu={mu_low})={impulse_low}, impulse(mu={mu_high})={impulse_high}"
         );
+    }
+
+    #[test]
+    fn ball_drag_relaxation_fraction_is_independent_of_coarse_graining() {
+        // Regression for the 2026-09-26 `Balls::true_radius` fix (docs/PHYSICS.md ss6.2): before
+        // it, this step's `inv_tau_stokes`/`inv_tau_form` used the coarse-grained `balls.radius`,
+        // so a purely cosmetic choice of `simulation.max_balls` (which only changes how many DEM
+        // "super-balls" a fixed true media population is coarse-grained into, `Params::
+        // effective_media`) silently changed the *physical* fluid-drag law itself -- a real 10mm
+        // particle and a `max_balls`-driven 40.5mm super-ball representing a cluster of them
+        // relaxed toward the local fluid at very different rates (measured one-sub-step relaxation
+        // fractions 0.82 vs 0.26 at this project's default viscosity) even though both are meant to
+        // represent the *same* true small media. This directly checks the fixed invariant: holding
+        // the true particle size and every other physical parameter fixed, varying only the
+        // coarse-grained `radius`/`mass`/`inertia` a `scale_factor > 1` would produce should leave
+        // the one-sub-step relaxation fraction (`|dv_b| / |v_rel|`) essentially unchanged.
+        let drum = still_drum(2.0);
+        let true_radius_m = 0.005; // this project's default 10mm media diameter
+        let ball_density = 6000.0;
+        let mu = 50.0; // this project's default slurry viscosity
+        let fluid_velocity = Vec2::new(1.0, 0.0);
+        let dt = 1.0 / 240.0;
+        let slurry = SlurryParams {
+            viscosity_pa_s: mu,
+            fill_fraction: 0.0,
+            wettability: 0.0,
+            ..SlurryParams::default()
+        };
+
+        let relaxation_fraction = |coarse_radius_m: f32| -> f32 {
+            let (mut balls, mut fluid) =
+                ball_in_uniform_fluid_patch(coarse_radius_m, ball_density, &slurry, fluid_velocity);
+            balls.true_radius = true_radius_m;
+            let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
+            (impulses.impulses[0].length() / balls.mass) / fluid_velocity.x
+        };
+
+        // scale_factor 1x, 2x, 4x (this project's own 150-ball default preset coarse-grains to
+        // roughly 4x the true 10mm diameter at its default fill fraction).
+        let baseline = relaxation_fraction(true_radius_m);
+        for scale_factor in [1.0, 2.0, 4.0] {
+            let fraction = relaxation_fraction(true_radius_m * scale_factor);
+            let rel_err = (fraction - baseline).abs() / baseline;
+            assert!(
+                rel_err < 0.05,
+                "relaxation fraction at scale_factor={scale_factor} ({fraction}) diverged from the \
+                 true-particle baseline ({baseline}) by {rel_err} -- max_balls (a pure performance \
+                 knob) should not change the physical drag law"
+            );
+        }
     }
 
     #[test]
@@ -1995,6 +2087,7 @@ mod tests {
             radius: ball_radius_m,
             mass,
             inertia,
+            true_radius: ball_radius_m,
         };
         let mut fluid = FluidParticles {
             x: vec![Vec2::new(ball_radius_m + 0.5 * h, 0.0)],

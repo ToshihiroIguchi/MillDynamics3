@@ -212,9 +212,32 @@ pub struct Balls {
     pub v: Vec<Vec2>,
     pub theta: Vec<f32>,
     pub omega: Vec<f32>,
+    /// Radius actually simulated by the DEM contact solver (coarse-grained when
+    /// `simulation.max_balls` forces `scale_factor > 1`, see
+    /// [`crate::params::Params::effective_media`]). Coarse-graining preserves total charge mass/
+    /// area, so this radius is the right one for every DEM contact/mass/inertia quantity below and
+    /// for the ball<->fluid entrainment kernel's own geometric footprint
+    /// ([`crate::pbf::FluidParticles::step_coupled`] step 6.5's `h_c`).
     pub radius: f32,
     pub mass: f32,
     pub inertia: f32,
+    /// The *true* (uncoarsened) individual media particle's radius (`effective.true_diameter_m /
+    /// 2`; equals `radius` when `scale_factor == 1.0`). **Only** used by
+    /// [`crate::pbf::FluidParticles::step_coupled`] step 6.5's drag-*rate* terms
+    /// (`tau_stokes ~ r^2`, `tau_form ~ 1/r`, and the ball-side inertia in `a_lin`/`a_rot`) --
+    /// never for contact mechanics, mass/inertia, or the entrainment kernel's radius, which all
+    /// correctly use the coarse-grained `radius`/`mass`/`inertia` above (a coarse "super-ball"
+    /// really does have that much footprint/inertia for collision and momentum-bookkeeping
+    /// purposes). A real small particle's *drag relaxation rate* is an intensive, per-particle
+    /// property of its own true size, not of however many true particles a DEM super-ball happens
+    /// to represent -- using the coarse `radius` there instead (the pre-2026-09-26 behaviour) made
+    /// `max_balls`, a pure performance/resolution knob, silently change the physical fluid-drag law
+    /// itself: measured (`scratch_drag_scaling_probe`, not committed) at this project's default
+    /// viscosity, an isolated ball's one-substep drag relaxation fraction was 0.82 at the true 10mm
+    /// diameter, 0.80 at `max_balls=1500`'s coarse 12.8mm, but only 0.26 at the 150-ball preset's
+    /// coarse 40.5mm -- i.e. the *default* configuration was under-predicting true-particle drag by
+    /// roughly 3x, not the high-`max_balls` configuration over-predicting it.
+    pub true_radius: f32,
 }
 
 impl Balls {
@@ -229,6 +252,7 @@ impl Balls {
             radius: 0.0,
             mass: 0.0,
             inertia: 0.0,
+            true_radius: 0.0,
         }
     }
 
@@ -312,6 +336,7 @@ impl Balls {
             radius: r,
             mass,
             inertia,
+            true_radius: effective.true_diameter_m * 0.5,
         }
     }
 }
@@ -944,6 +969,7 @@ mod tests {
             radius,
             mass,
             inertia: ball_inertia(mass, radius),
+            true_radius: radius,
         }
     }
 
@@ -1105,6 +1131,7 @@ mod tests {
             radius: r,
             mass,
             inertia: ball_inertia(mass, r),
+            true_radius: r,
         };
         let mut state = DemState { balls };
         // A drum far larger than the balls' excursion, so wall contact never triggers, no gravity
@@ -1302,6 +1329,7 @@ mod tests {
             radius: r,
             mass,
             inertia: ball_inertia(mass, r),
+            true_radius: r,
         };
         let mut state = DemState { balls };
         let drum = still_drum(1000.0);
