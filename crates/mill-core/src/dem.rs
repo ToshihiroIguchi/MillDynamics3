@@ -464,8 +464,27 @@ impl DemState {
         // to act on it before the overlap becomes severe.
         // Post-predict speed (i.e. including this sub-step's gravity/coupling contribution),
         // the same quantity `max_substep_displacement_over_diameter` above is derived from.
+        //
+        // The margin also budgets for step 3's *own* motion, not just the predict step's: this
+        // candidate list is built once here and reused, unchanged, for every one of step 3's
+        // `iterations` depenetration passes plus steps 5-7's friction/restitution/rolling
+        // resistance -- a ball can additionally move up to `MAX_RECOVERY_FRACTION * 2r` per pass
+        // from a single recovering contact (docs comment above), so a third ball just outside the
+        // predict-only margin could be pushed into a genuine new overlap by that motion and never
+        // be recorded as a contact at all this sub-step (not merely under-resolved -- literally
+        // absent from `ball_ball_pairs`/`ContactBook` for every one of steps 3/5/6/7). Measured at
+        // a reported "sudden unexplained launch" config (`max_balls = 1500`, small coarse-grained
+        // balls): `max_substep_displacement_over_diameter` reached 0.635 (vs. 0.169 at the 150-ball
+        // default), with over a third of sub-steps exceeding 0.3 -- both terms below are already
+        // comparable in size there, so this budget is not a theoretical nicety at that
+        // configuration. `iterations.max(1)` (not a fixed extra-pass count) mirrors this
+        // parameter's own actual effect on step 3's motion budget exactly, so this margin term
+        // grows/shrinks with `dem_iterations` the same way step 3's real behaviour does.
         let max_speed = balls.v.iter().map(|v| v.length()).fold(0.0f32, f32::max);
-        let cell_size = (2.0 * r * 1.05).max(2.0 * r + max_speed * dt).max(1e-6);
+        let solve_margin = iterations.max(1) as f32 * MAX_RECOVERY_FRACTION * 2.0 * r;
+        let cell_size = (2.0 * r * 1.05)
+            .max(2.0 * r + max_speed * dt + solve_margin)
+            .max(1e-6);
         let grid = UniformGrid::build(&balls.x, cell_size);
         let mut ball_ball_pairs: Vec<(u32, u32)> = Vec::new();
         grid.for_each_candidate_pair(|i, j| ball_ball_pairs.push((i, j)));

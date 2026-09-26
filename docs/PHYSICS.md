@@ -915,6 +915,43 @@ state after calling `compute`:
   under the XPBD `< 1` criterion (`docs/METRICS.md`), and a genuine, isolated ball-ball tunnelling
   event has not been observed in this crate's regression tests (`dem::tests::
   two_balls_head_on_collision_conserves_momentum`'s anti-tunnelling assertion).
+
+  **2026-09-26 follow-up: this margin was widened, and the `< 1` criterion is not actually
+  comfortable at every configuration.** Investigating a user report of balls suddenly launching
+  "with no visible cause" and moving in coherent clumps at a high `simulation.max_balls` found two
+  things. First, a real gap in step 2's broad-phase margin: `ball_ball_pairs` is built once (from
+  predict-step positions) and reused unchanged for every one of step 3's `iterations` depenetration
+  passes plus steps 5-7 -- but the margin only budgeted for the predict step's own displacement
+  (`max_speed * dt`), not for the *additional* motion a ball can pick up during the solve itself (up
+  to `MAX_RECOVERY_FRACTION * 2r` per pass, from a contact resolving). A third ball just outside the
+  predict-only margin could be pushed into a genuine new overlap by that solve-phase motion and
+  never be recorded as a contact at all this sub-step (absent from `ball_ball_pairs`/`ContactBook`
+  entirely, not merely under-resolved). Fixed by adding `iterations.max(1) * MAX_RECOVERY_FRACTION *
+  2r` to the margin (`dem.rs` step 2) -- a widening of the existing discrete search radius, not a
+  new swept/CCD subsystem, so it does not reintroduce the ball-ball CCD regression described above.
+  Measured across 4 seeds at `max_balls = 1500`: this consistently (4/4 seeds) reduced the rate of
+  large (`>0.5 m/s`) single-sub-step speed jumps by roughly 5-14%, with no regression across the
+  full 124-test suite.
+
+  Second, and more fundamentally: **`max_substep_displacement_over_diameter` does *not* stay under
+  the `< 1` criterion at every configuration** -- at `max_balls = 1500` (small coarse-grained balls,
+  `d_eff ~= 12.8 mm` vs. the Realtime default's `~40.5 mm`), the same margin fix measured this ratio
+  at 0.64-1.07 across seeds (both *before and after* the margin widening above -- the widening does
+  not, and structurally cannot, change this ratio, which is a pure kinematic quantity computed
+  before the broad-phase even runs), i.e. genuinely crossing the documented safety threshold in
+  roughly half of tested seeds. This is not a bug the margin fix (or any broad-phase change) can
+  close: it is a direct consequence of `max_substep_displacement_over_diameter = |v| * dt /
+  (2*radius)` scaling inversely with ball radius at a fixed `dt` and fixed typical peak collision
+  speed (~2-3 m/s here, itself unremarkable) -- shrinking `d_eff` by raising `max_balls` shrinks the
+  denominator directly. The occasional resulting "sudden unexplained pop"/clump-launch visual
+  symptom is most plausibly a real (if rare per-run) discrete-collision-detection near-miss at this
+  ball size, not a coding defect elsewhere. **Not yet implemented**: an analogous auto-raise to
+  [`Params::effective_fluid_resolution`] for `simulation.substeps` (raising sub-step rate, which
+  divides `dt` and so this ratio directly, whenever a coarse-grained `d_eff` would otherwise push it
+  too close to 1) would close this properly, at a real extra DEM cost on top of an already very slow
+  configuration at this ball count -- a design/cost decision for a future session, not implemented
+  here.
+  two_balls_head_on_collision_conserves_momentum`'s anti-tunnelling assertion).
 - **`max_ball_wall_overlap_fraction` reads elevated under `lifters.count > 0`** (measured ~0.87-0.90
   worst-case over a 20 s cataracting run at `lifters.count = 8`, versus a much smaller figure with
   no lifters) -- a real, XPBD contact-convergence residual (cataracting off a lifter reaches higher
