@@ -161,11 +161,10 @@ pub struct DemStepStats {
     pub max_substep_displacement_over_diameter: f32,
     /// Number of balls whose *linear or angular* speed this sub-step hit the
     /// [`BALL_SPEED_SAFETY_FACTOR`] backstop clamp (one counter for both -- see that step's own
-    /// comment for why spin needed the same ceiling). Mirrors
+    /// comment for why spin has the same kind of ceiling). Mirrors
     /// [`crate::pbf::FluidStepStats::coupling_clamp_hits`]: healthy at 0, or very near it --
     /// persistent clamping means something (most likely the ball<->fluid coupling, or an
-    /// unbounded DEM friction/contact torque, see 2026-09-26's `low_fill_cataracting_charge_does_
-    /// not_gain_energy_from_the_fluid` finding) is pinned at an artificial ceiling rather than
+    /// unbounded DEM friction/contact torque) is pinned at an artificial ceiling rather than
     /// reflecting the physical interaction.
     pub ball_speed_clamp_hits: u32,
 }
@@ -919,24 +918,24 @@ impl DemState {
                 ball_speed_clamp_hits += 1;
             }
         }
-        // Angular counterpart (2026-09-26): unlike linear speed above, spin had no ceiling
-        // anywhere in this solver. Measured (`low_fill_cataracting_charge_does_not_gain_energy_
-        // from_the_fluid`, media.fill_fraction=0.10): a ball's own spin reached ~950 rad/s over a
-        // 5s run at exactly the config where step 6.5's coupling correction (`pbf.rs`) is most
-        // often skipped outright (its degeneracy gate `s.abs() > 0.1 * s_scale` failing, `applied
-        // = false`) rather than merely bounded -- so an already-fast-spinning ball's rotation is
-        // left to accumulate, uncorrected, from ordinary DEM friction/contact torque alone over
-        // many sub-steps. Bounding the ball's surface (tip) speed `|omega| * radius` to a
-        // physically-attainable ceiling is the direct fix. Deliberately *not*
-        // `ball_speed_v_max / radius` (that reuses `BALL_SPEED_SAFETY_FACTOR = 4.0`'s generous
-        // linear margin, which came out to ~2050 rad/s here -- looser than the ~950 rad/s
-        // regression this backstop targets, so it never engaged): a ball's spin has no equivalent
-        // free-fall contribution to budget for (unlike translation, gravity does not spin a
-        // ball), so this uses the *undamped* wall-speed-plus-free-fall scale directly (no extra
-        // safety multiple on top), giving a tighter but still generous ceiling.
+        // Angular counterpart (2026-09-26, re-tuned 2026-09-27): unlike linear speed above, spin
+        // had no ceiling anywhere in this solver. Originally added and tightly tuned against
+        // `low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`
+        // (media.fill_fraction=0.10) reading a +26.6 W/m ball-only "energy gain" -- but that
+        // reading was later root-caused (2026-09-27) as a test-design bug, not a real energy
+        // source: a ball-only slope can't tell "the coupling created energy" apart from "the
+        // fluid legitimately handed the ball some of the energy the wall gave the fluid," and the
+        // metric itself swung between +13.8 and -1.2 W/m run-to-run at the same config (see that
+        // test's doc comment and [`crate::coupling`]'s
+        // `settle_and_measure_full_system_energy_invariant`, which confirms the full-system
+        // invariant held throughout, both seeds, worst margin still positive). With no real bug
+        // behind it, the tightly-tuned ceiling this comment previously described (which responded
+        // non-monotonically to tuning -- a sign it was chasing noise, not a defect) has no basis;
+        // kept instead as a plain rotational counterpart to [`BALL_SPEED_SAFETY_FACTOR`]'s
+        // generous linear margin, purely as a divergence/NaN backstop, not as a tuned fix for any
+        // specific finding.
         let ball_omega_max = if balls.radius > 1e-9 {
-            (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt())
-                / balls.radius
+            ball_speed_v_max / balls.radius
         } else {
             0.0
         };

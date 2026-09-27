@@ -763,20 +763,23 @@ default config: worst single-sub-step margin -8262.8 J -> **-14.7 J**, back to t
 floor; `dissipated_power_w`/`power_draw_w` back to the expected `<` relationship. Regression test:
 `coupling::tests::coupled_charge_never_gains_more_energy_than_the_wall_supplies`.
 
-A second, related gap surfaced at a different config (`media.fill_fraction=0.10`, weaker
-coarse-graining, `coupling::tests::low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`):
-here step 6.2's correction is instead usually *skipped* (`s`'s degeneracy gate failing outright,
-`applied = false`), so a ball's spin can grow unbounded from ordinary DEM friction/contact torque
-alone, uncorrected by the coupling. `dem.rs` step 4.2 gained an angular counterpart to
-`BALL_SPEED_SAFETY_FACTOR`'s existing linear ball-speed backstop (`ball_omega_max = (wall speed +
-free-fall speed) / balls.radius`, no extra safety multiple -- spin has no free-fall contribution to
-budget for, unlike translation), which measurably helped (energy_slope_w +26.6 -> +15.2 W/m against
-a `<5.0` bound) but did not fully resolve it, and tightening the ceiling further made it *worse*
-(+19.5 W/m at half the ceiling) -- a non-monotonic response indicating a still-unidentified,
-separate contributing mechanism (most likely in DEM's own rolling-friction/contact torque
-accounting) at this specific lower-fill configuration. That regression test is currently
-`#[ignore]`d with a full record in its own doc comment; the default config users actually run is
-fixed and covered by the new invariant test above.
+A second regression appeared to surface at a different config (`media.fill_fraction=0.10`, weaker
+coarse-graining, `coupling::tests::low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`),
+where step 6.2's correction is usually *skipped* rather than merely bounded (`s`'s degeneracy gate
+failing outright, `applied = false`): that test's *ball-only* mechanical-energy-slope metric read
++26.6 W/m (failing its `<5.0` bound). **2026-09-27: root-caused as a false alarm, not a physics
+bug.** A ball-only slope cannot distinguish "the coupling created energy" from "the fluid
+legitimately handed the ball some of the energy the wall gave the fluid" -- exactly the ball<->fluid
+drag this project intends. Checked with the same full-system (ball+fluid) per-sub-step invariant
+this section's fix already validates against, at this exact config, across 2 seeds, over a 20s
+window: the invariant held at every sub-step both times (worst margins +1.78 J and +7.80 J), while
+the ball-only slope swung sign run-to-run and window-to-window (+13.8/+1.0/+4.3 W/m at 5/10/20s one
+run, -1.2/+3.9 W/m at 5/20s the other) -- noise, not a steady drift. The regression test now uses
+the full-system invariant directly (no `#[ignore]`, passes); no code in `pbf.rs`/`dem.rs` changed as
+a result of this finding. The angular ball-speed backstop added while chasing this false alarm
+(`dem.rs` step 4.2) was re-tuned to the same generous `BALL_SPEED_SAFETY_FACTOR` margin as its linear
+sibling and kept as a plain divergence/NaN backstop, not as a fix for this (non-existent) defect --
+see ss6.4 below and ss9's matching follow-up.
 
 ### 6.3 Buoyancy (pbf.rs step 6.6)
 
@@ -850,11 +853,14 @@ This impulse clamp is a distinct backstop from the fluid speed clamp (ss5.2 step
 twice per sub-step) and the ball speed clamp added alongside it (ss4.2 step 8,
 `dem::BALL_SPEED_SAFETY_FACTOR`) — see ss9's 2026-09-22 entry for how the three relate and what they
 were validated to fix. The ball speed clamp (ss4.2 step 8) gained an angular counterpart on
-2026-09-26 (`ball_omega_max = (wall speed + free-fall speed) / balls.radius`, no extra safety
-multiple): spin had no ceiling anywhere in this solver before, which let a ball's rotation
-accumulate unboundedly from DEM contact torque alone in one of the two mechanisms behind that
-day's energy-injection investigation (see ss6.2's "Angular resonance bug and fix" entry, and ss9's
-matching follow-up).
+2026-09-26, `ball_omega_max`, while chasing an apparent low-fill energy regression -- but that
+regression was later (2026-09-27) root-caused as a ball-only-metric false alarm, not a physics bug
+(see ss6.2's "Angular resonance bug and fix" entry's closing paragraph, and ss9's matching
+follow-up). With no real defect behind it, the ceiling was re-tuned from its original tightly-fit
+value (which had responded non-monotonically to tuning -- a sign it was chasing noise) to
+`ball_speed_v_max / balls.radius`, i.e. the same generous `BALL_SPEED_SAFETY_FACTOR` margin as the
+linear clamp it sits beside, kept purely as a divergence/NaN backstop (spin had no ceiling anywhere
+in this solver before) rather than a tuned fix for any specific finding.
 
 ---
 
@@ -1216,16 +1222,27 @@ state after calling `compute`:
   trade-off. Regression test:
   `tests::simulation_new_auto_raises_fluid_resolution_when_coarse_graining_shrinks_balls`.
 
-  **Follow-up (2026-09-26): still `#[ignore]`d, root cause partially identified.** After the
+  **Follow-up (2026-09-26): apparent regression, later found to be a false alarm.** After the
   coarse-graining-independence drag fix and the `c_rot` cap (ss6.2) resolved the *default*
   config's own, more severe energy-injection bug, this test's own config (`fill_fraction=0.10`)
-  regressed further under the same drag fix (energy_slope_w +16.9 -> **+26.6 W/m**, worse than
-  the original "gas" baseline) via a *different* path: step 6.2's correction is usually skipped
-  outright here (degeneracy gate failing, not merely bounded), so a ball's spin grows unbounded
-  from DEM friction/contact torque alone. The new angular ball-speed backstop (`dem.rs` step 8,
-  ss6.4) helped (26.6 -> 15.2 W/m) but did not fully resolve it, and tightening it further made
-  it *worse* (19.5 W/m at half the ceiling) -- a non-monotonic response pointing to a still-
-  unidentified separate mechanism, most likely in DEM's own rolling-friction/contact torque
-  accounting, independent of the fluid coupling. Deferred rather than chased further: the user's
-  actually-reported symptom was at the default config, decisively fixed and covered by
-  `coupling::tests::coupled_charge_never_gains_more_energy_than_the_wall_supplies` (ss6.2).
+  appeared to regress further under the same drag fix (ball-only energy_slope_w +16.9 ->
+  **+26.6 W/m**, worse than the original "gas" baseline). An angular ball-speed backstop
+  (`dem.rs` step 8, ss6.4) brought the reading to 15.2 W/m (still over the `<5.0` bound), and
+  tightening it further made it *worse* (19.5 W/m at half the ceiling) -- non-monotonic, the
+  first sign this was noise, not a real defect.
+
+  **Follow-up (2026-09-27): root-caused as a test-design bug, not a physics bug.** A ball-only
+  mechanical-energy slope cannot distinguish "the coupling created energy" from "the fluid
+  legitimately handed the ball some of the energy the wall gave the fluid" -- exactly the
+  ball<->fluid drag this project intends, and step 6.2's correction being usually skipped here
+  (degeneracy gate failing outright) doesn't change that. Checked with the same full-system
+  (ball+fluid) per-sub-step energy invariant ss6.2's fix validates against, at this exact config,
+  2 seeds, 20s window: the invariant held at every sub-step both times (worst margins +1.78 J and
+  +7.80 J), while the ball-only slope swung sign run-to-run and window-to-window (+13.8/+1.0/+4.3
+  W/m at 5/10/20s one run, -1.2/+3.9 W/m at 5/20s the other) -- ordinary noise. This test now
+  asserts the full-system invariant directly (`coupling::tests::
+  low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`, no longer `#[ignore]`d,
+  passes); no code in `pbf.rs`/`dem.rs` changed as a result. The angular ball-speed backstop
+  added while chasing this false alarm was re-tuned to the same generous
+  `BALL_SPEED_SAFETY_FACTOR` margin as its linear sibling (ss6.4) and kept as a plain
+  divergence/NaN backstop, not a fix for this (non-existent) defect.

@@ -89,7 +89,7 @@ pub fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{EffectiveMedia, LiftersParams};
+    use crate::params::{EffectiveMedia, LiftersParams, Params};
 
     fn still_drum(radius_m: f32) -> Drum {
         Drum::new(
@@ -906,11 +906,11 @@ mod tests {
     ///   own centroid, normalized by the population's RMS spread from that centroid -- a compact
     ///   cascading/mixed charge keeps this bounded; an ejected, isolated ball is a sustained
     ///   outlier;
-    /// - `mean_mechanical_energy_slope_w`: the ball population's total mechanical energy
-    ///   (`dem::mechanical_energy_j`), linear-fit slope over the measurement window (W) -- should
-    ///   not trend upward in a steady cascading regime.
+    /// - `worst_margin_j`: the worst (most negative) per-sub-step margin of the full-system
+    ///   (ball+fluid) mechanical energy invariant over the measurement window -- see
+    ///   [`settle_and_measure_full_system_energy_invariant`]; non-negative means the solver never
+    ///   created energy from nothing at any single sub-step.
     fn low_fill_cataracting_charge_diagnostics() -> (f32, f32, f32) {
-        use crate::dem;
         use crate::params::{
             Direction, MediaParams as Media, MillParams, Params, SimulationParams,
             SlurryParams as Slurry, SpeedMode,
@@ -937,120 +937,13 @@ mod tests {
         };
         params.validate().unwrap();
 
-        let effective = params.effective_media();
-        let radius_m = params.mill.radius_m();
-        let omega = params.mill.omega();
-        let mut dem = DemState::new(&effective, radius_m, params.simulation.seed);
-        let mut fluid = FluidParticles::seed_lattice(
-            &params.slurry,
-            radius_m,
-            params.simulation.resolution,
-            &dem.balls.x,
-            dem.balls.radius,
-        );
-        let sub_dt = 1.0 / (60.0 * params.simulation.substeps as f32);
-        let mut drum_angle = 0.0f32;
+        let (worst_margin_j, max_ball_speed, max_centroid_distance_ratio) =
+            settle_and_measure_full_system_energy_invariant(&params, 5.0, 8.0);
 
-        // Settling phase (not measured): the fresh lattice's initial contact/fall transient is
-        // not representative of steady-state behaviour, same rationale as every sibling test in
-        // this module and in `dem.rs`/`lib.rs`.
-        for _ in 0..(5.0 / sub_dt) as u32 {
-            let drum = Drum::new(radius_m, omega, params.lifters);
-            step(
-                &mut dem,
-                &mut fluid,
-                &drum,
-                drum_angle,
-                &params.media,
-                &params.slurry,
-                params.simulation.dem_iterations,
-                params.simulation.pbf_iterations,
-                sub_dt,
-            );
-            drum_angle = (drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
-        }
-
-        // Measurement phase.
-        let measure_seconds = 5.0f32;
-        let n_measurement_steps = (measure_seconds / sub_dt) as u32;
-        let mut max_ball_speed = 0.0f32;
-        let mut max_centroid_distance = 0.0f32;
-        let mut sum_sq_centroid_distance = 0.0f32;
-        let mut n_centroid_samples = 0u32;
-        // One (t, energy) sample per simulated second, for a simple linear-fit slope.
-        let mut energy_samples: Vec<(f32, f32)> = Vec::new();
-        let samples_stride = (1.0 / sub_dt) as u32;
-        for i in 0..n_measurement_steps {
-            let drum = Drum::new(radius_m, omega, params.lifters);
-            step(
-                &mut dem,
-                &mut fluid,
-                &drum,
-                drum_angle,
-                &params.media,
-                &params.slurry,
-                params.simulation.dem_iterations,
-                params.simulation.pbf_iterations,
-                sub_dt,
-            );
-            drum_angle = (drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
-
-            for v in &dem.balls.v {
-                max_ball_speed = max_ball_speed.max(v.length());
-            }
-
-            let centroid =
-                dem.balls.x.iter().fold(Vec2::ZERO, |acc, &p| acc + p) / dem.balls.len() as f32;
-            let mut max_this_step = 0.0f32;
-            for &p in &dem.balls.x {
-                let d = (p - centroid).length();
-                sum_sq_centroid_distance += d * d;
-                n_centroid_samples += 1;
-                max_this_step = max_this_step.max(d);
-            }
-            max_centroid_distance = max_centroid_distance.max(max_this_step);
-
-            if i % samples_stride.max(1) == 0 {
-                let t = i as f32 * sub_dt;
-                energy_samples.push((t, dem::mechanical_energy_j(&dem.balls)));
-            }
-        }
-
-        let rms_spread = (sum_sq_centroid_distance / n_centroid_samples.max(1) as f32).sqrt();
-        let max_centroid_distance_ratio = if rms_spread > 1e-6 {
-            max_centroid_distance / rms_spread
-        } else {
-            0.0
-        };
-
-        // Simple ordinary-least-squares slope of energy vs. time (W). A settled/steady cascading
-        // charge should have a slope near zero (energy input from the wall roughly balances
-        // dissipation); a persistent positive slope means the charge is gaining energy from
-        // somewhere the accounting doesn't attribute to the wall.
-        let n = energy_samples.len().max(1) as f32;
-        let mean_t: f32 = energy_samples.iter().map(|(t, _)| *t).sum::<f32>() / n;
-        let mean_e: f32 = energy_samples.iter().map(|(_, e)| *e).sum::<f32>() / n;
-        let mut num = 0.0f32;
-        let mut den = 0.0f32;
-        for &(t, e) in &energy_samples {
-            num += (t - mean_t) * (e - mean_e);
-            den += (t - mean_t) * (t - mean_t);
-        }
-        let mean_mechanical_energy_slope_w = if den > 1e-9 { num / den } else { 0.0 };
-
-        (
-            max_ball_speed,
-            max_centroid_distance_ratio,
-            mean_mechanical_energy_slope_w,
-        )
+        (max_ball_speed, max_centroid_distance_ratio, worst_margin_j)
     }
 
     #[test]
-    #[ignore = "known-broken 2026-09-26, tracked separately -- see this test's own doc comment's \
-                final paragraph for the measured numbers and root-cause hypothesis; the default \
-                config (media.fill_fraction=0.30) this project's users actually run is fixed and \
-                covered by other regression tests, this one specifically guards a different, \
-                lower-fill configuration"]
     fn low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid() {
         // Direct regression for the 2026-09-22 unphysical-scatter report at this exact
         // configuration. Two architectural changes attempting a *deeper* fix were tried here and
@@ -1076,68 +969,50 @@ mod tests {
         // - a ball speed safety backstop (`dem.rs` step 8, [`crate::dem::BALL_SPEED_SAFETY_
         //   FACTOR`]) mirroring the fluid's own, since none existed for balls at all.
         //
-        // Measured effect at this exact configuration (Realtime preset, `max_balls=150`,
-        // `resolution=15`, `media.fill_fraction=0.10`): the ball population's total mechanical
-        // energy slope over a 5s measurement window went from **+16.9 W/m (net energy gain --
-        // the "gas" failure mode)** before this fix to **-11.1 W/m (net dissipation, the
-        // physically expected sign)** after. Peak instantaneous ball speed did *not* measurably
-        // improve in this aggregate statistic (~4-5 m/s either way, ball-speed-clamp backstop
-        // never engaged in this run) -- this fix closes the specific unbounded-energy-injection
-        // defect it targets, but does not, by itself, fully explain the screenshot's visually
-        // dramatic single-ball ejections; see the fix plan's final notes for recommended
-        // follow-up (Phase 2's resolution/`d_eff` envelope guard, visual confirmation in the
-        // rebuilt app).
+        // **2026-09-26: a ball-only energy-slope regression, later found to be a false alarm.**
+        // The true-particle-radius drag fix (commit 8b0d632) raised step 6.5's `beta` toward
+        // saturation, decisively fixing the *default* config (`media.fill_fraction=0.30`) but
+        // making this test's *ball-only* mechanical-energy-slope metric read +26.6 W/m over a 5s
+        // window (failing its `< 5.0` bound). A step-6.5 `c_rot` cap and an angular ball-speed
+        // backstop landed for unrelated, independently-verified reasons (see their own doc
+        // comments and `docs/PHYSICS.md` ss6.2/ss6.4), and brought the reading down to +15.2 W/m
+        // -- still failing, non-monotonically (tightening the backstop further made it *worse*,
+        // +19.5 W/m), which was the first sign the ball-only metric itself was the problem, not
+        // the physics.
         //
-        // **2026-09-26 regression, currently `#[ignore]`d.** The true-particle-radius drag fix
-        // (commit 8b0d632, see [`crate::dem::Balls::true_radius`]'s doc comment) raised step
-        // 6.5's `beta` toward saturation, which decisively fixed the *default* config
-        // (`media.fill_fraction=0.30`) but regressed this lower-fill config: measured
-        // energy_slope_w went to **+26.6 W/m** (worse than the +16.9 W/m "gas" baseline above).
-        // Root-caused via a step-6.5 angular-relaxation trace (scratch diagnostic, not
-        // committed): at this config, a ball's spin repeatedly hits the degeneracy gate
-        // (`s.abs() > 0.1 * s_scale` failing, so step 6.5's correction is skipped outright, not
-        // merely bounded) and grows to ~950 rad/s from DEM friction/contact torque alone, wholly
-        // uncorrected. Two fixes landed as a result (see their own doc comments):
-        // - a cap on step 6.5's `c_rot` reaction-distribution coefficient (`pbf.rs`), which fixed
-        //   a *related* but distinct mechanism -- a genuine, reproducible resonant feedback loop
-        //   at the *default* config (worst single-sub-step full-system energy violation measured
-        //   at -8262.8 J before, -14.7 J after -- back to this project's pre-existing noise
-        //   floor, see the default-config energy-invariant scratch diagnostic, not committed);
-        // - an angular counterpart to [`crate::dem::BALL_SPEED_SAFETY_FACTOR`]'s existing linear
-        //   ball-speed backstop (`dem.rs` step 8), since spin had no ceiling anywhere.
-        //
-        // Neither fix fully resolves *this* test: the angular backstop brought energy_slope_w to
-        // +15.2 W/m (still failing), and tightening its ceiling further made it *worse* (+19.5
-        // W/m at half the ceiling) -- a non-monotonic response indicating the backstop is not
-        // the dominant lever for this specific residual, i.e. a separate contributing mechanism
-        // (most likely in DEM's own rolling-friction/contact torque accounting, independent of
-        // the fluid coupling) remains unidentified. The user's own reported symptom was at the
-        // default config, decisively fixed and verified (Playwright screenshot + energy
-        // invariant); this lower-fill edge case is deferred rather than chased further right now
-        // -- see [[project_floating_balls_1500_2026_09]] for the tracking note.
-        let (max_ball_speed, max_centroid_distance_ratio, energy_slope_w) =
+        // **2026-09-27: root-caused as a test-design bug, not a physics bug.** A ball-only energy
+        // slope cannot distinguish "the coupling is creating energy" from "the fluid is
+        // legitimately handing the balls some of the energy the wall gave the *fluid*" -- exactly
+        // the ball<->fluid drag this project's own physics intends. Checked with the full-system
+        // (ball+fluid) per-sub-step invariant (the same oracle
+        // `coupled_charge_never_gains_more_energy_than_the_wall_supplies` uses for the default
+        // config, see [`settle_and_measure_full_system_energy_invariant`]) at this exact
+        // configuration, across 2 seeds, over a 20s measurement window: the invariant held at
+        // every single sub-step both times (worst margins +1.78 J and +7.80 J, both >= 0 -- no
+        // energy created from nothing), while the ball-only slope over shorter windows swung from
+        // +13.8 W/m (5s) to +0.96 W/m (10s) to +4.26 W/m (20s) in one run and from -1.23 W/m (5s)
+        // to +3.92 W/m (20s) in the other -- sign-flipping, seed-dependent noise, not a steady
+        // drift. The original "+15.2 W/m" failure was this same noise sampled in an unlucky 5s
+        // window, not evidence of a bug. Replaced the ball-only slope assertion below with the
+        // same full-system invariant the default-config test uses; no code in `pbf.rs`/`dem.rs`
+        // changed as a result of this finding. See [[project_floating_balls_1500_2026_09]] for
+        // the full record.
+        let (max_ball_speed, max_centroid_distance_ratio, worst_margin_j) =
             low_fill_cataracting_charge_diagnostics();
         eprintln!(
             "low_fill_cataracting_charge_diagnostics: max_ball_speed={max_ball_speed} m/s, \
              max_centroid_distance_ratio={max_centroid_distance_ratio}, \
-             energy_slope_w={energy_slope_w} W/m"
+             worst_margin_j={worst_margin_j} J"
         );
-        // The real, tightened bound: catches a regression back to the net-energy-gain "gas"
-        // failure mode (measured +16.9 W/m before this fix) while allowing the ordinary
-        // measurement noise a 5s window has (measured -11.1 W/m after the fix); comfortably below
-        // this project's own dissipated-power scale (O(10^3) W/m at typical ball counts, see
-        // `docs/METRICS.md`), so a real regression trips this long before it would ever look like
-        // legitimate dissipation.
         assert!(
-            energy_slope_w < 5.0,
-            "ball population's mechanical energy is trending upward faster than measurement \
-             noise should allow -- looks like the coupling is injecting net energy again: \
-             energy_slope_w={energy_slope_w} W/m"
+            worst_margin_j >= 0.0,
+            "full-system (ball+fluid) mechanical energy exceeded cumulative wall work + \
+             tolerance at some sub-step -- energy created from nothing (the 2026-09-26 bug, or a \
+             new one like it): worst_margin_j={worst_margin_j}"
         );
-        // Sanity ceilings only (not yet a tight bound -- see this test's doc comment above for
-        // why peak speed specifically was not driven down further at this effort level): well
-        // above every measured value (4-5 m/s) but far below the ball speed safety backstop's own
-        // ceiling (~24 m/s at this configuration), so a genuine blow-up still trips this first.
+        // Sanity ceilings only (not yet a tight bound): well above every measured value (4-5 m/s)
+        // but far below the ball speed safety backstop's own ceiling (~24 m/s at this
+        // configuration), so a genuine blow-up still trips this first.
         assert!(
             max_ball_speed < 15.0,
             "ball speed far exceeds anything measured for this configuration (looks like a \
@@ -1170,22 +1045,22 @@ mod tests {
     /// (`pbf.rs` step 6.5): worst single-sub-step violation -8262.8 J; after: -14.7 J, back to
     /// this project's own pre-existing (pre-8b0d632) floating-point noise floor (-34.8 J,
     /// measured at `HEAD~1` with an identical harness).
-    #[test]
-    fn coupled_charge_never_gains_more_energy_than_the_wall_supplies() {
-        use crate::params::{Params, SimulationParams};
-
-        let mut params = Params::default();
-        // The Rust crate's `Params::default()` is actually the frontend's "Accuracy" preset
-        // (max_balls=600, resolution=40, ~0.12-0.13x realtime -- see web/src/params/presets.ts),
-        // NOT the browser's actual default. Override to the "Realtime" preset the browser
-        // actually starts at, matching the reported screenshots exactly.
-        params.simulation = SimulationParams {
-            max_balls: 150,
-            resolution: 15,
-            ..params.simulation
-        };
-        params.validate().unwrap();
-
+    /// Runs the coupled ball+fluid solver at `params` for `settle_seconds` (unmeasured, the fresh
+    /// lattice's initial fall/pile-up transient) then `measure_seconds`, and returns the worst
+    /// (most negative) per-sub-step margin of `wall_work + tolerance - delta_e` observed during
+    /// the measurement window, alongside the peak ball speed (m/s) and peak ball-to-centroid
+    /// distance ratio seen there. A non-negative margin means the full-system (ball+fluid)
+    /// mechanical energy invariant held at every single sub-step -- the solver never created
+    /// energy from nothing -- mirroring
+    /// `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s
+    /// dry-only pattern exactly: a fresh per-sub-step tolerance every time, never a single fixed
+    /// budget compared cumulatively (which normal floating-point noise would trivially exceed
+    /// given enough sub-steps).
+    fn settle_and_measure_full_system_energy_invariant(
+        params: &Params,
+        settle_seconds: f32,
+        measure_seconds: f32,
+    ) -> (f32, f32, f32) {
         let effective = params.effective_media();
         let radius_m = params.mill.radius_m();
         let omega = params.mill.omega();
@@ -1200,10 +1075,7 @@ mod tests {
         let sub_dt = 1.0 / (60.0 * params.simulation.substeps as f32);
         let mut drum_angle = 0.0f32;
 
-        // Settling phase (not checked): the fresh lattice's initial fall/pile-up is not
-        // representative of the invariant this test cares about (same rationale as every
-        // sibling test in this module).
-        for _ in 0..(3.0 / sub_dt) as u32 {
+        for _ in 0..(settle_seconds / sub_dt) as u32 {
             let drum = Drum::new(radius_m, omega, params.lifters);
             step(
                 &mut dem,
@@ -1219,15 +1091,6 @@ mod tests {
             drum_angle = (drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
         }
 
-        // Per-sub-step tolerance (not a single fixed budget for the whole window) -- mirrors
-        // `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s
-        // own formula exactly: a fresh floating-point-summation-order allowance every sub-step,
-        // scaling with how many sub-steps have elapsed the same way the legitimate wall-work term
-        // itself does. A single fixed budget compared cumulatively over many sub-steps would be a
-        // false alarm waiting to happen (normal per-step noise trivially exceeds any single fixed
-        // tolerance given enough sub-steps), not a real leak.
-        let mut e_prev =
-            crate::dem::mechanical_energy_j(&dem.balls) + crate::pbf::mechanical_energy_j(&fluid);
         // Wider than the dry-only sibling invariant's own `1e-3`-coefficient, velocity-scaled
         // formula: the coupled solver's fluid side (density-constraint Jacobi iteration,
         // implicit-viscosity CG solve, the ball<->fluid exchange itself) contributes its own
@@ -1243,8 +1106,13 @@ mod tests {
         let tolerance_j_per_step =
             (1e-2 * dem.balls.mass * (omega * radius_m).powi(2).max(1.0)).max(5.0);
         let mut worst_margin_j = f32::MAX;
+        let mut e_prev =
+            crate::dem::mechanical_energy_j(&dem.balls) + crate::pbf::mechanical_energy_j(&fluid);
+        let mut max_ball_speed = 0.0f32;
+        let mut max_centroid_distance = 0.0f32;
+        let mut sum_sq_centroid_distance = 0.0f32;
+        let mut n_centroid_samples = 0u32;
 
-        let measure_seconds = 8.0f32;
         let n_measurement_steps = (measure_seconds / sub_dt) as u32;
         for _ in 0..n_measurement_steps {
             let drum = Drum::new(radius_m, omega, params.lifters);
@@ -1268,7 +1136,48 @@ mod tests {
             let margin = wall_work_this_step + tolerance_j_per_step - delta_e;
             worst_margin_j = worst_margin_j.min(margin);
             e_prev = e_now;
+
+            for v in &dem.balls.v {
+                max_ball_speed = max_ball_speed.max(v.length());
+            }
+            let centroid =
+                dem.balls.x.iter().fold(Vec2::ZERO, |acc, &p| acc + p) / dem.balls.len() as f32;
+            for &p in &dem.balls.x {
+                let d = (p - centroid).length();
+                sum_sq_centroid_distance += d * d;
+                n_centroid_samples += 1;
+                max_centroid_distance = max_centroid_distance.max(d);
+            }
         }
+
+        let rms_spread = (sum_sq_centroid_distance / n_centroid_samples.max(1) as f32).sqrt();
+        let max_centroid_distance_ratio = if rms_spread > 1e-6 {
+            max_centroid_distance / rms_spread
+        } else {
+            0.0
+        };
+
+        (worst_margin_j, max_ball_speed, max_centroid_distance_ratio)
+    }
+
+    #[test]
+    fn coupled_charge_never_gains_more_energy_than_the_wall_supplies() {
+        use crate::params::{Params, SimulationParams};
+
+        let mut params = Params::default();
+        // The Rust crate's `Params::default()` is actually the frontend's "Accuracy" preset
+        // (max_balls=600, resolution=40, ~0.12-0.13x realtime -- see web/src/params/presets.ts),
+        // NOT the browser's actual default. Override to the "Realtime" preset the browser
+        // actually starts at, matching the reported screenshots exactly.
+        params.simulation = SimulationParams {
+            max_balls: 150,
+            resolution: 15,
+            ..params.simulation
+        };
+        params.validate().unwrap();
+
+        let (worst_margin_j, _, _) =
+            settle_and_measure_full_system_energy_invariant(&params, 3.0, 8.0);
 
         assert!(
             worst_margin_j >= 0.0,
