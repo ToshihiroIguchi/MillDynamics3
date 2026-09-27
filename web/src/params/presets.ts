@@ -12,8 +12,11 @@
 // ratio is < 1 for each), but all three are still coarse relative to what a visually smooth *thin*
 // wetting film specifically needs -- that is a different, stricter bar the warning threshold does
 // not check, and none of these three tiers clears it. That trade-off is real and disclosed here,
-// not hidden: removing it needs either a fundamentally faster fluid solver (the M6 performance
-// pass this project has not yet done) or much more aggressive ball coarse-graining than any of
+// not hidden: removing it needs either a fundamentally faster fluid solver -- the 2026-09-27 M6
+// solver pass (docs/PERF.md) sped up the existing PBF/coupling implementation substantially
+// (constant-factor wins: a counting-sort spatial grid, WASM SIMD, removed per-substep
+// allocations) without changing its algorithmic complexity or resolution/quality trade-off, so
+// this specific fidelity gap remains -- or much more aggressive ball coarse-graining than any of
 // these three tiers use.
 export interface QualityPreset {
   id: string;

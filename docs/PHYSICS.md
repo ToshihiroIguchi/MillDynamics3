@@ -30,12 +30,14 @@ and `docs/PARAMETERS.md` for the UI-facing parameter list.
   o'clock, clockwise-increasing for CCW rotation" convention used by acceptance-test literature
   values.
 - Determinism: every run is reproducible from `Params` + `seed` (`rng.rs`'s small deterministic
-  PRNG seeds initial lattice jitter; `grid.rs`'s `UniformGrid` uses a `BTreeMap`, not `HashMap`,
-  specifically so broad-phase candidate-pair iteration order — and hence f32 summation order in the
-  contact/kernel accumulations — is identical run-to-run for identical input; see that module's
-  doc comment for the full argument). `crates/mill-core/src/dem.rs`'s `ContactBook` similarly uses
-  a `HashMap` for the hot per-substep accumulation (measured ~2x faster than `BTreeMap` at default
-  ball counts) but replays results through a sorted `Vec` (`sorted_ball_ball`/`sorted_ball_wall`)
+  PRNG seeds initial lattice jitter; `grid.rs`'s `UniformGrid` is a counting-sort CSR structure —
+  no hash map at all since the 2026-09-27 M6 solver pass, see docs/PERF.md — built so broad-phase
+  candidate-pair iteration order — and hence f32 summation order in the contact/kernel
+  accumulations — is identical run-to-run for identical input; see that module's doc comment for
+  the full argument). `crates/mill-core/src/dem.rs`'s `ContactBook` and `pbf.rs`'s neighbour lists
+  are likewise plain arrays (parallel to the broad-phase's own pair list, or CSR-indexed) rather
+  than a hash map, for the same reason plus raw speed in that hot per-substep accumulation loop;
+  `ContactBook` still replays results through a sorted `Vec` (`sorted_ball_ball`/`sorted_ball_wall`)
   before any pass that iterates *across* contacts and mutates shared state sequentially (friction,
   restitution, rolling resistance), which is where non-deterministic order would actually change
   the physical result.

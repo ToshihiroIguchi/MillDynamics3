@@ -213,3 +213,136 @@ be refreshed together with this table the next time someone touches that file; t
 was measurement only, so the `note` strings were left as-is pending that follow-up. Realtime's
 "default" status stays justified (it is still the only tier at >= 1.0x), but a user who deliberately
 picks Balanced or Accuracy today gets a slower experience than the UI copy currently promises.
+
+## 2026-09-27: M6 solver pass -- counting-sort grid, CSR neighbour lists, allocation removal
+
+The M6 performance pass (docs/PLAN.md ss5) had never been done; the user reported the simulation as
+generally heavy. Reading the hot path found several large, purely mechanical inefficiencies with no
+physics tie-in at all:
+
+- `grid.rs`'s `UniformGrid` was a `BTreeMap<(i32, i32), Vec<u32>>` -- one small heap allocation per
+  occupied cell, `O(log n)` lookups -- rebuilt **4 times per sub-step** (the DEM ball-ball grid, the
+  step 3.5 ball-overlap grid, the PBF fluid-fluid grid, and the step 6.5 ball-fluid coupling grid).
+- `pbf.rs`'s neighbour lists were `Vec<Vec<u32>>` (one allocation per fluid particle), and the
+  density-constraint solve (step 3) ran three full passes over every neighbour pair per iteration
+  (density, lambda, delta_p), recomputing `spiky_grad` from scratch in two of them for the same
+  directed edge.
+- Per-particle/per-ball `Vec::new()` allocations inside steps 3.5, 3.6b, 6.5 and 6.6's inner loops
+  (thousands of short-lived allocations per sub-step at this project's default population sizes),
+  plus the implicit-viscosity conjugate-gradient solve (`solve_implicit_viscosity`) allocating two
+  fresh `Vec<Vec2>` per iteration, up to `VISCOSITY_CG_MAX_ITERS = 50` times per sub-step.
+- `dem.rs`'s `ContactBook` used a `HashMap` for the same reason `grid.rs` originally used a
+  `BTreeMap` -- needing a *dynamic* key set -- even though it is rebuilt fresh every sub-step from
+  the broad-phase's own already-known, fixed `ball_ball_pairs` list.
+
+**Fix, in order of what actually mattered:**
+
+1. `grid.rs`: `UniformGrid` rewritten as a counting-sort CSR (compressed sparse row) structure --
+   `GridLayout::Dense` for the ordinary case (a linear index `k = (cx - min_cx) * height + (cy -
+   min_cy)`, built with one histogram + prefix-sum + stable-fill pass, `O(1)` cell lookup, one flat
+   `Vec<u32>` allocation for the whole point set), falling back to `GridLayout::Sparse` (sorted
+   `(key, index)` pairs, binary-searched) only for a pathologically large bounding box relative to
+   the point count (`DENSE_CELLS_PER_POINT_BUDGET`). Both layouts visit cells/pairs in exactly the
+   same order the old `BTreeMap` did (row-major `(cx, cy)`, then point-index order within a cell),
+   verified bit-for-bit, not just by inspection -- see below.
+2. `pbf.rs`'s neighbour lists rewritten as a flat CSR `NeighborLists` (one `Vec<u32>` for the whole
+   population); step 3's density and lambda passes fused into one loop per particle (density only
+   ever needed that particle's own already-final density, not a separate prior pass over everyone),
+   with each directed edge's raw `spiky_grad` cached into a parallel buffer during that fused pass
+   and reused by the delta_p pass instead of recomputed. `solve_implicit_viscosity`'s CG loop now
+   preallocates its 5 working buffers once per call and writes into them in place
+   (`apply_viscosity_system_into`/`laplacian_apply_into`) instead of allocating twice per iteration.
+3. Every per-particle/per-ball `nearby`/`items`/`weights` scratch `Vec` in steps 3.5, 3.6b, 6.5 and
+   6.6 hoisted out of its loop and `clear()`-ed per use instead of freshly allocated.
+4. `dem.rs`'s `ContactBook` rewritten as plain arrays: `ball_ball_lambda_n: Vec<f32>` parallel to
+   `ball_ball_pairs` (indexed by position, not hashed), `ball_wall_lambda_n: Vec<f32>` indexed
+   directly by ball index (a dense integer range needs no hashing at all). The `(i, j)`/ascending-`i`
+   sort steps 5-7 need for deterministic Gauss-Seidel processing order is unchanged.
+
+None of this touches a single physics formula, tolerance or default -- every change is either a data
+structure swap that preserves the exact same iteration order, or removes a redundant recomputation/
+allocation. **Verified bit-for-bit, not just tested**: a new permanent diagnostic,
+`crates/mill-core/examples/perf_probe.rs`, settles five configurations (the three quality presets,
+a dry/no-slurry run, and a `lifters.count = 4` run) and hashes (FNV-1a over the raw bits of every
+ball/fluid `x`/`v`/`omega`) the resulting state after a fixed number of frames. Every one of the four
+changes above reproduced the identical hash, for all five configurations, both against the pre-change
+baseline and in the final combined state -- this is the same "hash of positions" regression technique
+M2's own lifter-regression check used, applied here as a live oracle during the rewrite rather than a
+one-off assertion. `cargo test -p mill-core` (131/131) passed unchanged throughout.
+
+One honest trade-off, found and kept (not fixed further): `DENSE_CELLS_PER_POINT_BUDGET` needed
+tuning down from an initial, untested `8` to `2` -- the DEM ball population's occupied-cell fraction
+is well below a generic "roughly one point per cell" assumption (a circular fill area inside a square
+bounding box, further sparsified by `media.fill_fraction`), so the more generous budget kept choosing
+`Dense` in a regime where it wasted real time iterating empty cells. Even after that tuning, `cargo
+bench`'s isolated `dem_step` micro-benchmark (pure DEM, no PBF/coupling, same-machine/same-session
+`git stash` comparison against the pre-change code) still shows **500 balls: no significant change,
+1000 balls: +7%, 2000 balls: +19%, all regressions** -- the counting-sort/CSR rewrite is not a strict
+win for a DEM-only broad-phase at these particular population sizes. This was investigated (see the
+constant's own doc comment) and accepted rather than chased further: `drum_only_step` (the same
+`Simulation::step` a real session actually drives -- DEM + PBF + coupling together, at this crate's
+default `Params`) improved by **-43%** in the same same-session comparison, and the standalone
+`dem_step` bench is not representative of any configuration this project actually ships (PBF/coupling
+dominates total cost at every quality preset once slurry is enabled, docs/PERF.md's own "dry" rows
+throughout this file measure well under a wet run's cost).
+
+**Machine-state caveat, important for reading every number below.** Native `cargo bench` numbers
+recorded *earlier in this same file* (e.g. "After the fluidised-charge energy-injection fix":
+`dem_step/500_balls` 0.41 ms, `drum_only_step` 13.17 ms) are **roughly 10x faster** than anything
+measured on this session's machine even with *unmodified* code (confirmed with a `git stash` back to
+that exact pre-change source and re-benchmarked: `dem_step/500_balls` 4.1 ms, `drum_only_step` 380 ms
+on this machine, today). This is a real difference in the underlying machine/environment between
+sessions -- possibly different hardware, thermal state, or background load -- not a regression this
+session introduced or measured against. Every comparison below is therefore **same-machine, same
+session, `git stash`/`stash pop` back-to-back** (the same discipline the Phase 3b section above
+already established), and only the *relative* change should be read across sessions; the *absolute*
+ms/achieved-speed values are not comparable to any earlier dated section in this file.
+
+Native `cargo bench -p mill-core` (release), `git stash` of this pass's `grid.rs`/`pbf.rs`/`dem.rs`
+changes vs. restored, back-to-back on this machine:
+
+| Benchmark | Before | After | Change |
+|---|---|---|---|
+| `dem_step/500_balls` | 4.11 ms | 4.49 ms | +9% (see the trade-off note above) |
+| `dem_step/1000_balls` | 9.57 ms | 10.25 ms | +7% |
+| `dem_step/2000_balls` | 21.18 ms | 25.22 ms | +19% |
+| `drum_only_step` (default `Params`: DEM + PBF + coupling, wet) | 379.7 ms | 216.5 ms | **-43%** |
+
+Browser (WASM, same `wasm-pack build` methodology as every section above, `+simd128` enabled in both
+the before and after builds via the new `.cargo/config.toml` -- see below -- so this isolates the
+`grid.rs`/`pbf.rs`/`dem.rs` change specifically), same `git stash` back-to-back discipline, default
+drum/media/slurry, `lifters.count = 0`, `Achieved speed (x)` HUD reading after letting each run settle
+towards steady cascading:
+
+| Preset | Before | After | Change |
+|---|---|---|---|
+| Realtime (150/15) | ~0.24x | ~0.23x | no significant change (DEM/render-bound, not PBF-bound -- see the fill-fraction section above for the identical Realtime-is-unaffected pattern) |
+| Balanced (300/25) | ~0.04-0.06x | ~0.11-0.12x | roughly **2x** |
+| Accuracy (600/40) | ~0.02x (9-11 sub-steps/s) | ~0.03x (14 sub-steps/s) | roughly +30-50%, noisy at this magnitude -- consistent with, but a noisier readout than, the native `drum_only_step` figure above |
+
+These absolute achieved-speed values are far below this file's older browser table (Realtime used to
+read ~1.0-1.1x) purely because of the machine-state caveat above -- they are not evidence Realtime
+regressed. The relative Balanced/Accuracy improvement is the meaningful result here, and it tracks
+the native `drum_only_step` win reasonably well once the browser reading's own noise floor (very few
+sub-steps/s at Accuracy makes each HUD update a small, noisy sample) is taken into account.
+
+**WASM SIMD.** `.cargo/config.toml` now sets `-C target-feature=+simd128` for the `wasm32-unknown-
+unknown` target (native builds, including every number elsewhere in this file, are unaffected --
+that target triple is never used natively). This is an instruction-set feature, not a `-C fast-math`-
+style flag, so it does not change what any solver computes, only what instructions the compiler may
+emit; `wasm-pack build` picks it up with no invocation change. Kept because it is free (all evergreen
+browsers support WASM SIMD) and strictly non-regressive, not because it was isolated and measured on
+its own -- doing so would need a third `git stash` axis (flag on/off, independent of the `grid.rs`/
+`pbf.rs`/`dem.rs` changes) that this task did not budget for; the browser table above already has it
+enabled in both rows, so it is not what the "Before"/"After" columns there are measuring.
+
+**What was not done.** `DENSE_CELLS_PER_POINT_BUDGET`'s trade-off (above) was investigated and
+accepted, not chased further. A Jacobi-preconditioned variant of `solve_implicit_viscosity`'s
+conjugate-gradient solve was considered (the Morris weights already give the operator's diagonal for
+free) but not implemented -- it is not bit-exact (a different path to the same relative-residual
+tolerance), and profiling to justify that trade-off was out of this pass's time budget once the
+bit-exact wins above were already substantial. Multi-rate fluid stepping, a looser CG tolerance, or
+fewer sub-steps would all trade physical fidelity for speed and were treated as out of scope for a
+"make it faster, not different" pass; they remain options for a future task if the browser numbers
+above (still well under 1.0x at Balanced/Accuracy on today's slower reference machine) are judged not
+good enough.

@@ -19,10 +19,16 @@ Functional simulator with DEM ball solver (position-based rigid discs, wall/lift
 detection), PBF slurry solver with implicit Newtonian viscosity and Akinci-style cohesion/adhesion, two-way
 ball–fluid coupling, free-surface rendering, a live metrics panel (power draw, mixing index, collision
 energy histogram, CSV export), and a parameters panel with three quality presets. See `docs/PLAN.md`
-milestones M0–M7 for roadmap. The full M6 performance pass (SIMD, wasm-opt, neighbour-list reuse) has not
-yet been done; the "Realtime" preset instead reaches >= 1.0x by throttling the per-frame metrics/free-
-surface recomputation to well below render rate and reducing the default ball/fluid particle counts (see
-`docs/PERF.md`), not through the deeper algorithmic work M6 describes.
+milestones M0–M7 for roadmap. Most of M6's performance work has landed: WASM SIMD (`+simd128`),
+`wasm-opt`, and neighbour-list/broad-phase reuse via a counting-sort CSR spatial grid (replacing a
+`BTreeMap`), plus removing per-substep allocations from the PBF/coupling hot path (see the 2026-09-27
+section of `docs/PERF.md` for the full before/after). The "Realtime" preset reaches >= 1.0x on a
+typical dev machine mainly by throttling the per-frame metrics/free-surface recomputation to well
+below render rate and reducing the default ball/fluid particle counts; Balanced/Accuracy are real-time
+in neither preset even after M6's algorithmic work, since PBF/coupling cost still scales with fluid
+particle count at those tiers' higher resolution (see `docs/PERF.md`). Not done: a preconditioned
+(Jacobi) viscosity solve and multi-rate/looser-tolerance options, both left as future, fidelity-
+trading work rather than pure-speed wins.
 
 ## Live demo
 
@@ -34,9 +40,11 @@ push, gated on the same checks as `## Development` below.
 ## Performance
 
 These are native `cargo bench` results (single-threaded, release, not WASM—WASM is typically slower).
-The following table shows the current state after Phase 3b (grinding instrumentation), a pre-optimization
-baseline before the M6 real-time performance pass; these numbers are not yet a real-time-in-browser guarantee.
-See `docs/PERF.md` for the full performance history and notes.
+The table below is kept as originally recorded, after Phase 3b (grinding instrumentation) and before
+the 2026-09-27 M6 solver pass -- absolute numbers vary a lot machine-to-machine (see that section's
+own caveat), so it is not directly comparable to a fresh `cargo bench` run today; it is retained here
+as the historical entry point into `docs/PERF.md`'s full dated history, which has the actual
+before/after numbers for every change including M6's.
 
 | Benchmark | Meaning | Time |
 |---|---|---|
