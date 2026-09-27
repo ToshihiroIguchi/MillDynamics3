@@ -128,6 +128,31 @@ body.params-collapsed .params-panel {
   color: #9aa3b0;
 }
 
+.toolbar-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Recording indicator: a small pulsing red dot pinned to the Record button's corner while active,
+   independent of the icon swap (record circle -> stop square) the button's own click handler does
+   in ui/toolbar.ts -- gives an always-visible "recording in progress" affordance without a
+   separate panel. */
+.toolbar-icon-btn.is-recording {
+  position: relative;
+}
+
+.toolbar-icon-btn.is-recording::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e5484d;
+  animation: hud-speed-dot-pulse 1.2s ease-in-out infinite;
+}
+
 .hud {
   position: absolute;
   bottom: 12px;
@@ -216,6 +241,26 @@ body.params-collapsed .params-panel {
    with the params panel collapsed. */
 .hud-media {
   color: #ffd27a;
+}
+
+/* Recording indicator (ui/hud.ts): a pulsing red dot + sim-time-based elapsed duration, shown only
+   while video/recorder.ts's `CanvasRecorder` is active. Reuses the same dot-pulse keyframe as the
+   speed indicator above and the toolbar's Record button badge. */
+.hud-recording {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #ff6b6b;
+  font-weight: 600;
+}
+
+.hud-recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e5484d;
+  flex-shrink: 0;
+  animation: hud-speed-dot-pulse 1.2s ease-in-out infinite;
 }
 
 .params-form {
@@ -607,4 +652,42 @@ body.params-collapsed .params-panel {
 
 .metrics-warn[hidden] {
   display: none;
+}
+
+/* Report subsection (ui/metricsPanel.ts): "Report end time" + "Generate report now", right below
+   the header's Export CSV button. Same section/heading shape as the rest of the panel
+   (.metrics-panel section/h3, above), its own row layout mirrors .params-row's label+input
+   pattern for visual consistency with the left panel's fields. */
+.metrics-report-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.metrics-report-row label {
+  color: #b7bfcc;
+}
+
+.metrics-report-input {
+  background: #12161c;
+  color: #e6e9ef;
+  border: 1px solid #3a4048;
+  border-radius: 4px;
+  padding: 3px 6px;
+  width: 90px;
+}
+
+.metrics-report-generate {
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* Muted informational note, same look as ui/paramsPanel.ts's .params-note. */
+.metrics-note {
+  color: #8fa0b7;
+  font-size: 11px;
+  margin: 6px 0 0;
 }

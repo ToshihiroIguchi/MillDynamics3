@@ -99,6 +99,18 @@ export function createHud(): Hud {
   mediaBadge.hidden = true;
   el.appendChild(mediaBadge);
 
+  // Recording indicator: only shown while video/recorder.ts's `CanvasRecorder` is active (see
+  // main.ts's `onToggleRecord`). Elapsed time is sim-time-based (simTime - recordingStartSimTime),
+  // not wall-clock, matching how every other duration in this HUD is accounted for.
+  const recordingRow = document.createElement("div");
+  recordingRow.className = "hud-recording";
+  recordingRow.hidden = true;
+  const recordingDot = document.createElement("span");
+  recordingDot.className = "hud-recording-dot";
+  const recordingText = document.createElement("span");
+  recordingRow.append(recordingDot, recordingText);
+  el.appendChild(recordingRow);
+
   return {
     el,
     update(state, fps) {
@@ -131,6 +143,12 @@ export function createHud(): Hud {
           `(substituted, x${media.scaleFactor.toFixed(2)}, N=${media.ballCount})`;
       } else {
         mediaBadge.hidden = true;
+      }
+
+      recordingRow.hidden = !state.isRecording;
+      if (state.isRecording) {
+        const elapsedS = state.recordingStartSimTime === null ? 0 : Math.max(0, state.simTime - state.recordingStartSimTime);
+        recordingText.textContent = `REC ${elapsedS.toFixed(1)} s`;
       }
     },
   };

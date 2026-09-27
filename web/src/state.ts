@@ -20,6 +20,14 @@ export interface AppState {
   /** Derived metrics (docs/PLAN.md ss3.5); see protocol.ts's `FrameMessage.metrics`. `null`
    * before the first frame arrives. */
   metrics: Metrics | null;
+  /** Whether video/recorder.ts's `CanvasRecorder` is currently recording -- drives the toolbar's
+   * Record button icon (ui/toolbar.ts) and the HUD's recording indicator (ui/hud.ts). Recording is
+   * independent of `running`/simulation reset: it just keeps capturing whatever gets rendered. */
+  isRecording: boolean;
+  /** `simTime` at the moment recording started, or `null` while not recording. Used (instead of
+   * wall-clock time) to show elapsed recording duration in the HUD, consistent with this app's
+   * sim-time-based accounting elsewhere. */
+  recordingStartSimTime: number | null;
 }
 
 export function createInitialState(): AppState {
@@ -38,5 +46,7 @@ export function createInitialState(): AppState {
     fluidDye: new Float32Array(0),
     fluidSurface: new Float32Array(0),
     metrics: null,
+    isRecording: false,
+    recordingStartSimTime: null,
   };
 }

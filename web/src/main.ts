@@ -7,19 +7,22 @@ import { createHud } from "./ui/hud";
 import { createMetricsPanel } from "./ui/metricsPanel";
 import { createParamsPanel } from "./ui/paramsPanel";
 import { createToolbar } from "./ui/toolbar";
+import { MediaRecorderCanvasRecorder } from "./video/recorder";
 
 const state = createInitialState();
 
-const canvas = document.querySelector<HTMLCanvasElement>("#scene");
-if (!canvas) {
+const canvasOrNull = document.querySelector<HTMLCanvasElement>("#scene");
+if (!canvasOrNull) {
   throw new Error("Missing #scene canvas element");
 }
+const canvas: HTMLCanvasElement = canvasOrNull;
 const sceneWrapOrNull = document.querySelector<HTMLElement>(".scene-wrap");
 if (!sceneWrapOrNull) {
   throw new Error("Missing .scene-wrap element");
 }
 const sceneWrap: HTMLElement = sceneWrapOrNull;
 const renderer = new CanvasRenderer(canvas);
+const recorder = new MediaRecorderCanvasRecorder();
 
 function resizeToWrap(): void {
   const { clientWidth: w, clientHeight: h } = sceneWrap;
@@ -195,7 +198,26 @@ function toggleParamsPanel(): boolean {
   return nowVisible;
 }
 
-const toolbarEl = createToolbar({
+/** Starts/stops video/recorder.ts's `CanvasRecorder` on `#scene`, independent of simulation
+ * running/reset state (recording just keeps capturing whatever gets rendered, including a reset
+ * transient, mirroring how a real screen recording would behave -- see video/recorder.ts's doc
+ * comment). `stop()`'s promise isn't awaited by the toolbar (its own click handler needs the new
+ * state synchronously to swap the icon immediately), so a rejection is caught here instead of
+ * being left to become an unhandled rejection. */
+function toggleRecord(): boolean {
+  if (recorder.isRecording()) {
+    state.isRecording = false;
+    state.recordingStartSimTime = null;
+    void recorder.stop(state.simTime).catch((err) => console.error("[recorder] stop failed", err));
+    return false;
+  }
+  recorder.start(canvas, state.simTime);
+  state.isRecording = recorder.isRecording();
+  state.recordingStartSimTime = state.isRecording ? state.simTime : null;
+  return state.isRecording;
+}
+
+const toolbar = createToolbar({
   onTogglePlay: togglePlay,
   onStep: () => send({ type: "step" }),
   onReset: () => {
@@ -206,17 +228,34 @@ const toolbarEl = createToolbar({
   initialParamsVisible,
   onTogglePanel: togglePanel,
   initialPanelVisible,
+  onToggleRecord: toggleRecord,
+  recordingSupported: recorder.isSupported(),
 });
-sceneWrap.appendChild(toolbarEl);
+sceneWrap.appendChild(toolbar.el);
 
 const hud = createHud();
 sceneWrap.appendChild(hud.el);
+
+/** Pauses the simulation programmatically (not via the toolbar button's own click), mirroring
+ * `togglePlay`'s "pause" branch exactly -- same `state.running` update, same `send({type:
+ * "pause"})`, same `gate.resetClock()` -- but also syncing the toolbar's icon by hand since
+ * `toolbar.ts`'s own click handler (the only other place the icon updates) never runs here. Used
+ * by the metrics panel's report auto-trigger (ui/metricsPanel.ts's `onAutoReportPause`) so a run
+ * that reaches its configured "Report end time" pauses and reflects that in the UI before the PDF
+ * downloads. A no-op if the sim is already paused. */
+function pauseForAutoReport(): void {
+  if (!state.running) return;
+  state.running = false;
+  send({ type: "pause" });
+  gate.resetClock();
+  toolbar.setRunning(false);
+}
 
 const panelEl = document.querySelector<HTMLElement>("#metrics-panel");
 if (!panelEl) {
   throw new Error("Missing #metrics-panel element");
 }
-const metricsPanel = createMetricsPanel(panelEl);
+const metricsPanel = createMetricsPanel(panelEl, pauseForAutoReport);
 
 const SPACE_GUARD_SELECTOR = "input, select, textarea, summary, button, [contenteditable]";
 
@@ -259,6 +298,7 @@ function frameLoop(nowMs: number): void {
     fluidDye: state.fluidDye,
     fluidSurface: state.fluidSurface,
   });
+  recorder.captureFrame(); // no-op when not recording, see video/recorder.ts
   hud.update(state, smoothedFps);
   metricsPanel.update(state, smoothedFps, nowMs);
   requestAnimationFrame(frameLoop);

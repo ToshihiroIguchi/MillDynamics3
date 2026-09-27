@@ -19,6 +19,8 @@ import { MetricsHistory, type CsvColumn } from "../metrics/history";
 import type { ImpactEnergyHistogram } from "../metrics/types";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
+import { ReportAggregator } from "../report/aggregator";
+import { buildReportPdf, downloadReportPdf } from "../report/pdf";
 import type { AppState } from "../state";
 import { drawSparkline } from "./sparkline";
 
@@ -182,7 +184,14 @@ function writeGroupOpenPrefs(prefs: Record<string, boolean>): void {
   }
 }
 
-export function createMetricsPanel(container: HTMLElement): MetricsPanel {
+/**
+ * `onAutoReportPause` is called synchronously (before the PDF is built) when the armed "Report end
+ * time" is reached during a running sim -- it is main.ts's job to actually pause the worker
+ * (`send({type: "pause"})`) and reflect that in the toolbar's play/pause icon, mirroring the
+ * toolbar's own pause path; this module only owns the aggregation/report-building/DOM side of the
+ * feature (see report/aggregator.ts, report/pdf.ts).
+ */
+export function createMetricsPanel(container: HTMLElement, onAutoReportPause: () => void): MetricsPanel {
   const groupOpenPrefs = readGroupOpenPrefs();
 
   const header = document.createElement("div");
@@ -197,6 +206,76 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
   header.appendChild(title);
   header.appendChild(exportButton);
   container.appendChild(header);
+
+  // --- Report (report/aggregator.ts + report/pdf.ts) ----------------------------------------
+  // A small subsection right below the header/CSV button: an optional "Report end time" that
+  // arms an auto-pause-and-download, plus a manual "Generate report now" that always works off
+  // whatever the aggregator has collected so far. See docs on `onAutoReportPause` above and
+  // `reportArmed`/`reportEndTimeS` below for the arm/disarm rules.
+  const reportSection = document.createElement("section");
+  reportSection.className = "metrics-report";
+  const reportHeading = document.createElement("h3");
+  reportHeading.textContent = "Report";
+  reportSection.appendChild(reportHeading);
+
+  const reportEndTimeRow = document.createElement("div");
+  reportEndTimeRow.className = "metrics-report-row";
+  const reportEndTimeLabel = document.createElement("label");
+  reportEndTimeLabel.textContent = "Report end time (s)";
+  reportEndTimeLabel.htmlFor = "metrics-report-end-time";
+  const reportEndTimeInput = document.createElement("input");
+  reportEndTimeInput.type = "number";
+  reportEndTimeInput.id = "metrics-report-end-time";
+  reportEndTimeInput.className = "metrics-report-input";
+  reportEndTimeInput.min = "0";
+  reportEndTimeInput.step = "1";
+  reportEndTimeInput.placeholder = "off";
+  reportEndTimeRow.appendChild(reportEndTimeLabel);
+  reportEndTimeRow.appendChild(reportEndTimeInput);
+  reportSection.appendChild(reportEndTimeRow);
+
+  const generateReportButton = document.createElement("button");
+  generateReportButton.type = "button";
+  generateReportButton.className = "metrics-export metrics-report-generate";
+  generateReportButton.textContent = "Generate report now";
+  reportSection.appendChild(generateReportButton);
+
+  const reportNote = document.createElement("div");
+  reportNote.className = "metrics-note";
+  reportNote.textContent =
+    "Generates a PDF summary of the mean/std/min/max of every metric over the run so far. " +
+    "Set an end time to auto-pause and download once sim time reaches it (leave empty/0 to disable).";
+  reportSection.appendChild(reportNote);
+
+  container.appendChild(reportSection);
+
+  const reportAggregator = new ReportAggregator();
+  let reportEndTimeS = 0;
+  let reportArmed = true;
+  let lastAggregatedMetrics: AppState["metrics"] = null;
+  let latestState: AppState | null = null;
+
+  function generateReport(state: AppState): void {
+    const doc = buildReportPdf({
+      params: state.params,
+      aggregator: reportAggregator,
+      impactEnergyHistogram: state.metrics?.impact_energy_histogram,
+      simTimeAtGeneration: state.simTime,
+    });
+    downloadReportPdf(doc, state.simTime);
+  }
+
+  reportEndTimeInput.addEventListener("input", () => {
+    const parsed = Number(reportEndTimeInput.value);
+    reportEndTimeS = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+    // Any change to the end time re-arms the auto-trigger, whether the user is raising it after
+    // an earlier auto-fire or just editing it before the run reaches it.
+    reportArmed = true;
+  });
+
+  generateReportButton.addEventListener("click", () => {
+    if (latestState) generateReport(latestState);
+  });
 
   const valueEls = new Map<string, HTMLSpanElement>();
   const sparklineEls = new Map<string, HTMLCanvasElement>();
@@ -391,6 +470,25 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     history.push(state.simTime, values);
     lastSimTime = state.simTime;
     exportButton.disabled = history.length === 0;
+    latestState = state;
+
+    // Feed the report aggregator once per *new* metrics object (worker.ts throttles how often
+    // `state.metrics` actually gets a fresh value, well below render rate -- see FrameMessage's
+    // doc comment on `metrics`/`fluidSurface`), not once per render frame, so a metrics snapshot
+    // that hasn't changed since last frame isn't double-counted into the running mean/variance.
+    if (state.metrics && state.metrics !== lastAggregatedMetrics) {
+      reportAggregator.add(state.simTime, values);
+      lastAggregatedMetrics = state.metrics;
+    }
+
+    // Auto-trigger: pause + generate + download once, the first time an armed non-zero end time
+    // is reached or crossed; disarms itself immediately so it can't refire every subsequent frame
+    // (only `reset()` or changing the end-time input re-arms it, see those for why).
+    if (reportArmed && reportEndTimeS > 0 && state.simTime >= reportEndTimeS) {
+      reportArmed = false;
+      onAutoReportPause();
+      generateReport(state);
+    }
 
     if (nowMs - lastRenderMs < 100) return;
     lastRenderMs = nowMs;
@@ -483,6 +581,12 @@ export function createMetricsPanel(container: HTMLElement): MetricsPanel {
     update,
     reset(): void {
       history.reset();
+      // Fresh aggregation window on every simulation reset (worker "init"/"ready" cycle, see
+      // main.ts) -- otherwise a reset would silently mix pre-/post-reset samples into one report,
+      // and a previously-fired auto-trigger would stay permanently disarmed.
+      reportAggregator.reset();
+      reportArmed = true;
+      lastAggregatedMetrics = null;
     },
   };
 }

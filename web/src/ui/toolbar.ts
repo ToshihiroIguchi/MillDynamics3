@@ -1,4 +1,4 @@
-// Toolbar (Play/Pause, Step, Reset, Parameters, Panel). Icon buttons with a native `title`
+// Toolbar (Play/Pause, Step, Reset, Parameters, Panel, Record). Icon buttons with a native `title`
 // tooltip on hover and an `aria-label` carrying the same accessible name the old text label had
 // (tests locate these buttons by that name, e.g. `getByRole("button", { name: "Panel" })`) --
 // see docs/PLAN.md ss4.4.
@@ -11,10 +11,15 @@ export interface ToolbarCallbacks {
   initialParamsVisible: boolean;
   onTogglePanel(): boolean; // returns the new "panel visible" state, reflected via aria-pressed
   initialPanelVisible: boolean;
+  onToggleRecord(): boolean; // returns the new "recording" state, so the icon can reflect it
+  /** Whether the browser supports video recording (video/recorder.ts's `CanvasRecorder.isSupported()`).
+   * When `false` the Record button is rendered disabled with a tooltip explaining why, instead of
+   * being hidden outright. */
+  recordingSupported: boolean;
 }
 
 /** 18x18 stroke-based icons, one per toolbar action. Kept inline (no icon font/library
- * dependency) since the toolbar only ever needs these five. */
+ * dependency) since the toolbar only ever needs this handful. */
 const ICONS = {
   play: '<svg viewBox="0 0 18 18" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M5 3.5v11l9-5.5z"/></svg>',
   pause:
@@ -26,6 +31,10 @@ const ICONS = {
     '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><line x1="3" y1="5" x2="15" y2="5"/><line x1="3" y1="9" x2="15" y2="9"/><line x1="3" y1="13" x2="15" y2="13"/><circle cx="7" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="9" r="1.6" fill="currentColor" stroke="none"/><circle cx="6" cy="13" r="1.6" fill="currentColor" stroke="none"/></svg>',
   panel:
     '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="3" width="13" height="12" rx="1.5"/><line x1="11.5" y1="3" x2="11.5" y2="15"/></svg>',
+  // Record/stop use a hardcoded red fill (not `currentColor`) -- a record button reads as "red"
+  // regardless of hover/pressed state, same visual language as a typical OS/app record control.
+  record: '<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><circle cx="9" cy="9" r="5.5" fill="#e5484d"/></svg>',
+  stop: '<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><rect x="4.5" y="4.5" width="9" height="9" rx="1.5" fill="#e5484d"/></svg>',
 };
 
 /** Creates a toolbar button showing only an icon, with `label` as both the tooltip (native
@@ -41,18 +50,31 @@ function createIconButton(icon: string, label: string): HTMLButtonElement {
   return btn;
 }
 
-export function createToolbar(callbacks: ToolbarCallbacks): HTMLElement {
+export interface Toolbar {
+  el: HTMLElement;
+  /** Reflects an externally-driven play/pause state change (e.g. main.ts's auto-report trigger
+   * pausing the sim programmatically, not via this button's own click) in the play/pause icon,
+   * without re-invoking `onTogglePlay` -- the caller already changed the running state itself. */
+  setRunning(running: boolean): void;
+}
+
+export function createToolbar(callbacks: ToolbarCallbacks): Toolbar {
   const el = document.createElement("div");
   el.className = "toolbar";
 
   const playPauseBtn = createIconButton(ICONS.pause, "Pause");
   playPauseBtn.title = "Pause the simulation (Space)";
-  playPauseBtn.addEventListener("click", () => {
-    const running = callbacks.onTogglePlay();
+
+  function setRunning(running: boolean): void {
     playPauseBtn.innerHTML = running ? ICONS.pause : ICONS.play;
     const label = running ? "Pause" : "Play";
     playPauseBtn.setAttribute("aria-label", label);
     playPauseBtn.title = running ? "Pause the simulation (Space)" : "Resume the simulation (Space)";
+  }
+
+  playPauseBtn.addEventListener("click", () => {
+    const running = callbacks.onTogglePlay();
+    setRunning(running);
   });
 
   const stepBtn = createIconButton(ICONS.step, "Step");
@@ -79,6 +101,23 @@ export function createToolbar(callbacks: ToolbarCallbacks): HTMLElement {
     panelBtn.setAttribute("aria-pressed", String(visible));
   });
 
-  el.append(playPauseBtn, stepBtn, resetBtn, paramsBtn, panelBtn);
-  return el;
+  const recordBtn = createIconButton(ICONS.record, "Record");
+  recordBtn.title = "Record the simulation as a video";
+  if (!callbacks.recordingSupported) {
+    recordBtn.disabled = true;
+    recordBtn.title = "Video recording is not supported in this browser";
+    recordBtn.setAttribute("aria-label", "Record (unsupported)");
+  } else {
+    recordBtn.addEventListener("click", () => {
+      const recording = callbacks.onToggleRecord();
+      recordBtn.innerHTML = recording ? ICONS.stop : ICONS.record;
+      const label = recording ? "Stop recording" : "Record";
+      recordBtn.setAttribute("aria-label", label);
+      recordBtn.title = recording ? "Stop recording and download the video" : "Record the simulation as a video";
+      recordBtn.classList.toggle("is-recording", recording);
+    });
+  }
+
+  el.append(playPauseBtn, stepBtn, resetBtn, paramsBtn, panelBtn, recordBtn);
+  return { el, setRunning };
 }
