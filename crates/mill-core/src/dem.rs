@@ -8,7 +8,6 @@
 //! Ball population is seeded from [`crate::params::Params::effective_media`] (post
 //! coarse-graining, if any) rather than the raw UI media diameter.
 
-use std::collections::HashMap;
 use std::f32::consts::PI;
 
 use glam::Vec2;
@@ -323,52 +322,68 @@ impl Balls {
 /// [`DemState::step`]); the accumulated normal impulse `lambda_n` from this sub-step's iterative
 /// solve is what friction/rolling-resistance/restitution are computed against afterwards.
 ///
-/// **`HashMap`, with sorted iteration where it matters.** Unlike [`crate::grid::UniformGrid`]
-/// (whose fix this module doc comment cross-references), this map's *accumulation* itself
-/// (`.entry(key).or_insert(0.0) += d_lambda` in step 3's inner solve loop, run
-/// `dem_iterations` times per contact pair every sub-step) is hot enough that `BTreeMap`'s
-/// `O(log n)` lookup measurably regressed `cargo bench`'s `dem_step`/`drum_only_step` (roughly
-/// 2x at the default ball counts) -- and that accumulation does not actually need sorted order:
-/// each key's running sum only ever receives `+=` calls in the fixed order `ball_ball_pairs`
-/// already iterates (itself deterministic since `UniformGrid`'s fix), regardless of which
-/// internal hash bucket holds it. The real non-determinism risk is in the friction/restitution/
-/// rolling-resistance passes (steps 5-7) that iterate *across different keys* and mutate shared
+/// **Plain arrays, not a hash map.** An earlier version keyed this by `(u32, u32)`/`u32` through a
+/// `HashMap` (and, before that, a `BTreeMap` -- see git history for why `BTreeMap`'s `O(log n)`
+/// lookup measurably regressed `cargo bench`'s `dem_step`/`drum_only_step`, roughly 2x at the
+/// default ball counts). Neither was actually necessary: `ball_ball_lambda_n` is parallel to the
+/// broad-phase's own `ball_ball_pairs` list (this struct is rebuilt fresh every sub-step, from
+/// that same fixed candidate list, so there is no dynamic key set to hash at all), and
+/// `ball_wall_lambda_n` is keyed by ball index -- already a dense integer range, i.e. exactly what
+/// a plain `Vec` indexes natively. This removes hashing entirely from step 3's inner solve loop
+/// (`.entry(key).or_insert(0.0) += d_lambda`, run `dem_iterations` times per contact pair every
+/// sub-step).
+///
+/// The friction/restitution/rolling-resistance passes (steps 5-7) still need a canonical,
+/// deterministic *processing* order -- they iterate *across different contacts* and mutate shared
 /// per-ball state as they go (a Gauss-Seidel-style sequential correction, where processing order
-/// changes the physical result, not just summation rounding) -- those passes use
-/// [`ContactBook::sorted_ball_ball`]/[`ContactBook::sorted_ball_wall`] instead of iterating the
-/// maps directly, giving deterministic order there at negligible cost (one sort of a
-/// per-sub-step-sized collection, not a per-lookup cost).
-#[derive(Default)]
+/// changes the physical result, not just summation rounding) -- so [`ContactBook::sorted_ball_ball`]
+/// still produces an `(i, j)`-sorted list (`ball_ball_pairs`'s own order is grid-locality order,
+/// not index order) and [`ContactBook::sorted_ball_wall`] an ascending-`i` one; both now include
+/// every candidate contact rather than only ones that received a nonzero accumulation, but every
+/// consumer of these lists already skips a contact with `lambda_n <= 0.0` (the value a slot that
+/// was never touched -- no iteration ever found it overlapping -- naturally keeps), so this is not
+/// an observable behaviour change, only a representation change.
 struct ContactBook {
-    /// Ball-ball contacts: key (i, j) with i < j.
-    ball_ball_lambda_n: HashMap<(u32, u32), f32>,
-    /// Ball-wall contacts: key is the ball index.
-    ball_wall_lambda_n: HashMap<u32, f32>,
+    /// Accumulated normal impulse for the ball-ball pair at the same position in the broad-phase's
+    /// `ball_ball_pairs` (same length, same order).
+    ball_ball_lambda_n: Vec<f32>,
+    /// Accumulated normal impulse against the wall, indexed directly by ball index (length `n`).
+    ball_wall_lambda_n: Vec<f32>,
 }
 
 impl ContactBook {
-    /// `ball_ball_lambda_n`'s entries as a `(i, j, lambda_n)` list sorted by `(i, j)`, for
-    /// deterministic iteration order (see this struct's doc comment).
-    fn sorted_ball_ball(&self) -> Vec<(u32, u32, f32)> {
-        let mut entries: Vec<(u32, u32, f32)> = self
-            .ball_ball_lambda_n
+    /// `ball_ball_pair_count` is `ball_ball_pairs.len()` and `ball_count` is `balls.len()` --
+    /// both already known at this sub-step's broad-phase, so this book's arrays are sized exactly
+    /// once, with no reallocation as contacts accumulate.
+    fn new(ball_ball_pair_count: usize, ball_count: usize) -> Self {
+        Self {
+            ball_ball_lambda_n: vec![0.0; ball_ball_pair_count],
+            ball_wall_lambda_n: vec![0.0; ball_count],
+        }
+    }
+
+    /// `ball_ball_lambda_n` zipped back against `ball_ball_pairs` (the same list it is parallel
+    /// to) as an `(i, j, lambda_n)` list sorted by `(i, j)`, for deterministic iteration order
+    /// (see this struct's doc comment).
+    fn sorted_ball_ball(&self, ball_ball_pairs: &[(u32, u32)]) -> Vec<(u32, u32, f32)> {
+        let mut entries: Vec<(u32, u32, f32)> = ball_ball_pairs
             .iter()
+            .zip(&self.ball_ball_lambda_n)
             .map(|(&(i, j), &lambda_n)| (i, j, lambda_n))
             .collect();
         entries.sort_unstable_by_key(|&(i, j, _)| (i, j));
         entries
     }
 
-    /// `ball_wall_lambda_n`'s entries as an `(i, lambda_n)` list sorted by `i`, for deterministic
-    /// iteration order (see this struct's doc comment).
+    /// `ball_wall_lambda_n`'s entries as an `(i, lambda_n)` list -- already in ascending-`i` order,
+    /// since it is stored densely by ball index (unlike the former `HashMap` version, this needs
+    /// no sort).
     fn sorted_ball_wall(&self) -> Vec<(u32, f32)> {
-        let mut entries: Vec<(u32, f32)> = self
-            .ball_wall_lambda_n
+        self.ball_wall_lambda_n
             .iter()
-            .map(|(&i, &lambda_n)| (i, lambda_n))
-            .collect();
-        entries.sort_unstable_by_key(|&(i, _)| i);
-        entries
+            .enumerate()
+            .map(|(i, &lambda_n)| (i as u32, lambda_n))
+            .collect()
     }
 }
 
@@ -566,11 +581,11 @@ impl DemState {
             }
         }
 
-        let mut book = ContactBook::default();
+        let mut book = ContactBook::new(ball_ball_pairs.len(), n);
 
         // --- 3. Solve non-penetration (iterative, zero compliance = rigid) --------------------
         for _ in 0..iterations.max(1) {
-            for &(i, j) in &ball_ball_pairs {
+            for (k, &(i, j)) in ball_ball_pairs.iter().enumerate() {
                 let (i, j) = (i as usize, j as usize);
                 let delta = balls.x[i] - balls.x[j];
                 let dist = delta.length();
@@ -592,10 +607,7 @@ impl DemState {
                 let d_lambda = -c_eff / w_sum;
                 balls.x[i] += w * d_lambda * n_hat;
                 balls.x[j] -= w * d_lambda * n_hat;
-                *book
-                    .ball_ball_lambda_n
-                    .entry((i as u32, j as u32))
-                    .or_insert(0.0) += d_lambda;
+                book.ball_ball_lambda_n[k] += d_lambda;
             }
             for i in 0..n {
                 let (d, n_hat) = drum.sdf_world(balls.x[i], drum_angle_next);
@@ -609,7 +621,7 @@ impl DemState {
                 let c_eff = c.max(-MAX_RECOVERY_FRACTION * 2.0 * r);
                 let d_lambda = -c_eff / w;
                 balls.x[i] += w * d_lambda * n_hat;
-                *book.ball_wall_lambda_n.entry(i as u32).or_insert(0.0) += d_lambda;
+                book.ball_wall_lambda_n[i] += d_lambda;
             }
         }
 
@@ -620,9 +632,10 @@ impl DemState {
         }
 
         // Sorted once, reused by every pass below that iterates *across* contacts (steps 5-7) --
-        // see `ContactBook`'s doc comment for why this, rather than iterating the maps directly,
-        // is what keeps this solver deterministic without slowing down step 3's hot accumulation.
-        let ball_ball_contacts = book.sorted_ball_ball();
+        // see `ContactBook`'s doc comment for why this, rather than iterating `ball_ball_pairs`'s
+        // own grid-locality order directly, is what keeps this solver deterministic in the sense
+        // steps 5-7 need.
+        let ball_ball_contacts = book.sorted_ball_ball(&ball_ball_pairs);
         let ball_wall_contacts = book.sorted_ball_wall();
 
         // --- 5. Friction (Coulomb-clamped position correction, one pass but velocity kept in
