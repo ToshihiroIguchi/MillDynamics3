@@ -29,7 +29,16 @@ function baseParams(): ParamsJson {
       surface_tension_n_m: 0.072,
       dye_pattern: "left_right",
     },
-    simulation: { substeps: 8, dem_iterations: 2, max_balls: 600, resolution: 40, time_scale: 1.0, seed: 1 },
+    simulation: {
+      substeps: 8,
+      dem_iterations: 2,
+      max_balls: 600,
+      resolution: 40,
+      time_scale: 1.0,
+      seed: 1,
+      coarse_graining_mode: "auto",
+      coarse_graining_k: 1.0,
+    },
   };
 }
 

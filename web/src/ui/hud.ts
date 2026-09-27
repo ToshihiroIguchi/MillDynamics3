@@ -2,7 +2,7 @@
 // pool extent, mixing index, grinding/solver diagnostics, ...) lives in the metrics panel
 // (ui/metricsPanel.ts, docs/PLAN.md ss4.4) now that it exists.
 
-import { effectiveMedia, criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
+import { type CoarseGrainingMode, effectiveMedia, criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
 import type { AppState } from "../state";
 
@@ -28,7 +28,9 @@ function mediaSubstitutionOf(
   const media = params?.media as
     | { ball_diameter_m?: number; fill_fraction?: number; packing_fraction_2d?: number; density_kg_m3?: number }
     | undefined;
-  const simulation = params?.simulation as { max_balls?: number } | undefined;
+  const simulation = params?.simulation as
+    | { max_balls?: number; coarse_graining_mode?: string; coarse_graining_k?: number }
+    | undefined;
   if (
     mill?.diameter_m === undefined ||
     media?.ball_diameter_m === undefined ||
@@ -48,6 +50,8 @@ function mediaSubstitutionOf(
       density_kg_m3: media.density_kg_m3,
     },
     simulation.max_balls,
+    (simulation.coarse_graining_mode as CoarseGrainingMode | undefined) ?? "auto",
+    simulation.coarse_graining_k ?? 1,
   );
   return { trueDiameterM: eff.trueDiameterM, diameterM: eff.diameterM, ballCount: eff.ballCount, scaleFactor: eff.scaleFactor };
 }

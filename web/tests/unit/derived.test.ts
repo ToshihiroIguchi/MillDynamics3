@@ -58,6 +58,30 @@ describe("effectiveMedia", () => {
       expect(eff.diameterM).toBe(eff.trueDiameterM);
     }
   });
+
+  it("Off mode ignores maxBalls and always simulates the true count", () => {
+    // Same fixture as "coarse-grains when the true count exceeds maxBalls" above, but with
+    // coarse-graining explicitly disabled: N_sim must equal N_true even though it exceeds maxBalls.
+    const eff = effectiveMedia(diameterM, media, 2000, "off");
+    expect(eff.scaleFactor).toBe(1);
+    expect(eff.diameterM).toBe(eff.trueDiameterM);
+    expect(eff.ballCount).toBeCloseTo(2460, 0);
+    expect(eff.ballCount).toBeGreaterThan(2000);
+  });
+
+  it("Manual mode forces the given k regardless of maxBalls", () => {
+    // maxBalls (5000) is comfortably above N_true (~2460), so Auto would not coarse-grain at all;
+    // Manual must still force k=2.
+    const eff = effectiveMedia(diameterM, media, 5000, "manual", 2);
+    expect(eff.scaleFactor).toBe(2);
+    expect(eff.diameterM).toBeCloseTo(0.01 * 2, 6);
+  });
+
+  it("Manual mode with k <= 1 behaves like no coarse-graining", () => {
+    const eff = effectiveMedia(diameterM, media, 5000, "manual", 1);
+    expect(eff.scaleFactor).toBe(1);
+    expect(eff.diameterM).toBe(eff.trueDiameterM);
+  });
 });
 
 describe("interstitialFilling", () => {

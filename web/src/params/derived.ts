@@ -41,17 +41,33 @@ export function trueBallCount(diameterM: number, media: MediaLike): number {
   return (media.fill_fraction * media.packing_fraction_2d * drumArea) / (Math.PI * rTrue * rTrue);
 }
 
-/** Mirrors `Params::effective_media` (params.rs:416-441). `diameterM` is the mill's drum diameter. */
+/** Mirrors `CoarseGrainingMode` (params.rs). */
+export type CoarseGrainingMode = "auto" | "off" | "manual";
+
+/** Mirrors `Params::effective_media` (params.rs), including `CoarseGrainingMode`. `diameterM` is the mill's drum diameter. */
 export function effectiveMedia(
   diameterM: number,
   media: MediaLike,
   maxBalls: number,
+  mode: CoarseGrainingMode = "auto",
+  manualK: number = 1,
 ): { trueDiameterM: number; diameterM: number; densityKgM3: number; ballCount: number; scaleFactor: number } {
   const trueDiameterM = media.ball_diameter_m;
   const densityKgM3 = media.density_kg_m3;
   const nTrue = trueBallCount(diameterM, media);
-  if (nTrue > maxBalls && maxBalls > 0) {
-    const scaleFactor = Math.sqrt(nTrue / maxBalls);
+
+  let scaleFactor: number;
+  if (mode === "off") {
+    scaleFactor = 1;
+  } else if (mode === "manual") {
+    scaleFactor = Math.max(1, manualK);
+  } else if (nTrue > maxBalls && maxBalls > 0) {
+    scaleFactor = Math.sqrt(nTrue / maxBalls);
+  } else {
+    scaleFactor = 1;
+  }
+
+  if (scaleFactor > 1) {
     const ballCount = Math.max(1, Math.round(nTrue / (scaleFactor * scaleFactor)));
     return { trueDiameterM, diameterM: trueDiameterM * scaleFactor, densityKgM3, ballCount, scaleFactor };
   }
@@ -64,9 +80,11 @@ export function effectiveFluidResolution(
   media: MediaLike,
   maxBalls: number,
   resolution: number,
+  mode: CoarseGrainingMode = "auto",
+  manualK: number = 1,
 ): number {
   const radiusM = diameterM * 0.5;
-  const eff = effectiveMedia(diameterM, media, maxBalls);
+  const eff = effectiveMedia(diameterM, media, maxBalls, mode, manualK);
   if (!(radiusM > 0) || !(eff.diameterM > 0)) return resolution;
   const minResolution = Math.ceil(radiusM / eff.diameterM);
   return Math.min(200, Math.max(resolution, minResolution));
@@ -85,11 +103,18 @@ export function effectiveFluidResolution(
  * requested `substeps` unchanged, and raises 8 -> 12 at `max_balls = 1500` with the Realtime
  * preset's `resolution = 15` (docs/PHYSICS.md §9's 2026-09-27 follow-up).
  */
-export function effectiveSubsteps(mill: MillLike, media: MediaLike, maxBalls: number, substeps: number): number {
+export function effectiveSubsteps(
+  mill: MillLike,
+  media: MediaLike,
+  maxBalls: number,
+  substeps: number,
+  mode: CoarseGrainingMode = "auto",
+  manualK: number = 1,
+): number {
   const GRAVITY_MAG = 9.81;
   const TARGET_RATIO = 0.5;
   const diameterM = mill.diameter_m;
-  const eff = effectiveMedia(diameterM, media, maxBalls);
+  const eff = effectiveMedia(diameterM, media, maxBalls, mode, manualK);
   const dEff = eff.diameterM;
   if (!(dEff > 0) || !(diameterM > 0)) return substeps;
   const vRef = Math.sqrt(2 * GRAVITY_MAG * diameterM);

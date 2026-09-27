@@ -7,6 +7,7 @@
 
 import type { ParamsJson } from "../protocol";
 import {
+  type CoarseGrainingMode,
   criticalSpeedRpm,
   effectiveFluidResolution,
   effectiveMedia,
@@ -160,6 +161,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   let presetNote: HTMLParagraphElement | null = null;
   let materialSelect: HTMLSelectElement | null = null;
   let materialNote: HTMLParagraphElement | null = null;
+  let coarseGrainingWarn: HTMLParagraphElement | null = null;
 
   /**
    * Resets the Quality preset dropdown to "(custom)" once `simulation.max_balls`/`resolution` no
@@ -388,6 +390,13 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       details.appendChild(mediaWarn);
     }
 
+    if (group === "Simulation") {
+      coarseGrainingWarn = document.createElement("p");
+      coarseGrainingWarn.className = "params-warn";
+      coarseGrainingWarn.hidden = true;
+      details.appendChild(coarseGrainingWarn);
+    }
+
     if (group === "Slurry") {
       // Static, always-visible background information (not a threshold-triggered alert like
       // `mediaWarn` above, so `params-note` rather than `params-warn`, and no later toggling
@@ -438,6 +447,8 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const substepsInput = inputs.get("simulation.substeps");
     const resolutionInput = inputs.get("simulation.resolution");
     const slurryFillInput = inputs.get("slurry.fill_fraction");
+    const coarseModeInput = inputs.get("simulation.coarse_graining_mode");
+    const coarseKInput = inputs.get("simulation.coarse_graining_k");
     if (
       !diameterInput ||
       !modeInput ||
@@ -449,7 +460,9 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       !maxBallsInput ||
       !substepsInput ||
       !resolutionInput ||
-      !slurryFillInput
+      !slurryFillInput ||
+      !coarseModeInput ||
+      !coarseKInput
     ) {
       derived.replaceChildren();
       return;
@@ -476,10 +489,25 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const substeps = Number(substepsInput.value);
     const resolution = Number(resolutionInput.value);
     const slurryFill = Number(slurryFillInput.value);
+    const coarseGrainingMode = (coarseModeInput.value || "auto") as CoarseGrainingMode;
+    const coarseGrainingK = Number(coarseKInput.value);
+
+    // "Manual k" is only meaningful (and only editable) when the mode select is set to Manual --
+    // hide the row the rest of the time so a stale/unused value can't be mistaken for the one
+    // actually in effect (Off ignores it; Auto derives k from Max balls instead).
+    const coarseGrainingKRow = rowsByPath.get("simulation.coarse_graining_k");
+    if (coarseGrainingKRow) coarseGrainingKRow.hidden = coarseGrainingMode !== "manual";
 
     const nTrue = trueBallCount(diameterM, media);
-    const eff = effectiveMedia(diameterM, media, maxBalls);
-    const effectiveResolution = effectiveFluidResolution(diameterM, media, maxBalls, resolution);
+    const eff = effectiveMedia(diameterM, media, maxBalls, coarseGrainingMode, coarseGrainingK);
+    const effectiveResolution = effectiveFluidResolution(
+      diameterM,
+      media,
+      maxBalls,
+      resolution,
+      coarseGrainingMode,
+      coarseGrainingK,
+    );
     const fluidCount = fluidParticleCountEstimate(diameterM / 2, effectiveResolution, slurryFill);
     const substepDisp = substepDisplacementOverDiameter(mill, substeps, eff.diameterM);
     // Mirrors pbf.rs's `dx = drum_radius_m / resolution`, same dx used internally by
@@ -499,15 +527,19 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     // the solver, not the raw `substeps` input -- see the "Effective sub-steps" row below for when
     // the two differ (coarse-graining shrinking `d_eff` enough to threaten the XPBD `< 1`
     // displacement-ratio criterion, docs/PHYSICS.md §9).
-    const effectiveSubstepCount = effectiveSubsteps(mill, media, maxBalls, substeps);
+    const effectiveSubstepCount = effectiveSubsteps(mill, media, maxBalls, substeps, coarseGrainingMode, coarseGrainingK);
     const u = interstitialFilling(slurryFill, media);
+    const coarseGrainingActive = eff.scaleFactor > 1;
 
     const rows: [string, string, boolean?][] = [
       ["Critical speed (Nc)", `${criticalSpeedRpm(diameterM).toFixed(1)} rpm`],
       ["Current speed", `${rpmOf(mill).toFixed(1)} rpm (${percentCriticalOf(mill).toFixed(0)}% Nc)`],
       ["True ball count (N_true)", nTrue.toFixed(0)],
       ["Simulated balls (N_sim)", String(eff.ballCount)],
-      ["Coarse-graining (k)", eff.scaleFactor.toFixed(3)],
+      [
+        "Coarse-graining",
+        coarseGrainingActive ? `ON (k = ${eff.scaleFactor.toFixed(3)})` : "OFF (k = 1, true size)",
+      ],
       ["Effective ball diameter", `${(eff.diameterM * 1000).toFixed(2)} mm`],
       ["Interstitial filling (U)", u.toFixed(3)],
       ["Fluid spacing vs ball diameter", fluidSpacingVsBall.toFixed(2), fluidSpacingVsBall > 1.0],
@@ -529,21 +561,65 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
     const ballDiameterRow = rowsByPath.get("media.ball_diameter_m");
     if (mediaWarn) {
-      const coarseGrained = eff.scaleFactor > 1;
-      if (coarseGrained) {
+      if (coarseGrainingActive && coarseGrainingMode === "auto") {
         mediaWarn.hidden = false;
         mediaWarn.textContent =
           `Coarse-graining is active (k = ${eff.scaleFactor.toFixed(3)}). Ball diameter has no ` +
           `effect on the simulation at this Max balls -- the solver runs ${eff.ballCount} balls of ` +
           `${(eff.diameterM * 1000).toFixed(2)} mm regardless. Raise Max balls above ${nTrue.toFixed(0)} ` +
           `to simulate the true diameter.`;
+      } else if (coarseGrainingActive) {
+        mediaWarn.hidden = false;
+        mediaWarn.textContent =
+          `Coarse-graining is active (k = ${eff.scaleFactor.toFixed(3)}, mode: ${coarseGrainingMode}). ` +
+          `Ball diameter has no effect on the simulation -- the solver runs ${eff.ballCount} balls of ` +
+          `${(eff.diameterM * 1000).toFixed(2)} mm regardless. Change "Coarse-graining" in the ` +
+          `Simulation group to simulate the true diameter.`;
       } else {
         mediaWarn.hidden = true;
       }
       // Dim (not disable) the ball-diameter input itself so the warning is hard to miss even
       // without reading the banner text -- the value stays editable for when the user later
-      // raises Max balls.
-      ballDiameterRow?.classList.toggle("is-ineffective", coarseGrained);
+      // changes Max balls / the coarse-graining mode.
+      ballDiameterRow?.classList.toggle("is-ineffective", coarseGrainingActive);
+    }
+
+    // Coarse-graining Off/Manual can push N_sim or the effective ball diameter into a regime Auto
+    // would never produce (Auto always targets/stays under Max balls and never grows the effective
+    // diameter past the true one relative to the drum) -- surface that explicitly rather than
+    // letting a user silently run an unreasonably heavy or unphysical configuration.
+    if (coarseGrainingWarn) {
+      const messages: string[] = [];
+      const nSimVsTarget = maxBalls > 0 ? eff.ballCount / maxBalls : 0;
+      if (coarseGrainingMode === "off" && nSimVsTarget > 2) {
+        messages.push(
+          `Coarse-graining is Off: the solver will simulate the true ball count (${eff.ballCount}), ` +
+            `${nSimVsTarget.toFixed(1)}x above your Max balls target (${maxBalls}). Expect a large ` +
+            `slowdown and higher memory use; switch to Auto or Manual to bound N_sim.`,
+        );
+      }
+      if (coarseGrainingMode === "manual") {
+        if (nSimVsTarget > 2) {
+          messages.push(
+            `Manual k = ${coarseGrainingK.toFixed(3)} leaves N_sim = ${eff.ballCount}, ` +
+              `${nSimVsTarget.toFixed(1)}x above your Max balls target (${maxBalls}). Raise k to shrink N_sim.`,
+          );
+        }
+        if (eff.diameterM >= diameterM) {
+          messages.push(
+            `Manual k = ${coarseGrainingK.toFixed(3)} makes the effective ball diameter ` +
+              `(${(eff.diameterM * 1000).toFixed(1)} mm) as large as or larger than the drum itself ` +
+              `(${(diameterM * 1000).toFixed(1)} mm) -- unphysical. Lower k.`,
+          );
+        } else if (eff.ballCount < 3) {
+          messages.push(
+            `Manual k = ${coarseGrainingK.toFixed(3)} leaves only ${eff.ballCount} simulated ball(s), too ` +
+              `coarse to represent a charge. Lower k.`,
+          );
+        }
+      }
+      coarseGrainingWarn.hidden = messages.length === 0;
+      coarseGrainingWarn.textContent = messages.join(" ");
     }
   }
 

@@ -25,6 +25,27 @@ pub enum Direction {
     Clockwise,
 }
 
+/// How [`Params::effective_media`] chooses the coarse-graining scale factor `k`.
+///
+/// Coarse-graining used to be implicit: it silently kicked in whenever `N_true >
+/// simulation.max_balls`, with no way to see or override that from the UI short of reading the
+/// "Coarse-graining (k)" derived row. This makes it an explicit, user-controlled choice instead.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoarseGrainingMode {
+    /// Auto-derive `k` from `simulation.max_balls` (the historical, and still default, behavior):
+    /// `k = sqrt(N_true / max_balls)` when `N_true > max_balls`, else `k = 1` (no coarsening).
+    Auto,
+    /// Force `k = 1`: never coarse-grain, regardless of `max_balls`. `N_sim` then equals `N_true`
+    /// and can exceed `max_balls` by a large margin for a small `media.ball_diameter_m` -- the UI
+    /// must warn when that makes `N_sim` unreasonably large (see `paramsPanel.ts`).
+    Off,
+    /// Force `k` to `simulation.coarse_graining_k` directly, ignoring `max_balls` entirely. The UI
+    /// must warn when the resulting `N_sim` or effective ball diameter is unreasonable (too few,
+    /// too large/small a ball relative to the drum).
+    Manual,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MillParams {
     /// Drum inner diameter (m).
@@ -382,6 +403,13 @@ pub struct SimulationParams {
     /// the M6 performance targets even at small media diameters.
     pub max_balls: u32,
     pub seed: u64,
+    /// How [`Params::effective_media`] picks the coarse-graining scale factor `k`. See
+    /// [`CoarseGrainingMode`].
+    pub coarse_graining_mode: CoarseGrainingMode,
+    /// Manual coarse-graining scale factor `k`, used only when `coarse_graining_mode ==
+    /// CoarseGrainingMode::Manual`. Must be `>= 1.0` (coarse-graining only ever enlarges balls,
+    /// never shrinks them below the true diameter).
+    pub coarse_graining_k: f32,
 }
 
 impl Default for SimulationParams {
@@ -395,6 +423,8 @@ impl Default for SimulationParams {
             frame_budget_ms: 12.0,
             max_balls: 600,
             seed: 1,
+            coarse_graining_mode: CoarseGrainingMode::Auto,
+            coarse_graining_k: 1.0,
         }
     }
 }
@@ -421,6 +451,9 @@ impl SimulationParams {
         }
         if !(10..=50_000).contains(&self.max_balls) {
             return Err("simulation.max_balls must be in [10, 50000]".into());
+        }
+        if !(self.coarse_graining_k >= 1.0 && self.coarse_graining_k <= 1000.0) {
+            return Err("simulation.coarse_graining_k must be in [1, 1000]".into());
         }
         Ok(())
     }
@@ -462,27 +495,40 @@ impl Params {
     }
 
     /// Derives the media population actually simulated, applying coarse-graining (particle
-    /// scaling) when the true media population would exceed `simulation.max_balls`.
+    /// scaling) per `simulation.coarse_graining_mode` (see [`CoarseGrainingMode`]).
     ///
-    /// The true disc count is [`Params::true_ball_count`]. If `N_true > max_balls`, we substitute
-    /// `N_sim` larger discs with scale factor `k = sqrt(N_true / max_balls)`:
-    /// `diameter_m = true_diameter_m * k`, so `N_sim = N_true / k^2 ~= max_balls`. Because balls
-    /// are unit-depth discs ([`crate::dem::ball_mass`], mass `~ r^2`), preserving the total solid
-    /// area automatically preserves the total charge mass, so the density is left unchanged
-    /// (`density_kg_m3 == true density`).
+    /// The true disc count is [`Params::true_ball_count`]. In the default `Auto` mode, if
+    /// `N_true > max_balls` we substitute `N_sim` larger discs with scale factor
+    /// `k = sqrt(N_true / max_balls)`: `diameter_m = true_diameter_m * k`, so
+    /// `N_sim = N_true / k^2 ~= max_balls`. `Off` forces `k = 1` regardless of `max_balls`; `Manual`
+    /// forces `k = simulation.coarse_graining_k` regardless of `max_balls`. Because balls are
+    /// unit-depth discs ([`crate::dem::ball_mass`], mass `~ r^2`), preserving the total solid area
+    /// automatically preserves the total charge mass, so the density is left unchanged
+    /// (`density_kg_m3 == true density`) in every mode.
     ///
     /// This is a standard coarse-grained DEM approximation (see docs/PLAN.md ss3.2): it preserves
     /// bulk charge mass and footprint area but not the true interstitial void structure or
-    /// single-collision statistics at the true particle size. When `N_true <= max_balls`,
+    /// single-collision statistics at the true particle size. Whenever the resolved `k <= 1.0`,
     /// `scale_factor` is `1.0` and the true media parameters are returned unchanged.
     pub fn effective_media(&self) -> EffectiveMedia {
         let true_diameter_m = self.media.ball_diameter_m;
         let density_kg_m3 = self.media.density_kg_m3;
         let n_true = self.true_ball_count();
-
         let max_balls = self.simulation.max_balls as f32;
-        if n_true > max_balls && max_balls > 0.0 {
-            let scale_factor = (n_true / max_balls).sqrt();
+
+        let scale_factor = match self.simulation.coarse_graining_mode {
+            CoarseGrainingMode::Off => 1.0,
+            CoarseGrainingMode::Manual => self.simulation.coarse_graining_k.max(1.0),
+            CoarseGrainingMode::Auto => {
+                if n_true > max_balls && max_balls > 0.0 {
+                    (n_true / max_balls).sqrt()
+                } else {
+                    1.0
+                }
+            }
+        };
+
+        if scale_factor > 1.0 {
             let ball_count = (n_true / (scale_factor * scale_factor)).round().max(1.0) as u32;
             EffectiveMedia {
                 true_diameter_m,
@@ -734,6 +780,69 @@ mod tests {
         assert!(eff.ball_count <= params.simulation.max_balls);
         // Should land close to the target, not just "under" it.
         assert!(eff.ball_count as f32 > 0.5 * params.simulation.max_balls as f32);
+    }
+
+    #[test]
+    fn coarse_graining_off_ignores_max_balls() {
+        // Same repro as `effective_media_coarse_grains_when_true_count_is_large` (10 mm balls,
+        // N_true well above max_balls=600), but with coarse-graining explicitly disabled: `k` must
+        // stay 1 and `N_sim` must equal the true (uncapped) count, even though that exceeds
+        // `max_balls`.
+        let params = Params {
+            media: MediaParams {
+                ball_diameter_m: 0.010,
+                ..MediaParams::default()
+            },
+            simulation: SimulationParams {
+                coarse_graining_mode: CoarseGrainingMode::Off,
+                ..SimulationParams::default()
+            },
+            ..Params::default()
+        };
+        let n_true = params.true_ball_count();
+        assert!(n_true > params.simulation.max_balls as f32);
+
+        let eff = params.effective_media();
+        assert_eq!(eff.scale_factor, 1.0);
+        assert!((eff.diameter_m - eff.true_diameter_m).abs() < 1e-6);
+        assert!(eff.ball_count as f32 > params.simulation.max_balls as f32);
+        assert_eq!(eff.ball_count, n_true.round().max(0.0) as u32);
+    }
+
+    #[test]
+    fn coarse_graining_manual_uses_given_k_regardless_of_max_balls() {
+        // Even with max_balls comfortably above N_true (so Auto would not coarse-grain at all),
+        // Manual mode must still force the user-given k.
+        let params = Params {
+            media: MediaParams {
+                ball_diameter_m: 0.3,
+                fill_fraction: 0.30,
+                ..MediaParams::default()
+            },
+            simulation: SimulationParams {
+                max_balls: 2000,
+                coarse_graining_mode: CoarseGrainingMode::Manual,
+                coarse_graining_k: 2.0,
+                ..SimulationParams::default()
+            },
+            ..Params::default()
+        };
+        params.validate().unwrap();
+        let eff = params.effective_media();
+        assert!((eff.scale_factor - 2.0).abs() < 1e-6);
+        assert!((eff.diameter_m - eff.true_diameter_m * 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn coarse_graining_k_below_one_rejected() {
+        let params = Params {
+            simulation: SimulationParams {
+                coarse_graining_k: 0.5,
+                ..SimulationParams::default()
+            },
+            ..Params::default()
+        };
+        assert!(params.validate().is_err());
     }
 
     #[test]
