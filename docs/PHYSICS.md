@@ -1279,3 +1279,47 @@ state after calling `compute`:
   clamp duplicate call tried alongside them, ss5.2) rather than kept as unused insurance --
   restoring the pre-investigation NaN-sanitization-only behaviour (ss4.2 step 0) for ball
   velocity/spin.
+- **Periodic media-charge oscillation ("surging"/"slumping") -- already reproducible, not a gap
+  (2026-09-27 investigation).** A user report of real wet mills' charge visibly oscillating as a
+  block at low speed (tens of `%Nc`), which this simulator was not observed to reproduce, was
+  hypothesised to stem from `media.friction_ball_ball`/`friction_ball_wall` having no separate
+  static-vs-kinetic coefficients (ss4.2 step 5's Coulomb clamp uses one `mu` for both the stick and
+  slide regimes -- a non-anchored model with no cross-substep stiction memory, docs/PLAN.md step
+  5). That hypothesis did not hold up: a new diagnostic binary,
+  `crates/mill-core/examples/oscillation_probe.rs` (60 Hz sampling of charge centroid angle,
+  toe/shoulder, and wall-slip ratio after a settle period; periodicity is assessed on the
+  *linearly-detrended first difference* of the centroid angle, requiring a genuine
+  trough-then-rebound autocorrelation shape -- not just a raw threshold crossing, which produces
+  false positives from the charge's own smooth settle-in drift), found a clear, repeatable periodic
+  oscillation **already present with `friction_ball_ball == friction_ball_wall`'s existing
+  single-coefficient model, no code change**, at `mill.speed_value` in 20-30 `%Nc`, no lifters:
+  - Dry, `max_balls = 150`: period 1.43 s. Dry, `max_balls = 600` (`Params::default`'s own count):
+    period 1.35 s. Wet (`slurry.viscosity_pa_s = 50`, the project default) at `max_balls = 150`:
+    period 1.32-1.42 s across 2 of 3 seeds (the third borderline). Measured period is essentially
+    independent of `%Nc` (10/20/30 tested) and of wet vs. dry, and tracks a physical-pendulum
+    estimate `2*pi*sqrt(R/g)` (R = the charge centroid's mean distance from the drum axis, ~0.30 m
+    here) of ~1.10-1.11 s reasonably well (observed periods run ~20-30% longer, consistent with a
+    damped, not undamped, pendulum). This points to the mechanism being a gravity-driven bulk
+    "sloshing" mode of the charge's centroid about the drum's low point -- an emergent granular
+    effect of the existing multi-contact XPBD solve, not something requiring a static/kinetic
+    friction split to exist at all.
+  - **Why it doesn't show up at this project's actual UI defaults** (`max_balls = 600`,
+    `slurry.viscosity_pa_s = 50`): that specific combination sits in an over-damped regime. At
+    `max_balls = 600` wet, the same probe found no clear periodic signal at the default 50 Pa*s
+    (even extending the measurement window to 25 s), but lowering `slurry.viscosity_pa_s` alone (to
+    5, 1, or 0.5 Pa*s, everything else at `Params::default()`) restored a clear, strong periodic
+    signal at every one of those three values (periods 1.45-1.75 s). A secondary, smaller effect
+    compounds this at low `max_balls`: `pbf.rs`'s ball<->fluid drag law is calibrated against the
+    *true* (uncoarsened) ball radius (see the "true-radius drag fix" this crate's git history
+    documents), so a coarse-grained population's larger, heavier simulated balls receive
+    proportionally less drag relative to their own inertia than the true population would -- which
+    is why `max_balls = 150`/`300` still oscillated at the full 50 Pa*s default while `max_balls =
+    600` did not. Both are consequences of already-deliberate, documented modelling choices (a
+    thick default slurry viscosity; drag calibrated to the true, not coarse-grained, ball size),
+    not defects, so neither `dem.rs`/`pbf.rs`/`params.rs` nor any default value was changed as a
+    result of this investigation.
+  - **How to observe it in the running app**, no code change needed: set `slurry.viscosity_pa_s` to
+    5 Pa*s or lower (or toggle `slurry.enabled` off), leave `mill.speed_value` around 20-30 `%Nc`
+    with no lifters, and watch the existing "Toe angle" / "Shoulder angle" metrics-panel sparklines
+    (`web/src/metrics/specs.ts`, already `sparkline: true`) -- both already surface the same
+    vertical-degree convention `oscillation_probe.rs` samples.
