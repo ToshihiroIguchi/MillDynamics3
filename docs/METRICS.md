@@ -177,8 +177,13 @@ consistent with this pattern, not a regression.
 A real, separate gap noted in `docs/PHYSICS.md` §9: the broad-phase margin that keeps a fast pair
 from being lost between sub-steps is sized off the single fastest ball's speed, not the worst-case
 pair's *closing* speed — a head-on pair can in principle close at up to twice that margin's
-assumption. Not yet fixed (would cost more candidate pairs per sub-step; gated on the M6
-performance pass).
+assumption. **2026-09-27: tested, not adopted** — doubling the margin's speed term measured
+`worst_margin_j` (the full-system energy invariant, `max_balls = 1500`/`resolution = 15`) at -39.17
+vs. a -40.49 baseline, no meaningful improvement given this system's run-to-run noise (a
+`substeps` 8→16 change alone, unrelated to the margin, shifted the same metric to -90.81); see
+`docs/PHYSICS.md` §9 for the full numbers and the reasoning why the theoretical concern lacks a
+clean single-sub-step failure mode in practice (the broad-phase grid is already built from
+post-predict positions).
 
 ### Coupling clamp hits
 

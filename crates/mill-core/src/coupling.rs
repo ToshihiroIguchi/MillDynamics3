@@ -989,7 +989,7 @@ mod tests {
             &dem.balls.x,
             dem.balls.radius,
         );
-        let sub_dt = 1.0 / (60.0 * params.simulation.substeps as f32);
+        let sub_dt = 1.0 / (60.0 * params.effective_substeps() as f32);
         let mut drum_angle = 0.0f32;
 
         for _ in 0..(settle_seconds / sub_dt) as u32 {

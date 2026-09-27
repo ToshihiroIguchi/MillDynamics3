@@ -532,6 +532,51 @@ impl Params {
         let min_resolution = (radius_m / d_eff).ceil() as u32;
         self.simulation.resolution.max(min_resolution).min(200)
     }
+
+    /// Sub-steps per rendered frame actually used by the solver ([`crate::Simulation::step`]/
+    /// [`crate::Simulation::fixed_sub_dt`]), raised above `simulation.substeps` when needed so the
+    /// XPBD stability criterion `max_substep_displacement_over_diameter < 1` (docs/METRICS.md)
+    /// stays clear of 1 for a small, heavily coarse-grained-away effective ball diameter
+    /// ([`Params::effective_media`]) at this project's fixed 60 Hz nominal frame rate.
+    ///
+    /// `max_substep_displacement_over_diameter = |v| * dt / (2 * d_eff)` (`dem.rs` step 1) scales
+    /// inversely with `d_eff` at a fixed `dt`: raising `simulation.max_balls` shrinks the coarse-
+    /// graining scale factor, which shrinks `d_eff` directly, which can push this ratio close to or
+    /// past 1 even though nothing else about the run changed (docs/PHYSICS.md §9's `max_balls =
+    /// 1500` follow-up measured 0.64-1.07 across seeds at the browser's Realtime resolution). This
+    /// mirrors [`Params::effective_fluid_resolution`]'s auto-raise pattern exactly: a params-only
+    /// estimate (no live per-ball velocity available here), clamped to this project's own validated
+    /// range, and always surfaced explicitly (never applied silently) alongside it in the
+    /// parameters panel's derived-values block.
+    ///
+    /// The reference speed is `v_ref = sqrt(2 * g * D)` -- free fall across the full drum diameter
+    /// `D`, a deliberately generous upper bound on cataracting impact speed (this project's cascading/
+    /// cataracting regression tests measure realistic peak ball speeds around 2-5 m/s, well under
+    /// this bound at default parameters). Requiring `v_ref * dt <= TARGET_RATIO * d_eff` with
+    /// `dt = 1 / (60 * substeps)` gives `substeps >= v_ref / (60 * TARGET_RATIO * d_eff)`.
+    /// `TARGET_RATIO = 0.5` (half the `< 1` criterion, matching this project's existing "well under
+    /// 1, not merely under 1" standard, docs/METRICS.md) was chosen so `Params::default()` and every
+    /// `web/src/params/presets.ts` quality preset at the default 0.30 fill fraction are unchanged
+    /// (this method's own unit tests below assert exactly that); `max_balls = 1500` at the Realtime
+    /// preset's resolution raises `substeps` from 8 to 12.
+    ///
+    /// Clamped at `simulation.substeps`'s own validated maximum (16) for the same reason
+    /// `effective_fluid_resolution` clamps at 200: a pathological combination (`max_balls` far above
+    /// `N_true` with a very small `media.ball_diameter_m`) must not make a frame's DEM/PBF cost
+    /// unboundedly large. In that residual regime the ratio may still approach or exceed 1; this is
+    /// a real, disclosed limit of the auto-raise, not a bug (see docs/PHYSICS.md §9).
+    pub fn effective_substeps(&self) -> u32 {
+        const GRAVITY_MAG: f32 = 9.81;
+        const TARGET_RATIO: f32 = 0.5;
+        let d_eff = self.effective_media().diameter_m;
+        let diameter_m = self.mill.diameter_m;
+        if !(d_eff > 0.0 && diameter_m > 0.0) {
+            return self.simulation.substeps;
+        }
+        let v_ref = (2.0 * GRAVITY_MAG * diameter_m).sqrt();
+        let min_substeps = (v_ref / (60.0 * TARGET_RATIO * d_eff)).ceil().max(1.0) as u32;
+        self.simulation.substeps.max(min_substeps).min(16)
+    }
 }
 
 /// The media population actually handed to the DEM solver, after [`Params::effective_media`]
@@ -764,5 +809,53 @@ mod tests {
 
         let resolution = params.effective_fluid_resolution();
         assert!(resolution <= 200);
+    }
+
+    #[test]
+    fn effective_substeps_matches_requested_at_every_quality_preset() {
+        // web/src/params/presets.ts's three (max_balls, resolution) tiers at the default 0.30 fill
+        // fraction, plus this crate's own `Params::default()` (max_balls = 600) -- none of these
+        // should trigger the auto-raise (docs/PHYSICS.md §9's max_balls = 1500 follow-up is the one
+        // that does, see the test below).
+        for max_balls in [150u32, 300, 600] {
+            let mut params = Params::default();
+            params.simulation.max_balls = max_balls;
+            assert_eq!(
+                params.effective_substeps(),
+                params.simulation.substeps,
+                "unexpected auto-raise at max_balls={max_balls}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_substeps_raises_when_coarse_graining_shrinks_balls_far_below_default() {
+        // Same repro as `effective_fluid_resolution_raises_when_coarse_graining_shrinks_balls_
+        // below_lattice_spacing`: Realtime preset's resolution (15) paired with max_balls = 1500,
+        // the config docs/PHYSICS.md §9 measured crossing the `< 1` displacement-ratio criterion.
+        let mut params = Params::default();
+        params.simulation.max_balls = 1500;
+        params.simulation.resolution = 15;
+
+        let substeps = params.effective_substeps();
+        assert!(
+            substeps > params.simulation.substeps,
+            "expected an auto-raise above {}, got {substeps}",
+            params.simulation.substeps
+        );
+        assert!(substeps <= 16);
+    }
+
+    #[test]
+    fn effective_substeps_is_capped_at_the_validated_maximum() {
+        // A pathological combination (max_balls far above N_true, i.e. no coarse-graining, with a
+        // tiny ball diameter) would otherwise demand an unboundedly high sub-step rate; the cap
+        // keeps this method's output always valid per `SimulationParams::validate`.
+        let mut params = Params::default();
+        params.media.ball_diameter_m = 0.0006;
+        params.simulation.max_balls = 50_000;
+
+        let substeps = params.effective_substeps();
+        assert!(substeps <= 16);
     }
 }

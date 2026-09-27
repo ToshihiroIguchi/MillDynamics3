@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   criticalSpeedRpm,
   effectiveMedia,
+  effectiveSubsteps,
   fluidParticleCountEstimate,
   interstitialFilling,
   substepDisplacementOverDiameter,
@@ -97,6 +98,37 @@ describe("substepDisplacementOverDiameter", () => {
     const base = substepDisplacementOverDiameter(mill, 4, 0.01109);
     const doubled = substepDisplacementOverDiameter(mill, 8, 0.01109);
     expect(doubled).toBeCloseTo(base / 2, 10);
+  });
+});
+
+describe("effectiveSubsteps", () => {
+  const mill: MillLike = { diameter_m: 1.0, speed_mode: "rpm", speed_value: 30 };
+
+  it("matches the requested substeps at Params::default() and every quality preset (0.30 fill)", () => {
+    // web/src/params/presets.ts's three (maxBalls, resolution) tiers -- resolution is irrelevant
+    // to effectiveSubsteps, only maxBalls matters here -- plus mill-core's own Params::default()
+    // (max_balls = 600, same as the Accuracy tier). None of these should trigger the auto-raise
+    // (mirrors params.rs's effective_substeps_matches_requested_at_every_quality_preset test).
+    for (const maxBalls of [150, 300, 600]) {
+      expect(effectiveSubsteps(mill, media, maxBalls, 8)).toBe(8);
+    }
+  });
+
+  it("raises substeps when coarse-graining shrinks balls far below default (max_balls=1500, resolution irrelevant)", () => {
+    // Realtime preset's config with max_balls raised to 1500 -- the exact repro
+    // docs/PHYSICS.md §9's 2026-09-27 follow-up measured raising substeps from 8 to 12.
+    const result = effectiveSubsteps(mill, media, 1500, 8);
+    expect(result).toBeGreaterThan(8);
+    expect(result).toBeLessThanOrEqual(16);
+  });
+
+  it("is capped at 16 for a pathological tiny-ball-diameter config", () => {
+    // A pathological combination (max_balls far above N_true, i.e. no coarse-graining, with a
+    // tiny ball diameter) would otherwise demand an unboundedly high sub-step rate; the cap keeps
+    // this function's output always within SimulationParams::validate's own validated range.
+    const tinyBallMedia: MediaLike = { ...media, ball_diameter_m: 0.0006 };
+    const result = effectiveSubsteps(mill, tinyBallMedia, 50_000, 8);
+    expect(result).toBeLessThanOrEqual(16);
   });
 });
 

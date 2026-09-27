@@ -10,6 +10,7 @@ import {
   criticalSpeedRpm,
   effectiveFluidResolution,
   effectiveMedia,
+  effectiveSubsteps,
   fluidParticleCountEstimate,
   interstitialFilling,
   percentCriticalOf,
@@ -475,6 +476,11 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     // resolution" row below for when the two differ.
     const fluidDxM = diameterM / 2 / effectiveResolution;
     const fluidSpacingVsBall = eff.diameterM > 0 ? fluidDxM / eff.diameterM : 0;
+    // Uses `effectiveSubsteps` (Params::effective_substeps), the sub-step count actually used by
+    // the solver, not the raw `substeps` input -- see the "Effective sub-steps" row below for when
+    // the two differ (coarse-graining shrinking `d_eff` enough to threaten the XPBD `< 1`
+    // displacement-ratio criterion, docs/PHYSICS.md §9).
+    const effectiveSubstepCount = effectiveSubsteps(mill, media, maxBalls, substeps);
     const u = interstitialFilling(slurryFill, media);
 
     const rows: [string, string, boolean?][] = [
@@ -488,6 +494,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       ["Fluid spacing vs ball diameter", fluidSpacingVsBall.toFixed(2), fluidSpacingVsBall > 1.0],
       ["Effective slurry resolution", `${effectiveResolution}`, effectiveResolution > resolution],
       ["Est. fluid particles", String(fluidCount)],
+      ["Effective sub-steps", `${effectiveSubstepCount}`, effectiveSubstepCount > substeps],
       ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.3],
     ];
 

@@ -1027,12 +1027,32 @@ state after calling `compute`:
   speed (~2-3 m/s here, itself unremarkable) -- shrinking `d_eff` by raising `max_balls` shrinks the
   denominator directly. The occasional resulting "sudden unexplained pop"/clump-launch visual
   symptom is most plausibly a real (if rare per-run) discrete-collision-detection near-miss at this
-  ball size, not a coding defect elsewhere. **Not yet implemented**: an analogous auto-raise to
-  [`Params::effective_fluid_resolution`] for `simulation.substeps` (raising sub-step rate, which
-  divides `dt` and so this ratio directly, whenever a coarse-grained `d_eff` would otherwise push it
-  too close to 1) would close this properly, at a real extra DEM cost on top of an already very slow
-  configuration at this ball count -- a design/cost decision for a future session, not implemented
-  here.
+  ball size, not a coding defect elsewhere.
+
+  **2026-09-27 follow-up: implemented and measured.** `Params::effective_substeps` (`params.rs`,
+  right after `Params::effective_media`) mirrors `Params::effective_fluid_resolution`'s auto-raise
+  pattern exactly: it computes a reference impact speed `v_ref = sqrt(2 * g * D)` (free fall across
+  the full drum diameter, a deliberately generous upper bound), requires
+  `v_ref * dt <= TARGET_RATIO * d_eff` with `TARGET_RATIO = 0.5` (half the `< 1` criterion) and
+  `dt = 1 / (60 * substeps)`, and returns `simulation.substeps.max(min_substeps).min(16)` -- raising
+  the sub-step rate, which divides `dt` and so this ratio directly, whenever a coarse-grained
+  `d_eff` would otherwise push it too close to 1. `Simulation::step` (`lib.rs`) calls this method
+  instead of reading `simulation.substeps` directly when sizing `fixed_sub_dt()`. `TARGET_RATIO`
+  was chosen so `Params::default()` and every `web/src/params/presets.ts` quality preset at the
+  default 0.30 fill fraction are unchanged (`substeps` stays at 8, verified by
+  `params::tests::effective_substeps_matches_requested_at_every_quality_preset`); at the exact
+  `max_balls = 1500` / Realtime `resolution = 15` repro above, it raises `substeps` from 8 to 12.
+  Measured at this exact config, a fresh 3-simulated-second window: `max_substep_displacement_over_
+  diameter`'s worst value over the window went from 0.64-1.07 across seeds (before this fix) to
+  **0.3697** (after) -- comfortably back under 1. Like `effective_fluid_resolution`, this is
+  clamped at `simulation.substeps`'s own validated maximum (16,
+  `params::tests::effective_substeps_is_capped_at_the_validated_maximum`) so a pathological
+  combination (`max_balls` far above `N_true` with a very small `media.ball_diameter_m`) cannot
+  make a frame's DEM/PBF cost unboundedly large; in that residual regime the ratio may still
+  approach or exceed 1, a real disclosed limit of the auto-raise, not a bug. Surfaced (never
+  applied silently) in the parameters panel's derived-values block as "Effective sub-steps"
+  (`web/src/ui/paramsPanel.ts`, mirrored for instant UI feedback by
+  `web/src/params/derived.ts`'s `effectiveSubsteps`) alongside "Effective slurry resolution".
 
   **2026-09-27 follow-up: the widened margin is load-bearing, confirmed by ablation.** While
   removing other stability backstops added during this investigation that turned out not to earn
@@ -1072,10 +1092,24 @@ state after calling `compute`:
   largest pair *closing* speed.** `cell_size = max(2r*1.05, 2r + max_speed*dt)` uses `max_speed`,
   the fastest any one ball moves this sub-step; a head-on pair (each moving toward the other at
   close to `max_speed`) closes at up to twice that rate, so the margin can in principle be half of
-  what step 2's own rationale intends for that specific pair. Widening it to cover the worst-case
-  pairwise closing speed would cost more candidate pairs per sub-step (and, at the broad-phase
-  level, cannot distinguish a genuinely closing pair from a merely fast one); left as a known gap,
-  not fixed, pending the M6 performance pass creating headroom for a broader margin.
+  what step 2's own rationale intends for that specific pair.
+
+  **2026-09-27 follow-up: tested, not adopted.** Widening the margin's `max_speed * dt` term to
+  `2.0 * max_speed * dt` (to cover a head-on pair's closing speed rather than one ball's own speed)
+  was measured via `coupling::tests::settle_and_measure_full_system_energy_invariant` at
+  `max_balls = 1500` / `resolution = 15` (1.0 s settle + 2.0 s measure, single seed):
+  `worst_margin_j` went from **-40.49** (baseline) to **-39.17** (2x margin) -- no meaningful
+  improvement, well within this chaotic many-body system's run-to-run noise. For calibration,
+  raising `substeps` alone from 8 to 16 on the *same* baseline config (unrelated to this margin)
+  shifted the measured margin from -40.49 J to -90.81 J, showing this single-seed energy metric is
+  far too noisy across any `dt`/margin change to detect a small real effect this way. **Decision:
+  not adopted, reverted, `dem.rs` unchanged.** The theoretical concern turned out not to have a
+  clean single-sub-step failure mode in practice: the broad-phase grid is built from this
+  sub-step's *post-predict* positions (already reflecting the full actual relative motion for this
+  `dt`, not a pre-motion estimate), so a head-on pair's closing speed is already fully reflected in
+  their current separation by the time the margin is evaluated -- a genuine full tunnel-through
+  within one sub-step is the already-documented, separate "no ball-ball continuous collision
+  detection" limitation above, not this margin.
 - **`dissipated_power_w` excludes fluid-side viscous dissipation.** It is a purely DEM-side
   accounting (ss4.2's `dissipated_energy_j`, net of the wall's own work input); the slurry's
   viscosity (ss5.3) also removes real mechanical energy from the balls (ss6.2's drag) that never
@@ -1094,6 +1128,20 @@ state after calling `compute`:
   fluid speed clamp (ss6.4) already makes deliberately. `coupling_clamp_hits` is surfaced as a
   metric precisely so a run where this matters (persistently nonzero) is visible; a healthy run
   keeps it rare (`coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`).
+- **`coupling::tests::settle_and_measure_full_system_energy_invariant`'s tolerance floor does not
+  scale with ball count (2026-09-27, not yet fixed).** Its tolerance formula
+  (`tolerance_j_per_step = (1e-2 * dem.balls.mass * (omega*radius_m)^2.max(1.0)).max(5.0)`) uses
+  *per-ball* mass and a fixed 5 J floor, both effectively independent of ball *count* -- it was only
+  ever calibrated/validated at the browser's 150-ball default. At `max_balls = 1500` this floor is
+  measurably too tight even at baseline, unrelated to the `effective_substeps`/broad-phase-margin
+  work above: a fresh measurement (1.0 s settle + 2.0 s measure, single seed) found
+  `worst_margin_j = -40.49` J at the current `substeps = 8`, and `-90.81` J at `substeps = 16` --
+  both most likely aggregate per-particle floating-point/contact-resolution noise summed across
+  many more (1500 vs. 150) independent balls, not a genuine "energy created from nothing" solver
+  defect. This is a test-calibration gap (the tolerance should probably scale with ball count),
+  left open for a future session -- the *displacement-ratio* criterion (`max_substep_displacement_
+  over_diameter < 1`, docs/METRICS.md) is the oracle actually used to validate the `effective_
+  substeps` fix above, not this energy invariant.
 - **2D areal packing (`packing_fraction_2d`, default `0.82`) is not 3D voidage.** Random close
   packing of equal discs in 2D is denser (~18% void fraction) than random close packing of equal
   spheres in 3D (~36-40% void fraction), so the same `slurry.fill_fraction` corresponds to a much

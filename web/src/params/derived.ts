@@ -73,6 +73,31 @@ export function effectiveFluidResolution(
 }
 
 /**
+ * Mirrors `Params::effective_substeps` (params.rs:568-579). `mill.diameter_m` is the mill's drum
+ * diameter. Auto-raises `substeps` (capped at 16, `SimulationParams::validate`'s own validated
+ * maximum) so the XPBD stability criterion `max_substep_displacement_over_diameter < 1`
+ * (docs/METRICS.md) stays clear of 1 even when coarse-graining (`effectiveMedia` above) shrinks
+ * the effective ball diameter `d_eff`. Reuses `effectiveMedia` rather than re-deriving the
+ * coarse-graining math, exactly like `effectiveFluidResolution` above. See `effective_substeps`'s
+ * doc comment in params.rs for the full derivation (`v_ref = sqrt(2 * g * D)` as a generous upper
+ * bound on cataracting impact speed, `TARGET_RATIO = 0.5`); at `Params::default()` and every
+ * `web/src/params/presets.ts` quality preset at the default 0.30 fill fraction this returns the
+ * requested `substeps` unchanged, and raises 8 -> 12 at `max_balls = 1500` with the Realtime
+ * preset's `resolution = 15` (docs/PHYSICS.md §9's 2026-09-27 follow-up).
+ */
+export function effectiveSubsteps(mill: MillLike, media: MediaLike, maxBalls: number, substeps: number): number {
+  const GRAVITY_MAG = 9.81;
+  const TARGET_RATIO = 0.5;
+  const diameterM = mill.diameter_m;
+  const eff = effectiveMedia(diameterM, media, maxBalls);
+  const dEff = eff.diameterM;
+  if (!(dEff > 0) || !(diameterM > 0)) return substeps;
+  const vRef = Math.sqrt(2 * GRAVITY_MAG * diameterM);
+  const minSubsteps = Math.max(1, Math.ceil(vRef / (60 * TARGET_RATIO * dEff)));
+  return Math.min(16, Math.max(substeps, minSubsteps));
+}
+
+/**
  * Mirrors the target particle count computed by `FluidParticles::seed_lattice` (pbf.rs:388-396).
  * Note `slurryFillFraction` is `slurry.fill_fraction`, a different field from `media.fill_fraction`.
  */

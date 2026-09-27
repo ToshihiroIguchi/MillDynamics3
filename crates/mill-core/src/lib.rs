@@ -281,18 +281,20 @@ impl Simulation {
         m
     }
 
-    /// The fixed sub-step size (s) this simulation's `simulation.substeps` implies at the
-    /// project's nominal 60 Hz target frame rate: `1 / (60 * substeps)`. [`FIXED_DT`] is this
-    /// value only at `substeps = 4`; the current default is `substeps = 8`
-    /// (`params::SimulationParams::default`), so `FIXED_DT` (used only by `benches/step.rs` and
-    /// docs, never by the solver itself) is `1/240 s` while this method's actual default-params
-    /// value is `1/480 s`. This method gives the correct value for whatever `substeps` this
-    /// instance's params currently specify. A caller driving a fixed-sub-step accumulator loop
-    /// (docs/PLAN.md ss4.1: "run `step_fixed` until sim time catches up with wall time, capped by
-    /// a frame budget") should use this rather than hard-coding [`FIXED_DT`], since it stays
-    /// correct if `substeps` is changed from the default.
+    /// The fixed sub-step size (s) this simulation's *effective* sub-step rate
+    /// ([`crate::params::Params::effective_substeps`]) implies at the project's nominal 60 Hz
+    /// target frame rate: `1 / (60 * effective_substeps())`. [`FIXED_DT`] is this value only at
+    /// `substeps = 4`; the current default is `substeps = 8` (`params::SimulationParams::default`),
+    /// so `FIXED_DT` (used only by `benches/step.rs` and docs, never by the solver itself) is
+    /// `1/240 s` while this method's actual default-params value is `1/480 s`. This method gives
+    /// the correct value for whatever `substeps` this instance's params currently specify, auto-
+    /// raised the same way `effective_substeps` is (never silently -- the parameters panel surfaces
+    /// the raised value alongside effective resolution). A caller driving a fixed-sub-step
+    /// accumulator loop (docs/PLAN.md ss4.1: "run `step_fixed` until sim time catches up with wall
+    /// time, capped by a frame budget") should use this rather than hard-coding [`FIXED_DT`], since
+    /// it stays correct if `substeps` is changed from the default.
     pub fn fixed_sub_dt(&self) -> f32 {
-        1.0 / (60.0 * self.params.simulation.substeps.max(1) as f32)
+        1.0 / (60.0 * self.params.effective_substeps().max(1) as f32)
     }
 
     /// Advances the simulation by exactly one fixed sub-step ([`Simulation::fixed_sub_dt`]).
@@ -320,9 +322,9 @@ impl Simulation {
     }
 
     /// Advances the simulation by `dt` seconds of simulation time, split into
-    /// `simulation.substeps` fixed sub-steps (docs/PLAN.md ss3.2/4.1).
+    /// [`crate::params::Params::effective_substeps`] fixed sub-steps (docs/PLAN.md ss3.2/4.1).
     pub fn step(&mut self, dt: f32) {
-        let n_substeps = self.params.simulation.substeps.max(1);
+        let n_substeps = self.params.effective_substeps().max(1);
         let sub_dt = dt / n_substeps as f32;
 
         self.reset_frame_stats();
@@ -445,7 +447,7 @@ mod tests {
         let mut params = Params::default();
         params.media.fill_fraction = 0.0; // isolate kinematics from ball/fluid dynamics
         params.slurry.enabled = false;
-        let n_substeps = params.simulation.substeps;
+        let n_substeps = params.effective_substeps();
 
         let mut via_step = Simulation::new(params).unwrap();
         via_step.step(1.0 / 60.0);
@@ -950,5 +952,40 @@ mod tests {
                  power_draw_w={power_draw}, dissipated_power_w={dissipated}, ratio={ratio}"
             );
         }
+    }
+
+    #[test]
+    fn simulation_new_auto_raises_substeps_when_coarse_graining_shrinks_balls() {
+        // Same repro config as the fluid-resolution auto-raise above: docs/PHYSICS.md §9 measured
+        // `max_substep_displacement_over_diameter` at 0.64-1.07 across seeds at max_balls = 1500,
+        // Realtime resolution, `substeps = 8` -- genuinely crossing the documented `< 1` XPBD
+        // stability criterion. `Params::effective_substeps` should keep the live ratio comfortably
+        // under 1 by raising the sub-step rate instead.
+        let mut params = Params::default();
+        params.simulation.max_balls = 1500;
+        params.simulation.resolution = 15;
+        params.validate().unwrap();
+
+        let effective_substeps = params.effective_substeps();
+        assert!(
+            effective_substeps > params.simulation.substeps,
+            "expected the sub-step rate to be auto-raised above the requested {}, got \
+             {effective_substeps}",
+            params.simulation.substeps
+        );
+
+        let mut sim = Simulation::new(params).unwrap();
+        let mut worst_ratio = 0.0f32;
+        // 3 sim-seconds: enough to pass through several cataracting cycles at this ball count,
+        // short enough to keep the test fast.
+        for _ in 0..(3 * 60) {
+            sim.step(1.0 / 60.0);
+            worst_ratio = worst_ratio.max(sim.max_substep_displacement_over_diameter());
+        }
+        assert!(
+            worst_ratio < 1.0,
+            "max_substep_displacement_over_diameter should stay under the XPBD stability \
+             criterion once substeps are auto-raised: worst_ratio={worst_ratio}"
+        );
     }
 }
