@@ -15,7 +15,7 @@ This reference documents every user-facing simulation parameter. The table data 
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
-| `media.ball_diameter_m` | Ball diameter | mm | 0.010 (10 mm) | 0.5–200 | 0.1 | Diameter of grinding balls. Defaults model yttria-stabilized zirconia (ZrO₂) ceramic media; 10 mm is typical for lab/bench tumbling mills. Validation range (0.0005, 1.0) m SI. |
+| `media.ball_diameter_m` | Ball diameter | mm | 0.063 (63 mm) | 0.5–200 | 0.1 | Diameter of grinding balls. Defaults model yttria-stabilized zirconia (ZrO₂) ceramic media; 63 mm is a standard forged/ceramic tumbling-mill ball size, chosen so `True ball count` stays under every quality preset's `Max balls` (no coarse-graining out of the box, `k = 1.0`) at the default 1 m mill / fill / packing fraction. Validation range (0.0005, 1.0) m SI. |
 | `media.fill_fraction` | Fill fraction (J) | — | 0.30 | 0–0.9 | 0.01 | Fraction of drum cross-sectional area filled with media including voids (conventional "J" ball-loading fraction). |
 | `media.packing_fraction_2d` | 2D packing fraction | — | 0.82 | 0.5–0.907 | 0.001 | Areal packing fraction of settled disc charge (solid area / footprint area). Random close packing ≈ 0.82; hexagonal upper bound ≈ 0.907. |
 | `media.density_kg_m3` | Media density | kg/m³ | 6000.0 | 100–20000 | 100 | Ball material density. Default (6000 kg/m³) models ZrO₂ ceramic. Balls modelled as unit-depth discs. A "Media material" dropdown in the UI (`web/src/params/materials.ts`) offers representative densities for common grinding media as a shortcut into this field: YSZ (6000, the default), stainless steel (7700), alumina (3600), mullite (3000); an explicit "(custom)" option keeps the raw number editable. |
@@ -77,11 +77,22 @@ well above the point where a thin wetting film is visually resolvable -- that tr
 and disclosed here, not hidden, and reducing it needs either the M6 performance pass or much more
 aggressive ball coarse-graining than any of these three tiers use.
 
-| Preset | `max_balls` | `resolution` | Achieved speed | Fluid spacing / ball diameter |
+**Stale `Achieved speed` column.** These figures were measured before `media.ball_diameter_m`'s
+default was raised from 10 mm to 63 mm (chosen so the shipped config needs no ball coarse-graining
+-- see the Media table above). At the old default, each tier coarse-grained the true ~2460-ball
+population down to a different simulated ball count (150/300/600); at the new default `N_true`
+(~62) sits under all three tiers' `max_balls`, so every tier now simulates the *same* ~62 real
+63 mm balls -- only `resolution` (fluid particle count) still differs between tiers. `Fluid
+spacing / ball diameter` below is recomputed for the new default (`dx / d_eff` with `d_eff` fixed
+at 63 mm across all three tiers); `Achieved speed` has not been re-measured against the new,
+much smaller ball population and should be treated as directional only until `docs/PERF.md` is
+refreshed.
+
+| Preset | `max_balls` | `resolution` | Achieved speed (stale, see above) | Fluid spacing / ball diameter |
 |---|---|---|---|---|
-| **Realtime** (default at a fresh app load) | 150 | 15 | ~1.0-1.1x | ~0.82 |
-| Balanced | 300 | 25 | ~0.7-0.75x | ~0.70 |
-| Accuracy (mill-core's own `Default`) | 600 | 40 | ~0.3-0.4x | ~0.62 |
+| **Realtime** (default at a fresh app load) | 150 | 15 | ~1.0-1.1x | ~0.53 |
+| Balanced | 300 | 25 | ~0.7-0.75x | ~0.32 |
+| Accuracy (mill-core's own `Default`) | 600 | 40 | ~0.3-0.4x | ~0.20 |
 
 All three stay under the panel's own `> 1.0` "a single fluid particle is wider than a ball" warning
 threshold (a fluid particle is not literally larger than a coarse-grained ball at any of these

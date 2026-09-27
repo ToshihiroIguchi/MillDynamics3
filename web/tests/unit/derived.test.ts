@@ -11,15 +11,19 @@ import {
   type MillLike,
 } from "../../src/params/derived";
 
-// Mirrors mill-core's defaults (crates/mill-core/src/params.rs): MillParams::diameter_m = 1.0,
-// MediaParams::ball_diameter_m = 0.010, fill_fraction = 0.30, packing_fraction_2d = 0.82,
-// SimulationParams::max_balls = 600 (the `maxBalls` args passed explicitly below, 2000/5000,
-// pre-date that default change and are unaffected by it).
+// `media` below models this project's *former* default media (crates/mill-core/src/params.rs's
+// MediaParams::ball_diameter_m used to be 0.010; fill_fraction = 0.30 and packing_fraction_2d =
+// 0.82 are still the current defaults). It produces a large true ball count (N_true ~= 2460) and
+// is kept as a fixed fixture purely to exercise the coarse-graining formula paths below (the
+// `maxBalls` args passed explicitly, 2000/5000, pre-date the ball-diameter default change and are
+// unaffected by it) -- it no longer describes the project's actual shipped default, which was
+// raised to 0.063 m specifically so the *shipped* configuration needs no coarse-graining. See the
+// dedicated "matches the project's actual shipped defaults" test below for that.
 const diameterM = 1.0;
 const media: MediaLike = { ball_diameter_m: 0.010, fill_fraction: 0.3, packing_fraction_2d: 0.82, density_kg_m3: 6000 };
 
 describe("trueBallCount", () => {
-  it("matches the exact default true ball count (2460)", () => {
+  it("matches the hand-computed true ball count for a 10 mm ball media population (2460)", () => {
     expect(trueBallCount(diameterM, media)).toBeCloseTo(2460, 0);
   });
 });
@@ -41,10 +45,18 @@ describe("effectiveMedia", () => {
     expect(eff.ballCount).toBeCloseTo(2460, 0);
   });
 
-  it("coarse-grains at the project's actual shipped defaults (1.0 m drum, 10 mm balls, max_balls = 600)", () => {
-    const eff = effectiveMedia(1.0, media, 600);
-    expect(eff.scaleFactor).toBeGreaterThan(1);
-    expect(eff.scaleFactor).toBeCloseTo(Math.sqrt(2460 / 600), 2);
+  it("needs no coarse-graining at the project's actual shipped defaults (1.0 m drum, 63 mm balls, every quality preset's max_balls)", () => {
+    // The 10 mm -> 63 mm default ball diameter change (crates/mill-core/src/params.rs) was made
+    // specifically so N_true (~62 at this fill/packing) stays under every
+    // web/src/params/presets.ts quality tier's max_balls (150/300/600), including the smallest
+    // (Realtime, the browser's actual boot default) -- mirrors params.rs's own
+    // `shipped_defaults_need_no_coarse_graining` test.
+    const shippedMedia: MediaLike = { ball_diameter_m: 0.063, fill_fraction: 0.3, packing_fraction_2d: 0.82, density_kg_m3: 6000 };
+    for (const maxBalls of [150, 300, 600]) {
+      const eff = effectiveMedia(1.0, shippedMedia, maxBalls);
+      expect(eff.scaleFactor).toBe(1);
+      expect(eff.diameterM).toBe(eff.trueDiameterM);
+    }
   });
 });
 

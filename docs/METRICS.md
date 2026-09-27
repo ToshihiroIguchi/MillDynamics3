@@ -36,11 +36,16 @@ question a user is actually asking of the run:
 Two deliberate omissions, both discussed at length above:
 
 - **Collision rate and the impact energy distribution** are *not* promoted, even though in general
-  DEM-mill work the impact-energy spectrum is arguably the grinding KPI, because **the shipped
-  defaults are already coarse-grained** (`k ≈ 2`) and both are hidden by design in that state (see
-  *True ball count, Simulated balls, Coarse-graining (k), Effective diameter* above). A key row
-  that reads empty out of the box would be worse than leaving it in the Grinding group, whose
-  summary carries a `k = …` chip so the fact stays visible without opening it.
+  DEM-mill work the impact-energy spectrum is arguably the grinding KPI, because both are hidden by
+  design whenever coarse-graining is active (`k > 1`, see *True ball count, Simulated balls,
+  Coarse-graining (k), Effective diameter* above) -- a config change away for anyone who lowers
+  `media.ball_diameter_m` or raises `media.fill_fraction`/`mill.diameter_m` far enough to push
+  `N_true` back above `simulation.max_balls`. (The *shipped* default itself needs no
+  coarse-graining, `k = 1` -- `media.ball_diameter_m` was raised from a 10 mm lab/bench size to a
+  standard 63 mm one specifically so `N_true` stays under every quality preset's `max_balls`; see
+  `docs/PARAMETERS.md`.) A key row that can silently read empty depending on unrelated config would
+  be worse than leaving it in the Grinding group, whose summary carries a `k = …` chip so the fact
+  stays visible without opening it.
 - **Density spread, max/mean** stays inside Slurry, deliberately below the convergence number that
   actually tracks failure (*Max/mean compression error*, folded into Solver health) -- see that
   section above for why this is the single most commonly misread pair on this panel.
@@ -108,16 +113,22 @@ radius)** reads much smaller with no lifters (~1-2%) but **~31-33% with `lifters
 `docs/PHYSICS.md` §3's mass-preserving substitution: when the true physical ball count exceeds
 `simulation.max_balls`, the solver simulates `Simulated balls` fewer, larger discs (`Effective
 diameter`, scaled by `k`) instead. `k = 1` means coarse-graining is inactive. **The shipped
-defaults are already coarse-grained** (`k ≈ 2.0` at a 1 m drum / 10 mm balls / `max_balls = 600`),
-so this is the common case, not an edge case.
+default needs no coarse-graining** (`k = 1.0` at a 1 m drum / 63 mm balls, under every quality
+preset's `max_balls`, including the smallest, Realtime's 150) -- `media.ball_diameter_m` was
+deliberately raised from an earlier 10 mm lab/bench default to this standard media size for exactly
+this reason. Coarse-graining is still very much a live path, though: dropping to a smaller ball
+diameter, or raising `media.fill_fraction`/`mill.diameter_m` enough to push `N_true` back above
+`max_balls`, re-triggers it (e.g. 10 mm balls at these same defaults give `N_true ≈ 2460`, `k ≈
+2.0` at `max_balls = 600`).
 
 **Collision rate and the impact energy distribution chart are hidden whenever `k > 1`**, with a
 banner explaining why: both are derived from *simulated* impacts, whose count scales as `1/k^2` and
 whose energy scales as `k^2` relative to the true (uncoarsened) population, since a coarse-grained
 ball's mass is `k^2` times a true ball's (`docs/PHYSICS.md` §9). Every other metric on this panel
 (power draw, torque, total kinetic energy, toe/shoulder, overlap fractions) is unaffected, since
-total charge mass is preserved regardless of `k`. Raise `Max balls` above `True ball count` to
-disable coarse-graining and see genuine per-impact statistics.
+total charge mass is preserved regardless of `k`. Raise `Max balls` above `True ball count` (or, as
+above, keep `True ball count` below `Max balls` in the first place) to disable coarse-graining and
+see genuine per-impact statistics.
 
 ---
 

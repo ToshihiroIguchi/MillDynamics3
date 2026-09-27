@@ -839,10 +839,12 @@ mod tests {
         // `Simulation::metrics()` must fill in every field `metrics::compute` itself cannot
         // derive (see that struct's doc comment): ball-count/coarse-graining fields from
         // `Params`, and the EMA-smoothed grinding/solver diagnostics from this instance's own
-        // accumulated state. Default params coarse-grain heavily (see
-        // `params::tests::effective_media_coarse_grains_when_true_count_is_large`), so this also
-        // exercises that path.
+        // accumulated state. Exercises the coarse-graining path (see
+        // `params::tests::effective_media_coarse_grains_when_true_count_is_large`), which needs an
+        // explicit 10 mm ball diameter override -- the shipped 63 mm default needs no
+        // coarse-graining at all (`params::tests::shipped_defaults_need_no_coarse_graining`).
         let mut params = Params::default();
+        params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 150;
         let mut sim = Simulation::new(params).unwrap();
 
@@ -900,7 +902,14 @@ mod tests {
     /// spacing at or below the effective ball diameter, not the raw user-requested resolution.
     #[test]
     fn simulation_new_auto_raises_fluid_resolution_when_coarse_graining_shrinks_balls() {
+        // Explicit 10 mm ball diameter override (the project's former default): the shipped 63 mm
+        // default no longer coarse-grains at max_balls = 1500 (N_true ~= 62), so reproducing the
+        // original "coarse-graining shrinks balls below lattice spacing" regime needs a small
+        // enough true ball diameter to push N_true back above max_balls, same as
+        // `params::tests::effective_fluid_resolution_raises_when_coarse_graining_shrinks_balls_
+        // below_lattice_spacing`.
         let mut params = Params::default();
+        params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 1500;
         params.simulation.resolution = 15;
         params.validate().unwrap();
@@ -960,8 +969,10 @@ mod tests {
         // `max_substep_displacement_over_diameter` at 0.64-1.07 across seeds at max_balls = 1500,
         // Realtime resolution, `substeps = 8` -- genuinely crossing the documented `< 1` XPBD
         // stability criterion. `Params::effective_substeps` should keep the live ratio comfortably
-        // under 1 by raising the sub-step rate instead.
+        // under 1 by raising the sub-step rate instead. Same explicit 10 mm ball diameter override
+        // as that test (the shipped 63 mm default no longer coarse-grains at max_balls = 1500).
         let mut params = Params::default();
+        params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 1500;
         params.simulation.resolution = 15;
         params.validate().unwrap();

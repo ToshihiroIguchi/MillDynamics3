@@ -182,11 +182,14 @@ The true (uncoarsened) media population is `N_true = J·k_p·(π R²) / (π r_tr
 and `k_p` is `media.packing_fraction_2d` (2D areal packing fraction of the settled disc charge,
 default 0.82, range `[0.5, 0.907]`, the hexagonal upper bound `π/(2√3) ≈ 0.907`) — this refines an
 earlier `N_real = J·(π R²)/(π r_true²)` formula that implicitly assumed a 100 %-solid footprint. At
-the current defaults (D = 1 m, d = 10 mm, J = 0.30, `k_p` = 0.82), `N_true ≈ 2460`, well above
-`simulation.max_balls` (default 600, chosen to keep the fixed-sub-step tunnelling-risk ratio
-`max_substep_displacement_over_diameter` in the solver's stable regime at the default `substeps`/
-`dem_iterations`; see docs/PHYSICS.md ss9); at smaller
-media (e.g. d = 2 mm) `N_true` reaches the tens of thousands — far above what a single-threaded
+the current defaults (D = 1 m, d = 63 mm, J = 0.30, `k_p` = 0.82), `N_true ≈ 62`, comfortably under
+every `web/src/params/presets.ts` quality tier's `max_balls` (150/300/600) — `media.ball_diameter_m`
+was deliberately raised from an earlier 10 mm lab/bench default to this standard 63 mm media size so
+the shipped configuration needs no coarse-graining out of the box (`scale_factor == 1.0`). At a
+smaller ball diameter (e.g. the former 10 mm default, `N_true ≈ 2460`, or d = 2 mm, tens of
+thousands) `N_true` climbs well above `simulation.max_balls` (default 600, chosen to keep the
+fixed-sub-step tunnelling-risk ratio `max_substep_displacement_over_diameter` in the solver's stable
+regime at the default `substeps`/`dem_iterations`; see docs/PHYSICS.md ss9) — far above what a single-threaded
 WASM solver can step in real time even with the unconditionally-stable XPBD approach below (the
 cost is per-contact, not per-substep). Rather than exposing this as a raw performance cliff, the
 solver is always seeded from an **effective** media population instead of the raw UI values: if
@@ -448,7 +451,7 @@ rate (`FIXED_DT` x `substeps`), estimated cost.
 | Group | Parameters (defaults) |
 |---|---|
 | Mill | diameter D = 1.0 m; speed mode = rpm (or %Nc); speed = 30 rpm (~70 %Nc for D = 1 m); rotation direction CCW |
-| Media | ball diameter 10 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
+| Media | ball diameter 63 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
 | Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 50 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
 | Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
 | Simulation | resolution 40 (particles across R); substeps 8; PBF iterations 3; DEM (XPBD) iterations 2; max balls 600; time scale 1.0; frame budget 12 ms; seed 1 |

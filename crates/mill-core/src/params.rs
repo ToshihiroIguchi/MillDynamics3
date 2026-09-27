@@ -128,11 +128,18 @@ pub struct MediaParams {
 impl Default for MediaParams {
     // Defaults model yttria-stabilized zirconia (ZrO2) grinding media, a common ceramic ball-mill
     // charge: density ~6.0 g/cm^3, harder and more elastic (higher restitution, lower friction)
-    // than the steel media this used to default to. 10 mm is a typical lab/bench tumbling-mill
-    // ball size (as opposed to sub-mm beads used in attritor/bead mills).
+    // than the steel media this used to default to. 63 mm is a standard forged/ceramic
+    // tumbling-mill ball size, chosen (over a smaller lab/bench size like the former 10 mm
+    // default) so that `Params::true_ball_count` stays under every shipped
+    // `simulation.max_balls` tier (web/src/params/presets.ts's smallest is 150) at this struct's
+    // own `fill_fraction`/`packing_fraction_2d` defaults and the default 1 m mill -- i.e. the
+    // shipped configuration needs no coarse-graining (`Params::effective_media`'s `scale_factor ==
+    // 1.0`) out of the box, so the grinding-diagnostics group (collision rate, impact-energy
+    // histogram) reads genuine per-impact statistics rather than being hidden behind the
+    // coarse-graining banner.
     fn default() -> Self {
         Self {
-            ball_diameter_m: 0.010,
+            ball_diameter_m: 0.063,
             fill_fraction: 0.30,
             packing_fraction_2d: 0.82,
             density_kg_m3: 6000.0,
@@ -705,9 +712,17 @@ mod tests {
 
     #[test]
     fn effective_media_coarse_grains_when_true_count_is_large() {
-        // Default scenario: D = 1 m, d = 10 mm, J = 0.30 => several thousand true discs, above
-        // max_balls (600), so coarse-graining must kick in.
-        let params = Params::default();
+        // D = 1 m, d = 10 mm (the project's former default, before it was raised to 63 mm
+        // specifically so the *shipped* default no longer needs coarse-graining -- see
+        // `shipped_defaults_need_no_coarse_graining` below), J = 0.30 => several thousand true
+        // discs, above max_balls (600), so coarse-graining must kick in.
+        let params = Params {
+            media: MediaParams {
+                ball_diameter_m: 0.010,
+                ..MediaParams::default()
+            },
+            ..Params::default()
+        };
         let n_true = params.true_ball_count();
         assert!(n_true > params.simulation.max_balls as f32);
 
@@ -719,6 +734,33 @@ mod tests {
         assert!(eff.ball_count <= params.simulation.max_balls);
         // Should land close to the target, not just "under" it.
         assert!(eff.ball_count as f32 > 0.5 * params.simulation.max_balls as f32);
+    }
+
+    #[test]
+    fn shipped_defaults_need_no_coarse_graining() {
+        // The point of the 10 mm -> 63 mm default ball diameter change: at the default 1 m mill /
+        // J = 0.30 / packing 0.82, N_true ~= 62, comfortably under every shipped
+        // web/src/params/presets.ts quality tier's `max_balls` (150/300/600), including the
+        // browser's actual boot default (Realtime, 150) which `crate::coupling::tests::
+        // coupled_charge_never_gains_more_energy_than_the_wall_supplies`'s own comment notes this
+        // crate's `Params::default()` (max_balls = 600) does not itself match. So this asserts
+        // across all three tiers, not just `Params::default()`'s own 600.
+        for max_balls in [150u32, 300, 600] {
+            let mut params = Params::default();
+            params.simulation.max_balls = max_balls;
+            let n_true = params.true_ball_count();
+            assert!(
+                n_true <= max_balls as f32,
+                "N_true={n_true} should not exceed max_balls={max_balls} at the shipped default \
+                 63 mm ball diameter"
+            );
+            let eff = params.effective_media();
+            assert_eq!(
+                eff.scale_factor, 1.0,
+                "expected no coarse-graining at max_balls={max_balls}, got scale_factor={}",
+                eff.scale_factor
+            );
+        }
     }
 
     #[test]
@@ -771,9 +813,10 @@ mod tests {
 
     #[test]
     fn effective_fluid_resolution_matches_requested_when_already_fine_enough() {
-        // Params::default() (max_balls = 600, resolution = 40) was validated to sit comfortably
-        // under the "fluid spacing vs ball diameter" warning (see docs/PERF.md's browser table:
-        // ~0.62 at these exact defaults), so the auto-raise should be a no-op here.
+        // Params::default() (max_balls = 600, resolution = 40, 63 mm ball diameter, no
+        // coarse-graining -- see `shipped_defaults_need_no_coarse_graining` above) sits
+        // comfortably under the "fluid spacing vs ball diameter" warning (dx = 12.5 mm vs a 63 mm
+        // effective diameter, ratio ~0.20), so the auto-raise should be a no-op here.
         let params = Params::default();
         assert_eq!(
             params.effective_fluid_resolution(),
@@ -785,8 +828,19 @@ mod tests {
     fn effective_fluid_resolution_raises_when_coarse_graining_shrinks_balls_below_lattice_spacing()
     {
         // Realtime preset's resolution (15) paired with a much higher max_balls (1500) than its
-        // own default (150) -- the 2026-09-23 report's exact repro.
-        let mut params = Params::default();
+        // own default (150) -- the 2026-09-23 report's exact repro. Needs an explicit 10 mm ball
+        // diameter override (the project's former default) to reproduce: the shipped 63 mm default
+        // no longer coarse-grains at max_balls = 1500 (N_true ~= 62), so this regression's own
+        // "coarse-graining shrinks balls" premise requires deliberately choosing a small enough
+        // ball diameter to push N_true back above max_balls, same as
+        // `effective_media_coarse_grains_when_true_count_is_large` above.
+        let mut params = Params {
+            media: MediaParams {
+                ball_diameter_m: 0.010,
+                ..MediaParams::default()
+            },
+            ..Params::default()
+        };
         params.simulation.max_balls = 1500;
         params.simulation.resolution = 15;
 
@@ -833,7 +887,15 @@ mod tests {
         // Same repro as `effective_fluid_resolution_raises_when_coarse_graining_shrinks_balls_
         // below_lattice_spacing`: Realtime preset's resolution (15) paired with max_balls = 1500,
         // the config docs/PHYSICS.md §9 measured crossing the `< 1` displacement-ratio criterion.
-        let mut params = Params::default();
+        // Same explicit 10 mm ball diameter override as that test, for the same reason (the
+        // shipped 63 mm default no longer coarse-grains at max_balls = 1500).
+        let mut params = Params {
+            media: MediaParams {
+                ball_diameter_m: 0.010,
+                ..MediaParams::default()
+            },
+            ..Params::default()
+        };
         params.simulation.max_balls = 1500;
         params.simulation.resolution = 15;
 

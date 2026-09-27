@@ -1016,12 +1016,35 @@ mod tests {
         // even a 10x coefficient bump left the worst single-sub-step margin at -1.7 J (barely
         // moved from -1.9 J at 1x), so the gap isn't the velocity-scaled term being too small,
         // it's that this coupled system's noise floor has its own, mostly-fixed scale
-        // independent of `omega * radius_m`. A flat absolute floor (5 J) covers the measured
-        // -1.7 J to -1.9 J range with ample margin while remaining ~1000x smaller than the
-        // thousands-of-joules-per-sub-step scale the actual 2026-09-26 bug produced (so a real
-        // regression of that kind still trips this immediately).
+        // independent of `omega * radius_m`. A flat absolute floor covers this: originally 5 J,
+        // measured with ample margin (~2.6x) over the -1.7 J to -1.9 J range above at the
+        // project's former 10 mm media default (single-ball mass ~7.7 kg at that config).
+        //
+        // Raised 5 -> 15 J (2026-09-27, alongside `media.ball_diameter_m`'s default change from
+        // 10 mm to 63 mm, and a real fix to `pbf.rs` step 6.5's `c_rot` angular-reaction cap: an
+        // earlier revision applied the ball's full, uncapped torque (`dw_b = candidate_dw`) while
+        // separately capping only the fluid's own reaction (`c_rot`), silently breaking the
+        // "matching reaction" conservation invariant whenever the cap actually engaged --
+        // recomputing `dw_b` from the capped `c_rot` fixed that, dropping this exact test's worst
+        // single-sub-step margin from -4.47 J to -0.12 J at the *new* 63 mm/62-ball default under
+        // the browser's actual boot config, i.e. this test's own scenario below (Realtime preset,
+        // max_balls = 150) -- a ~38x reduction, confirming that was the dominant error source, not
+        // a further bug of the same kind). The small residual that remains (raw violation ~5.1 J,
+        // vs ~1.9 J at the old 10 mm default's ~7.7 kg ball mass) tracks the new, larger individual
+        // ball mass (~18.7 kg at 63 mm) reasonably proportionally (mass ratio ~2.4x, violation
+        // ratio ~2.7x) -- ordinary solver-convergence noise scaling with how much energy one
+        // ball<->fluid interaction event now moves, not evidence of a further conservation bug
+        // (steps 7.5/8 below remain small, deliberately accepted, rare violations of their own,
+        // per their own regression tests). 15 J keeps the same "ample margin" philosophy (~2.9x
+        // over the new residual, comparable to the original ~2.6x) while remaining ~100-1000x
+        // smaller than the thousands-of-joules-per-sub-step scale the actual 2026-09-26 bug
+        // produced (so a real regression of that kind still trips this immediately). If
+        // `media.ball_diameter_m`'s default -- or `simulation.max_balls`'s -- changes again,
+        // pushing the single simulated ball mass well past ~19 kg, re-measure this margin rather
+        // than assuming the mass-proportional trend above continues to hold; only two data points
+        // support it so far.
         let tolerance_j_per_step =
-            (1e-2 * dem.balls.mass * (omega * radius_m).powi(2).max(1.0)).max(5.0);
+            (1e-2 * dem.balls.mass * (omega * radius_m).powi(2).max(1.0)).max(15.0);
         let mut worst_margin_j = f32::MAX;
         let mut e_prev =
             crate::dem::mechanical_energy_j(&dem.balls) + crate::pbf::mechanical_energy_j(&fluid);

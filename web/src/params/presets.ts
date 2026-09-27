@@ -18,6 +18,16 @@
 // allocations) without changing its algorithmic complexity or resolution/quality trade-off, so
 // this specific fidelity gap remains -- or much more aggressive ball coarse-graining than any of
 // these three tiers use.
+//
+// STALE as of the `media.ball_diameter_m` default change (10 mm -> 63 mm, chosen so the shipped
+// config needs no ball coarse-graining, see `crates/mill-core/src/params.rs`'s
+// `shipped_defaults_need_no_coarse_graining` test): at the new default, `N_true` (~62) sits under
+// all three tiers' `maxBalls`, so every tier now simulates the *same* ~62 real 63 mm balls -- only
+// `resolution` (slurry fluid particle count) actually differs between tiers any more. The
+// "Achieved speed" figures below were measured against the old default's per-tier coarse-grained
+// ball populations (150/300/600 simulated balls) and have not been re-measured against the new,
+// much smaller, uncoarsened ~62-ball population -- treat them as directional, not current, until
+// docs/PERF.md is refreshed.
 export interface QualityPreset {
   id: string;
   label: string;
@@ -33,20 +43,20 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Realtime (default)",
     maxBalls: 150,
     resolution: 15,
-    note: "~1.0-1.1x achieved speed. Fewest, largest coarse-grained balls and coarsest slurry of the three tiers -- a thin wetting film is not resolved smoothly.",
+    note: "~1.0-1.1x achieved speed (pre-dates the 63 mm default ball diameter, needs re-measurement). Coarsest slurry of the three tiers -- a thin wetting film is not resolved smoothly.",
   },
   {
     id: "balanced",
     label: "Balanced",
     maxBalls: 300,
     resolution: 25,
-    note: "~0.25-0.38x achieved speed (well below real time -- regressed from an earlier ~0.7-0.75x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). More balls and finer slurry than Realtime; wetting resolution improves but a thin film is still coarse.",
+    note: "~0.25-0.38x achieved speed (pre-dates the 63 mm default ball diameter, needs re-measurement; also well below real time before that -- regressed from an earlier ~0.7-0.75x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). Finer slurry than Realtime (same ball population as every tier at the current default, since none of the three needs coarse-graining any more); wetting resolution improves but a thin film is still coarse.",
   },
   {
     id: "accuracy",
     label: "Accuracy",
     maxBalls: 600,
     resolution: 40,
-    note: "~0.12-0.13x achieved speed (clearly slow motion, worse than before -- regressed from an earlier ~0.3-0.4x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). This project's original default ball/fluid counts -- the finest of the three tiers, and still under-resolves a thin wetting film.",
+    note: "~0.12-0.13x achieved speed (pre-dates the 63 mm default ball diameter, needs re-measurement; also clearly slow motion before that, worse than before -- regressed from an earlier ~0.3-0.4x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). This project's original default fluid resolution -- the finest of the three tiers (same ball population as every tier at the current default), and still under-resolves a thin wetting film.",
   },
 ];

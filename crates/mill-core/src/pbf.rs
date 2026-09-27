@@ -1462,8 +1462,7 @@ impl FluidParticles {
                             s_scale += mass * phi2 * r_i.length_squared();
                         }
                         if s.abs() > 0.1 * s_scale {
-                            dw_b = candidate_dw;
-                            let raw_c_rot = -i_b * dw_b / s;
+                            let raw_c_rot = -i_b * candidate_dw / s;
                             // Measured (2026-09-26, after the true-radius drag fix raised `beta`
                             // toward saturation): even past the `0.1 * s_scale` degeneracy gate
                             // above, `s` can still be small enough relative to what `dw_b` needs
@@ -1478,14 +1477,10 @@ impl FluidParticles {
                             // ball's own local `omega_bar`, closing a resonant feedback loop that
                             // drove some balls' spin to 1000+ rad/s in testing. Capping the
                             // resulting per-particle velocity change (not just gating on `s` being
-                            // "not too degenerate") is the direct fix -- the same accepted
-                            // trade-off as the fluid speed clamp above (step 7.5) and the
-                            // ball-side impulse clamp (step 8): the exact-conservation identity
-                            // this term computes is intentionally broken, on the rare sub-step
-                            // where it would otherwise blow up, rather than ever injecting an
-                            // unphysical kick. `max_lever` bounds `|perp_i - p_bar|` for any item
-                            // (both `perp_i` and `p_bar` have magnitude at most `h_c`, since every
-                            // `r_i` contributing to `items` was gated at `r2 < h_c*h_c` above).
+                            // "not too degenerate") is the direct fix. `max_lever` bounds
+                            // `|perp_i - p_bar|` for any item (both `perp_i` and `p_bar` have
+                            // magnitude at most `h_c`, since every `r_i` contributing to `items`
+                            // was gated at `r2 < h_c*h_c` above).
                             let max_lever = 2.0 * h_c;
                             let c_rot_cap = if max_lever > 1e-9 {
                                 rot_reaction_speed_cap / max_lever
@@ -1493,6 +1488,26 @@ impl FluidParticles {
                                 0.0
                             };
                             c_rot = raw_c_rot.clamp(-c_rot_cap, c_rot_cap);
+                            // Re-derive `dw_b` from the *actually applied* (possibly capped)
+                            // `c_rot`, inverting the same `raw_c_rot = -i_b * dw_b / s` identity,
+                            // instead of always applying the uncapped `candidate_dw` to the ball.
+                            // An earlier revision applied `candidate_dw` unconditionally here while
+                            // only `c_rot` (the fluid's own reaction) was capped above -- silently
+                            // breaking the "matching reaction" invariant the `s.abs() > 0.1 *
+                            // s_scale` gate exists to guarantee (see that gate's own comment)
+                            // every time the cap actually engaged, not just in the
+                            // already-excluded, fully-degenerate case: the ball received its full,
+                            // uncapped torque while the fluid received a smaller, capped reaction,
+                            // an exact-conservation violation whose accumulated effect the
+                            // 2026-09-26 fix's own accepted-trade-off framing undersold. Recomputing
+                            // `dw_b` here keeps the ball's applied torque and the fluid's applied
+                            // reaction exactly consistent regardless of whether the cap fires, so
+                            // bounding a rare violent kick no longer trades away conservation to do
+                            // it -- it only slows down how much angular momentum can be exchanged
+                            // in one sub-step. Identical to `candidate_dw` whenever the cap does
+                            // not engage (`c_rot == raw_c_rot`), so this changes behaviour only on
+                            // the capped path.
+                            dw_b = -c_rot * s / i_b;
                         }
                     }
 
