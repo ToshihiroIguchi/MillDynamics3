@@ -388,6 +388,25 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       details.appendChild(mediaWarn);
     }
 
+    if (group === "Slurry") {
+      // Static, always-visible background information (not a threshold-triggered alert like
+      // `mediaWarn` above, so `params-note` rather than `params-warn`, and no later toggling
+      // logic is needed): slurry percolation into a settled, stationary ball bed is inherently
+      // limited by this model's fluid-lattice resolution and by 2D areal packing having a lower,
+      // less-connected void fraction than a real 3D mill. See docs/PHYSICS.md ss9 ("Slurry does
+      // not seep into a settled/stationary ball bed...") for the full measured write-up (dx/d_eff
+      // ratios, covered-fraction numbers at two resolutions) -- this note only summarizes it.
+      const slurryInfiltrationNote = document.createElement("p");
+      slurryInfiltrationNote.className = "params-note";
+      slurryInfiltrationNote.textContent =
+        "Slurry percolation into a settled, stationary ball bed is inherently limited in this model: " +
+        "the fluid particle spacing is comparable to the gaps between packed balls, and this project's " +
+        "2D cross-section has a lower, less-connected void fraction than a real 3D mill (see " +
+        "docs/PHYSICS.md §9). Expect most slurry to remain visible as a pool above the bed even at " +
+        "low viscosity with the drum stopped -- this is expected model behaviour, not a solver bug.";
+      details.appendChild(slurryInfiltrationNote);
+    }
+
     form.appendChild(details);
   }
 

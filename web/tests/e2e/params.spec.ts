@@ -95,6 +95,20 @@ test("applying a hot-appliable (resetRequired: false) field shows Applied, not a
   await expect(status).not.toHaveClass(/is-edited/);
 });
 
+test("the Slurry group shows a static infiltration-limitation note", async ({ page }) => {
+  await page.goto("/");
+
+  await page.locator(".hud", { hasText: /rpm/ }).waitFor();
+
+  // "Viscosity (Pa·s)" is in the "Slurry" group, collapsed by default -- opening it (via the
+  // shared helper, which forces the field's ancestor <details> open) also exposes the group's
+  // static note, appended after the group's per-field rows in ui/paramsPanel.ts.
+  await openField(page, "Viscosity (Pa·s)");
+
+  const slurryNote = page.locator(".params-note", { hasText: "Slurry percolation" });
+  await expect(slurryNote).toBeVisible();
+});
+
 test("an out-of-range value shows a visible error without freezing the simulation", async ({ page }) => {
   await page.goto("/");
 

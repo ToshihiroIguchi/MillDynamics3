@@ -1323,3 +1323,44 @@ state after calling `compute`:
     with no lifters, and watch the existing "Toe angle" / "Shoulder angle" metrics-panel sparklines
     (`web/src/metrics/specs.ts`, already `sparkline: true`) -- both already surface the same
     vertical-degree convention `oscillation_probe.rs` samples.
+- **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
+  stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
+  lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above
+  the settled charge does not drain down into the charge's own interstitial gaps over time, even
+  waiting tens of seconds. A new diagnostic binary, `crates/mill-core/examples/infiltration_probe.rs`,
+  measures the fraction of fluid particles that end up "covered" (a ball sits directly above them,
+  i.e. they are physically underneath/between balls rather than exposed to the open pool) over a
+  long idle period after the drum stops. Two compounding, already-documented modelling limitations
+  explain the observation; **no bug was found and no defaults were changed.**
+  - **Numerical resolution: `dx` is comparable to the ball's own size, not to the much smaller gaps
+    between packed balls.** At a repro matching the report (`max_balls = 150`, `resolution = 15`,
+    `slurry.viscosity_pa_s = 1`, static settle from `t = 0`, no rotation), the fluid lattice spacing
+    is `dx = 0.0333` m against an effective (coarse-grained) ball diameter `d_eff = 0.0405` m --
+    `dx/d_eff = 0.82` -- comfortably inside `Params::effective_fluid_resolution`'s only guarantee
+    (`dx <= d_eff`, sized for ball<->fluid coupling *stability*, ss3/ss6, not for resolving pore
+    throats). A single fluid particle is nearly as wide as an entire ball, which cannot fit through
+    a gap between two touching balls (a gap that is at most a small fraction of the ball's own
+    radius). Measured "covered" fraction plateaus at **41%** within about 15-20 s of settling and
+    does not move further given another 10 s. Re-running the same repro at 4x finer resolution
+    (`resolution = 60`, `dx/d_eff = 0.21`, `dx` now well under half the ball radius) raises the
+    plateau to **54%** (reached by `t = 10` s, essentially flat through `t = 30` s) -- confirming
+    resolution is a real, measurable factor, not a red herring.
+  - **2D cross-section topology and voidage are the second, resolution-independent factor.** Even at
+    4x finer resolution the plateau stayed well under "fully filled". This is consistent with ss3's
+    "not the true interstitial void structure" note and ss9's own "2D areal packing is not 3D
+    voidage" entry above: a 2D packed-circle bed has both a lower void fraction (`1 -
+    packing_fraction_2d`, ~18% at the project's default `0.82`, vs. ~36-40% for a random 3D sphere
+    packing) and far fewer alternate percolation paths around any one near-contact than a real 3D
+    bed has (in 2D, two touching circles' point of tangency is the *only* route between the void
+    pockets on either side of it; in 3D the same local near-contact is bypassed from many more
+    directions). Raising `media.packing_fraction_2d` down toward the 3D range does **not** fix this:
+    it only rescales `Params::true_ball_count`'s solid-disc count for a given `fill_fraction` (and
+    hence the "Interstitial filling (U)" volume bookkeeping, ss3), not the local gap geometry between
+    whichever balls actually end up touching after settling -- those still pack as densely as XPBD
+    contact resolution allows, regardless of how many of them there are.
+  - **Conclusion:** given the slurry's own `fill_fraction` is typically comparable to or larger than
+    the charge bed's own void volume, most slurry is expected to remain visible as a pool above the
+    settled bed in this simulator, independent of viscosity or whether the drum is turning -- this is
+    consistent, expected behaviour of a coarse-grained 2D model, not a solver defect. A UI note was
+    added (`web/src/ui/paramsPanel.ts`'s Slurry group) explaining this so it is not mistaken for a
+    bug; no `dem.rs`/`pbf.rs`/`params.rs` change or default-value change was made.
