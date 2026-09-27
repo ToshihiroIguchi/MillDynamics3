@@ -57,25 +57,6 @@ const MAX_RECOVERY_FRACTION: f32 = 0.2;
 /// position magnitudes.
 const CCD_CONTACT_SKIN_FRACTION: f32 = 1e-2;
 
-/// Safety factor on the physically-attainable ball speed, mirroring
-/// [`crate::pbf::FLUID_SPEED_SAFETY_FACTOR`]'s formula and rationale exactly: `v_max =
-/// BALL_SPEED_SAFETY_FACTOR * (|drum.omega| * drum.radius_m + sqrt(4 * g * drum.radius_m))` --
-/// the drum's wall speed plus the free-fall speed across the full drum diameter. Before this
-/// backstop (and its angular counterpart just below, added 2026-09-26 -- see that code's own
-/// comment), a ball had no speed ceiling anywhere else in this solver (unlike the fluid, see the
-/// constant above), so a single mis-scaled coupling impulse, or any other still-undiscovered
-/// source of energy injection, has nothing stopping it from compounding sub-step over sub-step
-/// into an openly unphysical velocity before the next contact (if any) has a chance to arrest it
-/// -- exactly the "media flung out of the charge" failure this backstop targets. `4.0` is tighter
-/// than the fluid's `5.0`: a ball is a rigid body whose *own* dynamics (gravity, contact, wall
-/// friction) are already fully accounted for and energy-bounded (see `dem::mechanical_energy_j` and the
-/// invariant `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_
-/// supplies` proves for the DEM solver in isolation), so there is less slack to allow than for
-/// the fluid (whose own reconstruction step can legitimately need a wider margin, see that
-/// constant's doc comment) -- this is a pure last-resort backstop, never a model parameter users
-/// tune, and clamping here should read as rare as the fluid's own clamp in a healthy run.
-const BALL_SPEED_SAFETY_FACTOR: f32 = 4.0;
-
 /// Number of log-spaced bins in [`DemStepStats::impact_energy_histogram`].
 pub const IMPACT_ENERGY_HISTOGRAM_BINS: usize = 12;
 /// Lower edge (J per metre of mill depth) of the impact-energy histogram's range.
@@ -159,14 +140,6 @@ pub struct DemStepStats {
     /// could in principle miss a collision along the way. Diagnostic only in this pass; a
     /// continuous (swept) collision guard is future work.
     pub max_substep_displacement_over_diameter: f32,
-    /// Number of balls whose *linear or angular* speed this sub-step hit the
-    /// [`BALL_SPEED_SAFETY_FACTOR`] backstop clamp (one counter for both -- see that step's own
-    /// comment for why spin has the same kind of ceiling). Mirrors
-    /// [`crate::pbf::FluidStepStats::coupling_clamp_hits`]: healthy at 0, or very near it --
-    /// persistent clamping means something (most likely the ball<->fluid coupling, or an
-    /// unbounded DEM friction/contact torque) is pinned at an artificial ceiling rather than
-    /// reflecting the physical interaction.
-    pub ball_speed_clamp_hits: u32,
 }
 
 /// Mass of one ball, modelled as a **unit-depth disc** (kg per metre of mill length):
@@ -234,13 +207,14 @@ pub struct Balls {
     /// really does have that much footprint/inertia for collision and momentum-bookkeeping
     /// purposes). A real small particle's *drag relaxation rate* is an intensive, per-particle
     /// property of its own true size, not of however many true particles a DEM super-ball happens
-    /// to represent -- using the coarse `radius` there instead (the pre-2026-09-26 behaviour) made
-    /// `max_balls`, a pure performance/resolution knob, silently change the physical fluid-drag law
-    /// itself: measured (`scratch_drag_scaling_probe`, not committed) at this project's default
-    /// viscosity, an isolated ball's one-substep drag relaxation fraction was 0.82 at the true 10mm
-    /// diameter, 0.80 at `max_balls=1500`'s coarse 12.8mm, but only 0.26 at the 150-ball preset's
-    /// coarse 40.5mm -- i.e. the *default* configuration was under-predicting true-particle drag by
-    /// roughly 3x, not the high-`max_balls` configuration over-predicting it.
+    /// to represent -- using the coarse `radius` there instead made `max_balls`, a pure
+    /// performance/resolution knob, silently change the physical fluid-drag law itself: measured,
+    /// at this project's default viscosity, an isolated ball's one-substep drag relaxation
+    /// fraction was 0.82 at the true 10mm diameter, 0.80 at `max_balls=1500`'s coarse 12.8mm, but
+    /// only 0.26 at the 150-ball preset's coarse 40.5mm -- i.e. the *default* configuration was
+    /// under-predicting true-particle drag by roughly 3x, not the high-`max_balls` configuration
+    /// over-predicting it. See [`crate::pbf::tests::
+    /// ball_drag_relaxation_fraction_is_independent_of_coarse_graining`] for the regression test.
     pub true_radius: f32,
 }
 
@@ -501,14 +475,15 @@ impl DemState {
         // from a single recovering contact (docs comment above), so a third ball just outside the
         // predict-only margin could be pushed into a genuine new overlap by that motion and never
         // be recorded as a contact at all this sub-step (not merely under-resolved -- literally
-        // absent from `ball_ball_pairs`/`ContactBook` for every one of steps 3/5/6/7). Measured at
-        // a reported "sudden unexplained launch" config (`max_balls = 1500`, small coarse-grained
-        // balls): `max_substep_displacement_over_diameter` reached 0.635 (vs. 0.169 at the 150-ball
-        // default), with over a third of sub-steps exceeding 0.3 -- both terms below are already
-        // comparable in size there, so this budget is not a theoretical nicety at that
-        // configuration. `iterations.max(1)` (not a fixed extra-pass count) mirrors this
-        // parameter's own actual effect on step 3's motion budget exactly, so this margin term
-        // grows/shrinks with `dem_iterations` the same way step 3's real behaviour does.
+        // absent from `ball_ball_pairs`/`ContactBook` for every one of steps 3/5/6/7).
+        // `iterations.max(1)` (not a fixed extra-pass count) mirrors this parameter's own actual
+        // effect on step 3's motion budget exactly, so this margin term grows/shrinks with
+        // `dem_iterations` the same way step 3's real behaviour does. **Ablation-verified
+        // load-bearing** (2026-09-27): removing `solve_margin` entirely causes
+        // `coupling::tests::coupled_charge_never_gains_more_energy_than_the_wall_supplies` (the
+        // full-system energy invariant, at the browser's default config) to fail with a genuine
+        // -22.3 J single-sub-step violation -- a real missed-contact defect, not a theoretical
+        // nicety.
         let max_speed = balls.v.iter().map(|v| v.length()).fold(0.0f32, f32::max);
         let solve_margin = iterations.max(1) as f32 * MAX_RECOVERY_FRACTION * 2.0 * r;
         let cell_size = (2.0 * r * 1.05)
@@ -901,54 +876,6 @@ impl DemState {
             }
         }
 
-        // --- 8. Ball speed clamp (stability backstop) -- see [`BALL_SPEED_SAFETY_FACTOR`]'s doc
-        // comment for the formula and rationale. Applied last, after every other velocity-writing
-        // step above, so it only ever clips an already-final velocity rather than being
-        // overwritten by a later step.
-        let ball_speed_v_max = BALL_SPEED_SAFETY_FACTOR
-            * (drum.omega.abs() * drum.radius_m + (4.0 * GRAVITY.abs() * drum.radius_m).sqrt());
-        let mut ball_speed_clamp_hits = 0u32;
-        for v in balls.v.iter_mut() {
-            let speed = v.length();
-            if !speed.is_finite() {
-                *v = Vec2::ZERO;
-                ball_speed_clamp_hits += 1;
-            } else if speed > ball_speed_v_max {
-                *v *= ball_speed_v_max / speed;
-                ball_speed_clamp_hits += 1;
-            }
-        }
-        // Angular counterpart (2026-09-26, re-tuned 2026-09-27): unlike linear speed above, spin
-        // had no ceiling anywhere in this solver. Originally added and tightly tuned against
-        // `low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`
-        // (media.fill_fraction=0.10) reading a +26.6 W/m ball-only "energy gain" -- but that
-        // reading was later root-caused (2026-09-27) as a test-design bug, not a real energy
-        // source: a ball-only slope can't tell "the coupling created energy" apart from "the
-        // fluid legitimately handed the ball some of the energy the wall gave the fluid," and the
-        // metric itself swung between +13.8 and -1.2 W/m run-to-run at the same config (see that
-        // test's doc comment and [`crate::coupling`]'s
-        // `settle_and_measure_full_system_energy_invariant`, which confirms the full-system
-        // invariant held throughout, both seeds, worst margin still positive). With no real bug
-        // behind it, the tightly-tuned ceiling this comment previously described (which responded
-        // non-monotonically to tuning -- a sign it was chasing noise, not a defect) has no basis;
-        // kept instead as a plain rotational counterpart to [`BALL_SPEED_SAFETY_FACTOR`]'s
-        // generous linear margin, purely as a divergence/NaN backstop, not as a tuned fix for any
-        // specific finding.
-        let ball_omega_max = if balls.radius > 1e-9 {
-            ball_speed_v_max / balls.radius
-        } else {
-            0.0
-        };
-        for omega in balls.omega.iter_mut() {
-            if !omega.is_finite() {
-                *omega = 0.0;
-                ball_speed_clamp_hits += 1;
-            } else if omega.abs() > ball_omega_max {
-                *omega = omega.signum() * ball_omega_max;
-                ball_speed_clamp_hits += 1;
-            }
-        }
-
         let e_final = mechanical_energy_j(balls);
         DemStepStats {
             wall_work_j,
@@ -956,7 +883,6 @@ impl DemState {
             impact_energy_histogram,
             dissipated_energy_j: e_after_predict + wall_work_j - e_final,
             max_substep_displacement_over_diameter,
-            ball_speed_clamp_hits,
         }
     }
 }

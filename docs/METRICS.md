@@ -188,18 +188,6 @@ pinned at an artificial ceiling rather than reflecting the physical interaction.
 adhesion-gating fix (below) only ever *reduces* adhesion strength, so it cannot raise this rate;
 verified by `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_{50,200}_pa_s`.
 
-### Ball speed clamp hits
-
-Count of balls whose speed hit the `dem.rs` ball speed safety backstop
-(`BALL_SPEED_SAFETY_FACTOR = 4.0`, `docs/PHYSICS.md` §4.2 step 8) this call. **Healthy: 0**, same
-"warn on any hit" semantics as coupling clamp hits above (a rigid ball's own dynamics are already
-energy-bounded, so this is a pure last-resort backstop, not an expected steady-state reading).
-Added alongside the fluid speed clamp's new pre-coupling application (`docs/PHYSICS.md` §5.2 step
-7/§9) during the 2026-09-22 low-fill unphysical-scatter investigation, mirroring the fluid's own
-speed clamp for balls, since none previously existed. In the investigation's own measured run
-(Realtime preset, `max_balls=150`, `resolution=15`, `media.fill_fraction=0.10`) this backstop never
-engaged — see `docs/PHYSICS.md` §9 for what was measured instead.
-
 ---
 
 ## Not a metrics-panel number, but related: the airborne slurry clump and the wetting film

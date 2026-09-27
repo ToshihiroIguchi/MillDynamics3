@@ -46,7 +46,6 @@ export interface Metrics {
   dissipated_power_w: number;
   impact_energy_histogram: ImpactEnergyHistogram;
   coupling_clamp_hits: number;
-  ball_speed_clamp_hits: number;
 
   // Coarse-graining / media.
   effective_ball_diameter_m: number;

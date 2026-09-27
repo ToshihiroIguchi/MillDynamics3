@@ -90,7 +90,6 @@ describe("sparkline specs", () => {
       "mixing_index",
       "max_compression_error",
       "coupling_clamp_hits",
-      "ball_speed_clamp_hits",
     ]);
   });
 });
@@ -144,7 +143,6 @@ describe("CSV column order (metrics/history.ts's toCsv, driven by METRIC_SPECS's
       "mean_density_error",
       "mean_shear_rate",
       "coupling_clamp_hits",
-      "ball_speed_clamp_hits",
       "substep_displacement",
     ]);
   });
@@ -177,7 +175,6 @@ const fakeMetrics: Metrics = {
   dissipated_power_w: 0,
   impact_energy_histogram: { bin_edges_j: [], counts_per_s: [] },
   coupling_clamp_hits: 0,
-  ball_speed_clamp_hits: 0,
   effective_ball_diameter_m: 0,
   simulated_ball_count: 0,
   true_ball_count: 0,

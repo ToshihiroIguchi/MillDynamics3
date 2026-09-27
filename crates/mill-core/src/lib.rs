@@ -72,11 +72,6 @@ pub struct Simulation {
     /// [`coupling::CouplingImpulses::clamp_hits`]'s doc comment for why this is meant to read as
     /// "did this happen at all just now", not a smoothed rate).
     coupling_clamp_hits: u32,
-    /// Sum of [`dem::DemStepStats::ball_speed_clamp_hits`] over every sub-step of the most recent
-    /// [`Simulation::step`] call (reset at the start of each call, not EMA-smoothed -- same
-    /// "did this happen at all just now" rationale as `coupling_clamp_hits` above). Healthy at 0;
-    /// see [`dem::BALL_SPEED_SAFETY_FACTOR`]'s doc comment.
-    ball_speed_clamp_hits: u32,
 }
 
 impl Simulation {
@@ -127,7 +122,6 @@ impl Simulation {
             impact_energy_counts_per_s: [0.0; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
             max_substep_displacement_over_diameter: 0.0,
             coupling_clamp_hits: 0,
-            ball_speed_clamp_hits: 0,
         })
     }
 
@@ -240,13 +234,6 @@ impl Simulation {
         self.coupling_clamp_hits
     }
 
-    /// Sum of [`dem::DemStepStats::ball_speed_clamp_hits`] over every sub-step of the most recent
-    /// [`Simulation::step`] call (not EMA-smoothed, same rationale as `coupling_clamp_hits`
-    /// above). See [`dem::BALL_SPEED_SAFETY_FACTOR`]'s doc comment.
-    pub fn ball_speed_clamp_hits(&self) -> u32 {
-        self.ball_speed_clamp_hits
-    }
-
     /// Extracts the fluid's free-surface contour(s) at the current state (docs/PLAN.md ss3.5).
     /// Recomputed on demand each call -- callers should not call this more often than needed for
     /// rendering.
@@ -284,7 +271,6 @@ impl Simulation {
             counts_per_s: self.impact_energy_counts_per_s.to_vec(),
         };
         m.coupling_clamp_hits = self.coupling_clamp_hits;
-        m.ball_speed_clamp_hits = self.ball_speed_clamp_hits;
         m.effective_ball_diameter_m = effective.diameter_m;
         m.simulated_ball_count = effective.ball_count;
         m.true_ball_count = self.params.true_ball_count().round().max(0.0) as u32;
@@ -331,7 +317,6 @@ impl Simulation {
     pub fn reset_frame_stats(&mut self) {
         self.max_substep_displacement_over_diameter = 0.0;
         self.coupling_clamp_hits = 0;
-        self.ball_speed_clamp_hits = 0;
     }
 
     /// Advances the simulation by `dt` seconds of simulation time, split into
@@ -370,7 +355,6 @@ impl Simulation {
             sub_dt,
         );
         self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
-        self.ball_speed_clamp_hits += dem_stats.ball_speed_clamp_hits;
         self.update_grinding_stats(&dem_stats, fluid_stats.wall_work_j, sub_dt, omega);
         self.fluid_stats = fluid_stats;
         self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
@@ -908,8 +892,8 @@ mod tests {
     /// Realtime preset's default (150) while leaving `simulation.resolution` at the preset's own
     /// value (15) shrinks the coarse-grained effective ball diameter (`Params::effective_media`)
     /// well below the fluid lattice spacing, reproducing the same "media flying out of the charge"
-    /// energy-injection failure mode as [[project_unphysical_scatter_2026_09]] (there triggered by
-    /// a low `media.fill_fraction` instead). `Params::effective_fluid_resolution` is the fix:
+    /// energy-injection failure mode a low `media.fill_fraction` can also trigger.
+    /// `Params::effective_fluid_resolution` is the fix:
     /// `Simulation::new` must seed the fluid at a resolution high enough to keep the lattice
     /// spacing at or below the effective ball diameter, not the raw user-requested resolution.
     #[test]

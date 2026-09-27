@@ -214,7 +214,6 @@ export const METRIC_SPECS: MetricSpec[] = [
 
   // --- Solver health --------------------------------------------------------------------------
   { id: "coupling_clamp_hits", group: "Solver", label: "Coupling clamp hits", value: m("coupling_clamp_hits"), format: fixed(0), sparkline: true, csv: true },
-  { id: "ball_speed_clamp_hits", group: "Solver", label: "Ball speed clamp hits", value: m("ball_speed_clamp_hits"), format: fixed(0), sparkline: true, csv: true },
   { id: "substep_displacement", group: "Solver", label: "Substep displacement / diameter", value: m("max_substep_displacement_over_diameter"), format: fixed(3), csv: true },
 ];
 

@@ -129,19 +129,17 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
 
 // Warning-highlight thresholds (raw metric values, not formatted strings): a row is flagged
 // `is-warn` once its value exceeds the threshold below. All ids below use the same "value is
-// greater than threshold" test -- coupling_clamp_hits's (and ball_speed_clamp_hits's) "warn on
-// any hit" semantics is just the threshold-0 case of that same rule, not a different rule. The
-// Solver-health key-block roll-up (below) reads this same map, so there is exactly one place
-// these five diagnostics are defined as "alarms" rather than "continuously-read numbers".
+// greater than threshold" test -- coupling_clamp_hits's "warn on any hit" semantics is just the
+// threshold-0 case of that same rule, not a different rule. The Solver-health key-block roll-up
+// (below) reads this same map, so there is exactly one place these four diagnostics are defined
+// as "alarms" rather than "continuously-read numbers".
 const COUPLING_CLAMP_HITS_WARN_THRESHOLD = 0;
-const BALL_SPEED_CLAMP_HITS_WARN_THRESHOLD = 0;
 const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
 const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
 const MAX_BALL_OVERLAP_WARN_THRESHOLD = 0.5;
 
 const WARN_THRESHOLDS = new Map<string, number>([
   ["coupling_clamp_hits", COUPLING_CLAMP_HITS_WARN_THRESHOLD],
-  ["ball_speed_clamp_hits", BALL_SPEED_CLAMP_HITS_WARN_THRESHOLD],
   ["substep_displacement", SUBSTEP_DISPLACEMENT_WARN_THRESHOLD], // confirmed against metrics/specs.ts
   ["max_compression_error", MAX_COMPRESSION_ERROR_WARN_THRESHOLD],
   ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],

@@ -890,27 +890,26 @@ mod tests {
         }
     }
 
-    /// Reproduces the exact reported operating point (2026-09-22 unphysical-scatter report):
-    /// Realtime quality preset (`max_balls = 150`, `resolution = 15`), default mill/slurry, but
-    /// `media.fill_fraction = 0.10` -- below the project default (0.30) every preset measurement
-    /// and every `cascading_charge_*`/`a_coupled_charge_*` regression above was validated at. At
-    /// this fill fraction coarse-graining is *weaker* (`k` drops from ~4.05 at J=0.30 to ~2.34
-    /// here), so the simulated ball diameter shrinks (~23.4 mm) while the fluid lattice spacing
-    /// stays fixed by `resolution` alone (~33.3 mm) -- a fluid particle wider than a ball
-    /// (`dx / d_eff ~= 1.43`), the exact regime `web/src/ui/paramsPanel.ts`'s
-    /// `fluidSpacingVsBall > 1.0` warning already flags as part of the fluidised-charge bug's
-    /// root cause. Runs the real coupled solver directly (not `Simulation`, so every per-sub-step
-    /// diagnostic is available) and returns:
-    /// - `max_ball_speed`: the fastest any ball moves during the measurement window (m/s);
-    /// - `max_centroid_distance_ratio`: the farthest any single ball ends up from the charge's
-    ///   own centroid, normalized by the population's RMS spread from that centroid -- a compact
-    ///   cascading/mixed charge keeps this bounded; an ejected, isolated ball is a sustained
-    ///   outlier;
-    /// - `worst_margin_j`: the worst (most negative) per-sub-step margin of the full-system
-    ///   (ball+fluid) mechanical energy invariant over the measurement window -- see
-    ///   [`settle_and_measure_full_system_energy_invariant`]; non-negative means the solver never
-    ///   created energy from nothing at any single sub-step.
-    fn low_fill_cataracting_charge_diagnostics() -> (f32, f32, f32) {
+    #[test]
+    fn low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid() {
+        // Regression for the 2026-09-22 unphysical-scatter report at this exact configuration:
+        // Realtime quality preset (`max_balls = 150`, `resolution = 15`), default mill/slurry, but
+        // `media.fill_fraction = 0.10` -- below the project default (0.30). At this fill fraction
+        // coarse-graining is weaker (`k` ~2.34 vs. ~4.05 at J=0.30), so the simulated ball diameter
+        // shrinks (~23.4 mm) while the fluid lattice spacing stays fixed by `resolution` alone
+        // (~33.3 mm) -- a fluid particle wider than a ball (`dx / d_eff ~= 1.43`), the regime
+        // `web/src/ui/paramsPanel.ts`'s `fluidSpacingVsBall > 1.0` warning flags.
+        //
+        // Checks the same full-system (ball+fluid) per-sub-step energy invariant as
+        // `coupled_charge_never_gains_more_energy_than_the_wall_supplies` (see
+        // [`settle_and_measure_full_system_energy_invariant`]) rather than a ball-only energy
+        // metric: a ball-only slope cannot distinguish "the coupling is creating energy" from "the
+        // fluid is legitimately handing the balls some of the energy the wall gave the *fluid*" --
+        // exactly the ball<->fluid drag this project's physics intends. An earlier ball-only-slope
+        // version of this test read as a persistent regression at this config; switching to the
+        // full-system invariant showed it holds robustly (positive margin across seeds and
+        // measurement windows), while the ball-only slope itself swung sign run-to-run -- i.e. the
+        // metric, not the physics, was the problem.
         use crate::params::{
             Direction, MediaParams as Media, MillParams, Params, SimulationParams,
             SlurryParams as Slurry, SpeedMode,
@@ -939,80 +938,14 @@ mod tests {
 
         let (worst_margin_j, max_ball_speed, max_centroid_distance_ratio) =
             settle_and_measure_full_system_energy_invariant(&params, 5.0, 8.0);
-
-        (max_ball_speed, max_centroid_distance_ratio, worst_margin_j)
-    }
-
-    #[test]
-    fn low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid() {
-        // Direct regression for the 2026-09-22 unphysical-scatter report at this exact
-        // configuration. Two architectural changes attempting a *deeper* fix were tried here and
-        // reverted after they regressed this crate's own existing, tuned regressions -- see
-        // `C:\Users\toshi\.claude\plans\quirky-floating-wadler.md` for the full record:
-        // - step 3.5's ball reaction cannot simply be removed (treating `balls` as a passive
-        //   boundary like the drum wall): that measurably worsened
-        //   `metrics::tests::compression_error_stays_bounded_under_violent_lifter_cataracting`
-        //   (0.123 vs. the previously-passing ~0.091 bound) -- it is doing real stabilising work
-        //   under violent cataracting that step 6.5/6.6's differently-time-scaled exchange does
-        //   not replace.
-        // - step 6.5's entrained fluid mass cannot simply be capped at the ball's own physical
-        //   added mass: `pbf::tests::ball_drag_matches_two_dimensional_stokes_scaling` (and its
-        //   sibling below) specifically calibrate this closure's *large*-`m_ent` limit against
-        //   real 2D Stokes drag (an effectively-infinite fluid reservoir, `m_ent >> balls.mass`,
-        //   is the physically correct regime there, not a discretisation artefact to suppress).
-        //
-        // What landed instead, validated against the *entire* existing suite (`cargo test -p
-        // mill-core`, 120/120 passing) with no regression:
-        // - the fluid speed clamp (`pbf.rs` step 5.5/7.5) now also runs immediately after step
-        //   5's velocity reconstruction, before steps 6/6.5/6.6 read `self.v` -- so the ball<->
-        //   fluid exchange never sees a still-unclamped reconstruction artefact;
-        // - a ball speed safety backstop (`dem.rs` step 8, [`crate::dem::BALL_SPEED_SAFETY_
-        //   FACTOR`]) mirroring the fluid's own, since none existed for balls at all.
-        //
-        // **2026-09-26: a ball-only energy-slope regression, later found to be a false alarm.**
-        // The true-particle-radius drag fix (commit 8b0d632) raised step 6.5's `beta` toward
-        // saturation, decisively fixing the *default* config (`media.fill_fraction=0.30`) but
-        // making this test's *ball-only* mechanical-energy-slope metric read +26.6 W/m over a 5s
-        // window (failing its `< 5.0` bound). A step-6.5 `c_rot` cap and an angular ball-speed
-        // backstop landed for unrelated, independently-verified reasons (see their own doc
-        // comments and `docs/PHYSICS.md` ss6.2/ss6.4), and brought the reading down to +15.2 W/m
-        // -- still failing, non-monotonically (tightening the backstop further made it *worse*,
-        // +19.5 W/m), which was the first sign the ball-only metric itself was the problem, not
-        // the physics.
-        //
-        // **2026-09-27: root-caused as a test-design bug, not a physics bug.** A ball-only energy
-        // slope cannot distinguish "the coupling is creating energy" from "the fluid is
-        // legitimately handing the balls some of the energy the wall gave the *fluid*" -- exactly
-        // the ball<->fluid drag this project's own physics intends. Checked with the full-system
-        // (ball+fluid) per-sub-step invariant (the same oracle
-        // `coupled_charge_never_gains_more_energy_than_the_wall_supplies` uses for the default
-        // config, see [`settle_and_measure_full_system_energy_invariant`]) at this exact
-        // configuration, across 2 seeds, over a 20s measurement window: the invariant held at
-        // every single sub-step both times (worst margins +1.78 J and +7.80 J, both >= 0 -- no
-        // energy created from nothing), while the ball-only slope over shorter windows swung from
-        // +13.8 W/m (5s) to +0.96 W/m (10s) to +4.26 W/m (20s) in one run and from -1.23 W/m (5s)
-        // to +3.92 W/m (20s) in the other -- sign-flipping, seed-dependent noise, not a steady
-        // drift. The original "+15.2 W/m" failure was this same noise sampled in an unlucky 5s
-        // window, not evidence of a bug. Replaced the ball-only slope assertion below with the
-        // same full-system invariant the default-config test uses; no code in `pbf.rs`/`dem.rs`
-        // changed as a result of this finding. See [[project_floating_balls_1500_2026_09]] for
-        // the full record.
-        let (max_ball_speed, max_centroid_distance_ratio, worst_margin_j) =
-            low_fill_cataracting_charge_diagnostics();
-        eprintln!(
-            "low_fill_cataracting_charge_diagnostics: max_ball_speed={max_ball_speed} m/s, \
-             max_centroid_distance_ratio={max_centroid_distance_ratio}, \
-             worst_margin_j={worst_margin_j} J"
-        );
         assert!(
             worst_margin_j >= 0.0,
             "full-system (ball+fluid) mechanical energy exceeded cumulative wall work + \
-             tolerance at some sub-step -- energy created from nothing (the 2026-09-26 bug, or a \
-             new one like it): worst_margin_j={worst_margin_j}"
+             tolerance at some sub-step -- energy created from nothing: \
+             worst_margin_j={worst_margin_j}"
         );
-        // Sanity ceilings only (not yet a tight bound): well above every measured value (4-5 m/s)
-        // but far below the ball speed safety backstop's own ceiling (~24 m/s at this
-        // configuration), so a genuine blow-up still trips this first.
+        // Sanity ceilings only (not a tight bound): well above every measured value (4-5 m/s) but
+        // far enough below plausible blow-up territory that a genuine regression still trips this.
         assert!(
             max_ball_speed < 15.0,
             "ball speed far exceeds anything measured for this configuration (looks like a \
@@ -1025,37 +958,21 @@ mod tests {
         );
     }
 
-    /// Direct regression for the 2026-09-26 energy-injection bug (see the sibling low-fill test's
-    /// final paragraph for the full investigation): after the true-particle-radius drag fix
-    /// (8b0d632) raised step 6.5's `beta` toward saturation, a small-`s` (near-degenerate
-    /// entrainment geometry) case in that step's angular-relaxation reaction distribution
-    /// (`c_rot`) could inject a 10+ m/s single-sub-step velocity kick into a handful of fluid
-    /// particles, whose resulting angular velocity was then read back as a neighbouring ball's
-    /// own local `omega_bar` next sub-step -- a resonant feedback that drove some balls' spin to
-    /// 1000+ rad/s and, via ordinary DEM friction/restitution, `dissipated_power_w` to ~3x
-    /// `power_draw_w` (matching the report's screenshots) -- at the exact browser default
-    /// config (`max_balls=150`, `resolution=15`, everything else `Params::default()`, see
-    /// `web/src/worker.ts`'s `INITIAL_PRESET_ID`/`boot()`).
-    ///
-    /// Unlike the OLS-slope check above (which can average away a single sharp spike over a long
-    /// window), this checks the *full* system's (ball + fluid) mechanical energy against
-    /// cumulative wall work every single sub-step -- the same style as `crate::tests::
-    /// steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s dry-only
-    /// invariant, extended here to include the fluid. Measured before the `c_rot` cap fix
-    /// (`pbf.rs` step 6.5): worst single-sub-step violation -8262.8 J; after: -14.7 J, back to
-    /// this project's own pre-existing (pre-8b0d632) floating-point noise floor (-34.8 J,
-    /// measured at `HEAD~1` with an identical harness).
     /// Runs the coupled ball+fluid solver at `params` for `settle_seconds` (unmeasured, the fresh
-    /// lattice's initial fall/pile-up transient) then `measure_seconds`, and returns the worst
-    /// (most negative) per-sub-step margin of `wall_work + tolerance - delta_e` observed during
-    /// the measurement window, alongside the peak ball speed (m/s) and peak ball-to-centroid
-    /// distance ratio seen there. A non-negative margin means the full-system (ball+fluid)
-    /// mechanical energy invariant held at every single sub-step -- the solver never created
-    /// energy from nothing -- mirroring
-    /// `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s
-    /// dry-only pattern exactly: a fresh per-sub-step tolerance every time, never a single fixed
-    /// budget compared cumulatively (which normal floating-point noise would trivially exceed
-    /// given enough sub-steps).
+    /// lattice's initial fall/pile-up transient) then `measure_seconds`, and returns:
+    /// - `worst_margin_j`: the worst (most negative) per-sub-step margin of
+    ///   `wall_work + tolerance - delta_e` (full-system ball+fluid mechanical energy vs.
+    ///   cumulative wall work) seen during the measurement window -- non-negative means the solver
+    ///   never created energy from nothing at any single sub-step. Mirrors
+    ///   `crate::tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s
+    ///   dry-only pattern exactly: a fresh per-sub-step tolerance every time, never a single fixed
+    ///   budget compared cumulatively (which normal floating-point noise would trivially exceed
+    ///   given enough sub-steps);
+    /// - `max_ball_speed`: the fastest any ball moves during the measurement window (m/s);
+    /// - `max_centroid_distance_ratio`: the farthest any single ball ends up from the charge's own
+    ///   centroid, normalized by the population's RMS spread from that centroid -- a compact
+    ///   cascading/mixed charge keeps this bounded; an ejected, isolated ball is a sustained
+    ///   outlier.
     fn settle_and_measure_full_system_energy_invariant(
         params: &Params,
         settle_seconds: f32,
@@ -1160,6 +1077,14 @@ mod tests {
         (worst_margin_j, max_ball_speed, max_centroid_distance_ratio)
     }
 
+    /// Full-system (ball+fluid) counterpart to `crate::tests::
+    /// steady_cascading_charge_never_gains_more_energy_than_the_wall_supplies`'s dry-only
+    /// invariant, at the browser's actual default config (Realtime preset). Regression for a
+    /// 2026-09-26 bug where step 6.5's angular reaction coefficient (`c_rot`, `pbf.rs`) could
+    /// diverge on a near-degenerate entrainment geometry, injecting a large single-sub-step
+    /// velocity kick into a few fluid particles and, via a resonant feedback with a neighbouring
+    /// ball's sampled `omega_bar`, driving that ball's spin to 1000+ rad/s -- fixed by capping the
+    /// coefficient's resulting velocity effect (see that code's own comment).
     #[test]
     fn coupled_charge_never_gains_more_energy_than_the_wall_supplies() {
         use crate::params::{Params, SimulationParams};

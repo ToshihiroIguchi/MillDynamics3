@@ -268,22 +268,10 @@ Given a fixed sub-step `dt`, drum pose, media parameters and iteration count:
    applies no reaction torque to a ball-ball contact's partner (angular momentum is not conserved)
    and, for a ball-wall contact, targets zero rather than `drum.omega` (fighting, rather than
    assisting, a ball correctly rolling without slipping on a rotating drum).
-8. **Ball speed clamp** (stability backstop, `BALL_SPEED_SAFETY_FACTOR = 4.0`; added in the
-   2026-09-22 low-fill unphysical-scatter investigation, ss9): applied last, after every other
-   velocity-writing step above, so it only ever clips an already-final velocity. Mirrors the
-   fluid's own speed clamp (ss5.2 steps 7/12) exactly: `v_max = BALL_SPEED_SAFETY_FACTOR *
-   (|drum.omega| * drum.radius_m + sqrt(4 * |GRAVITY| * drum.radius_m))`; any ball speed above
-   `v_max` is rescaled down to it (a non-finite velocity is zeroed outright). `4.0` is tighter than
-   the fluid's `5.0` since a ball's own dynamics are already energy-bounded (`dem::
-   mechanical_energy_j`, `tests::steady_cascading_charge_never_gains_more_energy_than_the_wall_
-   supplies`) — this is a pure last-resort backstop against a still-undiscovered energy-injection
-   source, not a routine correction, and `DemStepStats::ball_speed_clamp_hits` (healthy at 0)
-   surfaces how often it fires.
-
 `DemStepStats` (per-substep diagnostics, all per-metre-of-mill-depth) returned by this function:
 `wall_work_j`, `collision_count`, `impact_energy_histogram` (12 log-spaced bins from `1e-6` J to
-`1.0` J, `impact_energy_bin_edges`), `dissipated_energy_j`,
-`max_substep_displacement_over_diameter` (see ss9), and `ball_speed_clamp_hits` (step 8 above).
+`1.0` J, `impact_energy_bin_edges`), `dissipated_energy_j`, and
+`max_substep_displacement_over_diameter` (see ss9).
 
 `dissipated_energy_j = e_after_predict + wall_work_j - e_final`, where `e = mechanical_energy_j`
 (translational + rotational KE + gravitational PE, `mechanical_energy_j`'s own doc comment) is
@@ -368,35 +356,29 @@ solve. `s_corr` artificial pressure is implemented but disabled.
    `DemState::step_with_external_forces` (ss4.2).
 6. **Velocity reconstruction**: `v = (x - x0) / dt` for every particle (`x0` = pre-predict
    position).
-7. **Fluid speed clamp, pre-coupling pass** (stability backstop; first of two applications this
-   sub-step — see step 12 below for the second and the shared `v_max` formula/rationale). Added in
-   the 2026-09-22 low-fill unphysical-scatter investigation (ss9), moved to run here — immediately
-   after step 6's reconstruction, *ahead of* steps 9/10's ball<->fluid exchange — so those
-   exchanges never read a still-unclamped reconstruction artefact; previously the clamp only ran
-   once, at the very end (this step's second application below), too late to prevent that
-   sub-step's coupling from already having been kicked by it.
-8. **No-slip wall blending**: for particles marked `touched_wall`, `v = (1-beta)*v + beta*v_wall`
+7. **No-slip wall blending**: for particles marked `touched_wall`, `v = (1-beta)*v + beta*v_wall`
    (`v_wall = drum.wall_velocity(x)`), `beta = slurry.wall_no_slip` clamped to `[0,1]`. The implied
    impulse this delivers to each such particle (`mass * (v_new - v_old)`), dotted with the wall's
    own velocity there, is summed into `FluidStepStats::wall_work_j` — the fluid-side counterpart of
    `dem::DemStepStats::wall_work_j`, folded into `Simulation::power_draw_w`/`torque_nm` (ss8) so a
    wet mill's motor load reflects viscous drag on the slurry, not only ball-wall friction.
-9. **Ball viscous drag** (coupling step 2 — see ss6.2).
-10. **Buoyancy** (coupling step 3 — see ss6.3).
-11. **Implicit Newtonian viscosity** (`mu = slurry.viscosity_pa_s`; skipped entirely, at zero
+8. **Ball viscous drag** (coupling step 2 — see ss6.2).
+9. **Buoyancy** (coupling step 3 — see ss6.3).
+10. **Implicit Newtonian viscosity** (`mu = slurry.viscosity_pa_s`; skipped entirely, at zero
     iteration cost, when `mu == 0`): density is recomputed once more at the final,
     post-boundary-projection positions, `morris_weights` are built, and `solve_implicit_viscosity`
     solves the diffusion system in place. `mean_shear_rate` is computed from the same final
     positions/densities/neighbour lists.
-12. **Fluid speed clamp, final pass** (stability backstop; second application — see step 7 above
-    for the first): any particle speed above `v_max = FLUID_SPEED_SAFETY_FACTOR *
-    (|omega|*radius_m + sqrt(4*|GRAVITY|*radius_m))`, `FLUID_SPEED_SAFETY_FACTOR = 5.0`, is
-    rescaled down to `v_max` — viscosity (step 11) can itself still push a particle back over the
-    ceiling, so this remains as the last chance to catch it before the renderer. Deliberately not a
-    CFL-style `h/dt` bound (that would be coupled to `simulation.resolution` and could clip real
-    motion at high resolution instead of only blow-ups). Momentum removed here (and at step 7's
-    pre-coupling pass) is *not* credited back to any ball.
-13. **Coupling impulse clamp** (see ss6.4).
+11. **Fluid speed clamp** (stability backstop): any particle speed above `v_max =
+    FLUID_SPEED_SAFETY_FACTOR * (|omega|*radius_m + sqrt(4*|GRAVITY|*radius_m))`,
+    `FLUID_SPEED_SAFETY_FACTOR = 5.0`, is rescaled down to `v_max` — viscosity (step 10) can push a
+    particle over the ceiling via a persistently-squeezed position correction (step 6 reconstructs
+    velocity from position, so nothing else bounds the resulting speed until the wall's own
+    projection does, far above the physically-attainable range). Deliberately not a CFL-style
+    `h/dt` bound (that would be coupled to `simulation.resolution` and could clip real motion at
+    high resolution instead of only blow-ups). Momentum removed here is *not* credited back to any
+    ball.
+12. **Coupling impulse clamp** (see ss6.4).
 
 ### 5.3 Implicit viscosity detail
 
@@ -436,7 +418,7 @@ reasonable (a thin/rarefied film resists shearing more, relative to its own mass
 
 ---
 
-## 6. Two-way ball<->fluid coupling (`coupling.rs`, `pbf.rs` steps 3.5/5.5/6.5/6.6/7.5/8)
+## 6. Two-way ball<->fluid coupling (`coupling.rs`, `pbf.rs` steps 3.5/6.5/6.6/7.5/8)
 
 `coupling::step` orchestrates one shared sub-step: the fluid solves first (`step_coupled`), using
 *last* sub-step's ball positions/velocities as a fixed boundary and producing this sub-step's
@@ -650,10 +632,7 @@ Capping `m_ent` at the ball's own physical 2D added mass was tried during the 20
 investigation (ss9) and reverted: `pbf::tests::ball_drag_matches_two_dimensional_stokes_scaling`
 (and its sibling) specifically calibrate this closure's *large*-`m_ent` limit against real 2D
 Stokes drag — `m_ent >> balls.mass` (an effectively-infinite fluid reservoir) is the physically
-correct regime there, not a discretisation artefact to suppress. `v_bar`/`rho_local` above are
-sampled from `self.v` after ss5.2 step 7's pre-coupling fluid speed clamp has already run, so this
-mechanism never sees an unclamped reconstruction artefact (see that step for why the ordering
-matters).
+correct regime there, not a discretisation artefact to suppress.
 
 **Balls are processed sequentially (Gauss-Seidel), not Jacobi.** `self.v` is updated immediately
 after each ball's contribution, not accumulated into a separate array and applied once after every
@@ -679,8 +658,7 @@ amplified by 2-4 orders of magnitude (`c_rot` observed in the hundreds to ~13000
 drum with no rotation at all to drive it) -- this dominated the reported fluidised-charge symptom
 for the coupled (slurry-enabled) case: with the overlap-push and Gauss-Seidel fixes above alone, a
 ball+slurry charge released in a still drum still failed to settle (`v_rms ~2.5` m/s, fluid pinned
-at its speed clamp, ss5.2 step 12 at the time -- this was before the 2026-09-22 investigation added
-that clamp's earlier ss5.2 step 7 application, ss9). The fix compares `|s|` against a *fraction* of its own
+at its speed clamp, ss5.2 step 11). The fix compares `|s|` against a *fraction* of its own
 positive-definite part instead (`|s| > 0.1 * sum_i mass*phi_i^2*|r_i|^2`), which correctly detects
 near-total cancellation regardless of scale; when it fails, the rotational reaction (both `dw_b` and
 its fluid-side redistribution) is skipped for that ball this sub-step, same as the pre-existing
@@ -767,7 +745,7 @@ A second regression appeared to surface at a different config (`media.fill_fract
 coarse-graining, `coupling::tests::low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`),
 where step 6.2's correction is usually *skipped* rather than merely bounded (`s`'s degeneracy gate
 failing outright, `applied = false`): that test's *ball-only* mechanical-energy-slope metric read
-+26.6 W/m (failing its `<5.0` bound). **2026-09-27: root-caused as a false alarm, not a physics
++26.6 W/m (failing its `<5.0` bound). **Root-caused (2026-09-27) as a false alarm, not a physics
 bug.** A ball-only slope cannot distinguish "the coupling created energy" from "the fluid
 legitimately handed the ball some of the energy the wall gave the fluid" -- exactly the ball<->fluid
 drag this project intends. Checked with the same full-system (ball+fluid) per-sub-step invariant
@@ -775,11 +753,9 @@ this section's fix already validates against, at this exact config, across 2 see
 window: the invariant held at every sub-step both times (worst margins +1.78 J and +7.80 J), while
 the ball-only slope swung sign run-to-run and window-to-window (+13.8/+1.0/+4.3 W/m at 5/10/20s one
 run, -1.2/+3.9 W/m at 5/20s the other) -- noise, not a steady drift. The regression test now uses
-the full-system invariant directly (no `#[ignore]`, passes); no code in `pbf.rs`/`dem.rs` changed as
-a result of this finding. The angular ball-speed backstop added while chasing this false alarm
-(`dem.rs` step 4.2) was re-tuned to the same generous `BALL_SPEED_SAFETY_FACTOR` margin as its linear
-sibling and kept as a plain divergence/NaN backstop, not as a fix for this (non-existent) defect --
-see ss6.4 below and ss9's matching follow-up.
+the full-system invariant directly; no code in `pbf.rs`/`dem.rs` changed as a result of this
+finding. An angular ball-speed backstop added while chasing this false alarm was, together with the
+pre-existing linear one, ablation-tested (2026-09-27, ss9) and removed once shown not load-bearing.
 
 ### 6.3 Buoyancy (pbf.rs step 6.6)
 
@@ -849,18 +825,13 @@ balls clamped this sub-step) and `fluid_momentum_change` (sum of fluid momentum 
 mechanism above, for a Newton's-third-law cross-check against `sum(impulses)` when no clamp fired)
 are both tracked in `CouplingImpulses` purely as diagnostics.
 
-This impulse clamp is a distinct backstop from the fluid speed clamp (ss5.2 steps 7/12, now applied
-twice per sub-step) and the ball speed clamp added alongside it (ss4.2 step 8,
-`dem::BALL_SPEED_SAFETY_FACTOR`) — see ss9's 2026-09-22 entry for how the three relate and what they
-were validated to fix. The ball speed clamp (ss4.2 step 8) gained an angular counterpart on
-2026-09-26, `ball_omega_max`, while chasing an apparent low-fill energy regression -- but that
-regression was later (2026-09-27) root-caused as a ball-only-metric false alarm, not a physics bug
-(see ss6.2's "Angular resonance bug and fix" entry's closing paragraph, and ss9's matching
-follow-up). With no real defect behind it, the ceiling was re-tuned from its original tightly-fit
-value (which had responded non-monotonically to tuning -- a sign it was chasing noise) to
-`ball_speed_v_max / balls.radius`, i.e. the same generous `BALL_SPEED_SAFETY_FACTOR` margin as the
-linear clamp it sits beside, kept purely as a divergence/NaN backstop (spin had no ceiling anywhere
-in this solver before) rather than a tuned fix for any specific finding.
+This impulse clamp is a distinct backstop from the fluid speed clamp (ss5.2 step 11). A separate
+ball speed clamp (linear, `dem::BALL_SPEED_SAFETY_FACTOR`) plus an angular counterpart were added
+during the 2026-09-22..26 investigation below to backstop a still-unidentified energy-injection
+source; both were removed 2026-09-27 once an ablation (disable, re-run the full suite and the
+full-system energy invariant at three configs) showed neither was load-bearing once the real
+sources (ss6.2's `c_rot` cap, and the broad-phase margin in ss4.2 step 2) were fixed. See ss9's
+2026-09-27 follow-up.
 
 ---
 
@@ -1062,7 +1033,14 @@ state after calling `compute`:
   too close to 1) would close this properly, at a real extra DEM cost on top of an already very slow
   configuration at this ball count -- a design/cost decision for a future session, not implemented
   here.
-  two_balls_head_on_collision_conserves_momentum`'s anti-tunnelling assertion).
+
+  **2026-09-27 follow-up: the widened margin is load-bearing, confirmed by ablation.** While
+  removing other stability backstops added during this investigation that turned out not to earn
+  their place (see the "Unphysical scatter" entry's final follow-up below), disabling this margin
+  alone (`solve_margin = 0`) was tested the same way: the full suite still passes, but
+  `coupling::tests::coupled_charge_never_gains_more_energy_than_the_wall_supplies` (the full-system
+  energy invariant, at the browser's default config) fails with a genuine **-22.3 J** single-sub-
+  step violation -- a real missed-contact defect, not a theoretical nicety. This margin stays.
 - **`max_ball_wall_overlap_fraction` reads elevated under `lifters.count > 0`** (measured ~0.87-0.90
   worst-case over a 20 s cataracting run at `lifters.count = 8`, versus a much smaller figure with
   no lifters) -- a real, XPBD contact-convergence residual (cataracting off a lifter reaches higher
@@ -1172,13 +1150,13 @@ state after calling `compute`:
   resolution` — the params panel's "Fluid spacing vs ball diameter" (`dx/d_eff`) warning
   (`web/src/ui/paramsPanel.ts`) already flags exactly this ratio exceeding 1. Under-resolved
   coupling of this kind lets the ball<->fluid exchange (ss6) see badly-aliased local fluid state.
-  Two changes landed, validated against the entire existing suite (`cargo test -p mill-core`,
-  120/120 passing, no regression):
-  - the fluid speed clamp now also runs immediately after velocity reconstruction, before the
-    ball<->fluid exchange reads it (`pbf.rs` step 5.5, ss5.2 step 7/ss6.4), not only as the final
-    backstop it always was (step 7.5, ss5.2 step 12);
-  - a ball speed safety backstop mirroring the fluid's own (`dem.rs` step 8,
-    `BALL_SPEED_SAFETY_FACTOR = 4.0`, ss4.2 step 8), since none existed for balls at all.
+  Two changes landed initially, validated against the entire existing suite (`cargo test -p
+  mill-core`, 120/120 passing, no regression): a fluid speed clamp running immediately after
+  velocity reconstruction, before the ball<->fluid exchange reads it, and a ball speed safety
+  backstop mirroring the fluid's own. **Both were later removed (2026-09-27, see the final
+  follow-up below) once ablation showed neither was load-bearing** once the real energy-injection
+  sources (ss6.2's `c_rot` cap; the broad-phase margin, ss4.2 step 2/ss9's 2026-09-26 entry) were
+  fixed.
 
   Two more aggressive architectural changes were also tried and reverted after they regressed this
   crate's own existing, tuned regressions (see ss6.1/6.2 for each in place): removing ss6.1's
@@ -1226,23 +1204,30 @@ state after calling `compute`:
   coarse-graining-independence drag fix and the `c_rot` cap (ss6.2) resolved the *default*
   config's own, more severe energy-injection bug, this test's own config (`fill_fraction=0.10`)
   appeared to regress further under the same drag fix (ball-only energy_slope_w +16.9 ->
-  **+26.6 W/m**, worse than the original "gas" baseline). An angular ball-speed backstop
-  (`dem.rs` step 8, ss6.4) brought the reading to 15.2 W/m (still over the `<5.0` bound), and
-  tightening it further made it *worse* (19.5 W/m at half the ceiling) -- non-monotonic, the
-  first sign this was noise, not a real defect.
+  **+26.6 W/m**, worse than the original "gas" baseline). An angular ball-speed backstop was
+  added and brought the reading to 15.2 W/m (still over the `<5.0` bound), and tightening it
+  further made it *worse* (19.5 W/m at half the ceiling) -- non-monotonic, the first sign this
+  was noise, not a real defect.
 
-  **Follow-up (2026-09-27): root-caused as a test-design bug, not a physics bug.** A ball-only
-  mechanical-energy slope cannot distinguish "the coupling created energy" from "the fluid
-  legitimately handed the ball some of the energy the wall gave the fluid" -- exactly the
-  ball<->fluid drag this project intends, and step 6.2's correction being usually skipped here
-  (degeneracy gate failing outright) doesn't change that. Checked with the same full-system
-  (ball+fluid) per-sub-step energy invariant ss6.2's fix validates against, at this exact config,
-  2 seeds, 20s window: the invariant held at every sub-step both times (worst margins +1.78 J and
-  +7.80 J), while the ball-only slope swung sign run-to-run and window-to-window (+13.8/+1.0/+4.3
-  W/m at 5/10/20s one run, -1.2/+3.9 W/m at 5/20s the other) -- ordinary noise. This test now
-  asserts the full-system invariant directly (`coupling::tests::
-  low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`, no longer `#[ignore]`d,
-  passes); no code in `pbf.rs`/`dem.rs` changed as a result. The angular ball-speed backstop
-  added while chasing this false alarm was re-tuned to the same generous
-  `BALL_SPEED_SAFETY_FACTOR` margin as its linear sibling (ss6.4) and kept as a plain
-  divergence/NaN backstop, not a fix for this (non-existent) defect.
+  **Follow-up (2026-09-27): root-caused as a test-design bug, not a physics bug, and both ball
+  speed backstops removed.** A ball-only mechanical-energy slope cannot distinguish "the coupling
+  created energy" from "the fluid legitimately handed the ball some of the energy the wall gave
+  the fluid" -- exactly the ball<->fluid drag this project intends, and step 6.2's correction
+  being usually skipped here (degeneracy gate failing outright) doesn't change that. Checked with
+  the same full-system (ball+fluid) per-sub-step energy invariant ss6.2's fix validates against,
+  at this exact config, 2 seeds, 20s window: the invariant held at every sub-step both times
+  (worst margins +1.78 J and +7.80 J), while the ball-only slope swung sign run-to-run and
+  window-to-window (+13.8/+1.0/+4.3 W/m at 5/10/20s one run, -1.2/+3.9 W/m at 5/20s the other) --
+  ordinary noise. This test now asserts the full-system invariant directly (`coupling::tests::
+  low_fill_cataracting_charge_does_not_gain_energy_from_the_fluid`); no code in `pbf.rs`/`dem.rs`
+  changed as a result.
+
+  With no real defect behind either the linear or angular ball speed backstop (the linear one had
+  never actually engaged in the measurements that motivated it either, see "Measured effect"
+  above), both were ablation-tested: disabling each individually, then together, still passed the
+  full 126-test suite and held the full-system invariant (worst margin still positive) at the
+  default config, this config, and a 1500-ball high-count config. Both were removed outright
+  (`dem::BALL_SPEED_SAFETY_FACTOR`, `ball_speed_clamp_hits`, and the pre-coupling fluid speed
+  clamp duplicate call tried alongside them, ss5.2) rather than kept as unused insurance --
+  restoring the pre-investigation NaN-sanitization-only behaviour (ss4.2 step 0) for ball
+  velocity/spin.
