@@ -407,6 +407,18 @@ how the rest of the solver already applies position/velocity corrections directl
   hot-swappable `SetParams`/no-reset split above is the one piece of this section still not
   implemented — v1 (`ui/paramsPanel.ts`, `schema.ts`) always sends a full `init` (reset) on Apply.
   Land with M5.
+- **Flow control (`frameGate.ts`)**: `main.ts`'s rAF loop no longer posts an unconditional
+  `requestFrame` every tick. Since the worker's mailbox is strict FIFO, a `requestFrame` whose
+  handler runs longer than one rAF interval (the frame-budget-capped step loop above, plus an
+  unbounded 15 Hz `fluidSurface()`/`metricsJson()` recompute) would otherwise let unanswered
+  `requestFrame` messages pile up unboundedly and starve `pause`/`setParams`/`init` messages queued
+  behind them. `frameGate.ts`'s `FrameRequestGate` caps this at 2 in-flight requests: each
+  `requestFrame` carries a `requestId`, and the rAF loop skips sending one that tick if 2 are still
+  unanswered. The worker echoes every `requestId` back exactly once, either on the matching `frame`
+  reply or via a `frameSkipped` reply (sim not ready/not running, or an internal error while
+  stepping/building the frame) — so the gate can never deadlock waiting for a reply that never
+  comes. Because a tick can now be skipped, `wallDt` is measured send-to-send (wall-clock time since
+  the previous `requestFrame` was *sent*), not per rendered rAF tick as before.
 
 ### 4.2 Rendering (`render/canvas.ts`, Canvas 2D, DPR-aware)
 Layers per frame: background → drum interior disc → lifters (rotated by drumAngle) → slurry surface polygon (fill, alpha 0.55)

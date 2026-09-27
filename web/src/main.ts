@@ -1,3 +1,4 @@
+import { FrameRequestGate } from "./frameGate";
 import { CanvasRenderer, type LiftersRenderState } from "./render/canvas";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 import { paramsChangeRequiresReset } from "./params/schema";
@@ -29,6 +30,7 @@ resizeToWrap();
 new ResizeObserver(resizeToWrap).observe(sceneWrap);
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+const gate = new FrameRequestGate();
 
 function send(message: MainToWorkerMessage): void {
   worker.postMessage(message);
@@ -85,6 +87,10 @@ worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
       break;
     case "frame":
       applyFrame(msg);
+      if (msg.requestId !== undefined) gate.settle(msg.requestId);
+      break;
+    case "frameSkipped":
+      gate.settle(msg.requestId);
       break;
     case "error":
       console.error("[mill-worker]", msg.message);
@@ -96,6 +102,7 @@ worker.onmessage = (event: MessageEvent<WorkerToMainMessage>) => {
 function togglePlay(): boolean {
   state.running = !state.running;
   send({ type: state.running ? "play" : "pause" });
+  if (!state.running) gate.resetClock();
   return state.running;
 }
 
@@ -114,6 +121,7 @@ const paramsPanel = createParamsPanel(paramsPanelEl, (params) => {
   const resetCause = state.params ? paramsChangeRequiresReset(state.params, params) : "initial load";
   if (resetCause) {
     console.info(`[params] resetting simulation: "${resetCause}" changed`);
+    gate.resetClock();
     send({ type: "init", params });
   } else {
     console.info("[params] hot-applying (no reset)");
@@ -190,7 +198,10 @@ function toggleParamsPanel(): boolean {
 const toolbarEl = createToolbar({
   onTogglePlay: togglePlay,
   onStep: () => send({ type: "step" }),
-  onReset: () => send({ type: "init", params: state.params ?? undefined }),
+  onReset: () => {
+    gate.resetClock();
+    send({ type: "init", params: state.params ?? undefined });
+  },
   onToggleParams: toggleParamsPanel,
   initialParamsVisible,
   onTogglePanel: togglePanel,
@@ -230,7 +241,10 @@ function frameLoop(nowMs: number): void {
       smoothedFps = smoothedFps * 0.9 + (1 / wallDt) * 0.1;
     }
     if (state.running) {
-      send({ type: "requestFrame", wallDt });
+      const issued = gate.tryIssue(nowMs, wallDt);
+      if (issued) {
+        send({ type: "requestFrame", wallDt: issued.wallDt, requestId: issued.requestId });
+      }
     }
   }
   lastTimeMs = nowMs;

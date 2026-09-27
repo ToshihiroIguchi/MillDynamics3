@@ -42,8 +42,13 @@ export interface StepMessage {
 
 export interface RequestFrameMessage {
   type: "requestFrame";
-  /** Wall-clock time elapsed since the previous requestFrame, in seconds. */
+  /** Wall-clock time elapsed since the previous requestFrame was *sent*, in seconds (not since the
+   * previous rAF tick -- those can now differ because a tick may be skipped when at the in-flight
+   * cap; see frameGate.ts). */
   wallDt: number;
+  /** Identifies this request so the worker's reply (`frame` or `frameSkipped`) can be matched back
+   * to it by `frameGate.ts`'s `FrameRequestGate`. */
+  requestId: number;
 }
 
 export type MainToWorkerMessage =
@@ -97,6 +102,10 @@ export interface FrameMessage {
    * value" contract as `fluidSurface`.
    */
   metrics?: Metrics;
+  /** Set only when this frame answers a gated `requestFrame` message (not set for the `step`
+   * message's frame, nor for the initial snapshot frame posted at the end of `boot()`); see
+   * frameGate.ts's `FrameRequestGate.settle`. */
+  requestId?: number;
 }
 
 export interface ErrorMessage {
@@ -104,4 +113,13 @@ export interface ErrorMessage {
   message: string;
 }
 
-export type WorkerToMainMessage = ReadyMessage | FrameMessage | ErrorMessage;
+/** Reply to a `requestFrame` that could not be answered with a `frame` (sim not ready/running, or
+ * an internal error while stepping/building the frame) -- still frees the request's in-flight slot
+ * in `frameGate.ts`'s `FrameRequestGate` so the gate can never deadlock waiting for a reply that
+ * would otherwise never come. */
+export interface FrameSkippedMessage {
+  type: "frameSkipped";
+  requestId: number;
+}
+
+export type WorkerToMainMessage = ReadyMessage | FrameMessage | ErrorMessage | FrameSkippedMessage;

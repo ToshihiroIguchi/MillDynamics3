@@ -73,6 +73,7 @@ function buildFrame(
   achievedTimeScale: number,
   subStepsPerSecondAchieved: number,
   subStepsPerSecondRequired: number,
+  requestId?: number,
 ): FrameMessage {
   const frame: FrameMessage = {
     type: "frame",
@@ -87,6 +88,7 @@ function buildFrame(
     fluidPositions: sim.fluidPositions(),
     fluidDye: sim.fluidDye(),
   };
+  if (requestId !== undefined) frame.requestId = requestId;
   const now = performance.now();
   if (now - lastSlowUpdateMs >= SLOW_UPDATE_INTERVAL_MS) {
     lastSlowUpdateMs = now;
@@ -101,8 +103,9 @@ function postFrame(
   achievedTimeScale: number,
   subStepsPerSecondAchieved: number,
   subStepsPerSecondRequired: number,
+  requestId?: number,
 ): void {
-  const frame = buildFrame(sim, achievedTimeScale, subStepsPerSecondAchieved, subStepsPerSecondRequired);
+  const frame = buildFrame(sim, achievedTimeScale, subStepsPerSecondAchieved, subStepsPerSecondRequired, requestId);
   const transfer: Transferable[] = [
     frame.ballPositions.buffer,
     frame.ballOrientations.buffer,
@@ -243,16 +246,26 @@ scope.onmessage = (event) => {
       break;
     }
     case "requestFrame": {
-      if (!sim || !running) return;
-      // Clamp so a long stall (e.g. a backgrounded tab) isn't folded into pendingSimTime as one
-      // huge catch-up demand.
-      const wallDt = Math.min(msg.wallDt, MAX_FRAME_DT);
-      pendingSimTime += wallDt * timeScale;
-      const subDt = sim.fixedSubDt();
-      const stepsRun = drainPendingSimTime(sim, subDt);
-      const achievedTimeScale = msg.wallDt > 0 ? (stepsRun * subDt) / msg.wallDt : timeScale;
-      const achievedSubStepsPerSecond = msg.wallDt > 0 ? stepsRun / msg.wallDt : 0;
-      postFrame(sim, achievedTimeScale, achievedSubStepsPerSecond, 1 / subDt);
+      if (!sim || !running) {
+        post({ type: "frameSkipped", requestId: msg.requestId });
+        return;
+      }
+      try {
+        // Clamp so a long stall (e.g. a backgrounded tab) isn't folded into pendingSimTime as one
+        // huge catch-up demand.
+        const wallDt = Math.min(msg.wallDt, MAX_FRAME_DT);
+        pendingSimTime += wallDt * timeScale;
+        const subDt = sim.fixedSubDt();
+        const stepsRun = drainPendingSimTime(sim, subDt);
+        const achievedTimeScale = msg.wallDt > 0 ? (stepsRun * subDt) / msg.wallDt : timeScale;
+        const achievedSubStepsPerSecond = msg.wallDt > 0 ? stepsRun / msg.wallDt : 0;
+        postFrame(sim, achievedTimeScale, achievedSubStepsPerSecond, 1 / subDt, msg.requestId);
+      } catch (err) {
+        // A thrown error (e.g. a wasm panic mid-step) must not permanently wedge the main thread's
+        // `FrameRequestGate` waiting for a reply that will never come -- still free the slot.
+        post({ type: "error", message: String(err) });
+        post({ type: "frameSkipped", requestId: msg.requestId });
+      }
       break;
     }
   }
