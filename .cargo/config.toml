@@ -1,0 +1,11 @@
+# Enables WASM SIMD (128-bit vector instructions) for the wasm32 target only -- native builds
+# (cargo test/bench, the perf_probe/oscillation_probe/infiltration_probe examples) are unaffected.
+# This is a real instruction-set feature the CPU either has or doesn't, not a `-C fast-math`-style
+# flag: it changes what instructions the compiler *can* emit (auto-vectorizing loops over
+# `glam::Vec2` arrays where the pattern allows), not floating-point rounding/associativity, so it
+# does not by itself change any solver output bit-for-bit relative to a scalar-only build. Widely
+# supported (Chrome/Firefox/Safari/Edge all ship WASM SIMD; see docs/PERF.md's 2026-09-27 "M6
+# solver pass" section for the browser measurement this was validated against). `wasm-pack build`
+# (scripts/build-wasm.sh/.ps1) picks this up automatically -- no invocation change needed.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

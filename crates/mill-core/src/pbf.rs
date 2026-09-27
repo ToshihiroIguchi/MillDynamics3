@@ -212,21 +212,67 @@ fn cross2(a: Vec2, b: Vec2) -> f32 {
     a.x * b.y - a.y * b.x
 }
 
-/// Builds each particle's neighbour-index list (mutual: `j` in `neighbors[i]` implies `i` in
-/// `neighbors[j]`) from `grid` (a [`UniformGrid`] already built over `x` with cell size `h`),
-/// keeping only candidate pairs actually within `h`. Factored out of [`FluidParticles::step_coupled`]
-/// (its step 2) so the viscosity solver's tests below can drive it in isolation without a full
-/// coupled sub-step.
-fn build_neighbor_lists(x: &[Vec2], grid: &UniformGrid, h: f32) -> Vec<Vec<u32>> {
-    let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); x.len()];
+/// Flat (CSR: compressed sparse row) neighbour-index lists for every particle -- `of(i)` is
+/// particle `i`'s neighbour list, in the same order [`build_neighbor_lists`]'s former
+/// `Vec<Vec<u32>>` representation produced (mutual: `j` in `of(i)` implies `i` in `of(j)`).
+/// One flat `Vec<u32>` allocation for the whole population instead of one small `Vec` per
+/// particle -- this population is rebuilt from scratch every sub-step (never incrementally
+/// updated), so, like [`crate::grid::UniformGrid`]'s own CSR rewrite (see that module's doc
+/// comment), there is no need to pay for `n` separate small allocations just to get a
+/// per-particle grouping.
+struct NeighborLists {
+    /// `offsets[i]..offsets[i + 1]` slices `nbrs` for particle `i`'s neighbours (`n + 1` entries,
+    /// the usual CSR trailing sentinel).
+    offsets: Vec<u32>,
+    nbrs: Vec<u32>,
+}
+
+impl NeighborLists {
+    #[inline]
+    fn of(&self, i: usize) -> &[u32] {
+        &self.nbrs[self.offsets[i] as usize..self.offsets[i + 1] as usize]
+    }
+}
+
+/// Builds each particle's neighbour-index list (mutual: `j` in `of(i)` implies `i` in `of(j)`)
+/// from `grid` (a [`UniformGrid`] already built over `x` with cell size `h`), keeping only
+/// candidate pairs actually within `h`. Factored out of [`FluidParticles::step_coupled`] (its
+/// step 2) so the viscosity solver's tests below can drive it in isolation without a full coupled
+/// sub-step.
+///
+/// Built as a directed edge list (`grid.for_each_candidate_pair`'s callback pushes both `(i, j)`
+/// and `(j, i)` for every pair within `h`, in that order, exactly as the former `Vec<Vec<u32>>`
+/// version appended to `neighbors[iu]` then `neighbors[ju]`), then grouped by source with a
+/// counting sort. A counting sort is stable, so each particle's neighbours end up in the exact
+/// order they were appended to the edge list -- bit-for-bit the same per-particle order the former
+/// per-particle `Vec::push` sequence produced, which matters for this crate's determinism
+/// convention (every accumulation below sums a particle's neighbour contributions in this order).
+fn build_neighbor_lists(x: &[Vec2], grid: &UniformGrid, h: f32) -> NeighborLists {
+    let n = x.len();
+    let mut edges: Vec<(u32, u32)> = Vec::new();
     grid.for_each_candidate_pair(|i, j| {
         let (iu, ju) = (i as usize, j as usize);
         if (x[iu] - x[ju]).length_squared() <= h * h {
-            neighbors[iu].push(j);
-            neighbors[ju].push(i);
+            edges.push((i, j));
+            edges.push((j, i));
         }
     });
-    neighbors
+
+    let mut offsets = vec![0u32; n + 1];
+    for &(src, _) in &edges {
+        offsets[src as usize + 1] += 1;
+    }
+    for k in 1..offsets.len() {
+        offsets[k] += offsets[k - 1];
+    }
+    let mut cursor = offsets.clone();
+    let mut nbrs = vec![0u32; edges.len()];
+    for &(src, dst) in &edges {
+        let pos = cursor[src as usize] as usize;
+        nbrs[pos] = dst;
+        cursor[src as usize] += 1;
+    }
+    NeighborLists { offsets, nbrs }
 }
 
 /// Real inner product `<a, b> = sum_i a_i . b_i` treating a `&[Vec2]` field as one flat `2n`-real
@@ -235,15 +281,16 @@ fn dot(a: &[Vec2], b: &[Vec2]) -> f32 {
     a.iter().zip(b).map(|(&ai, &bi)| ai.dot(bi)).sum()
 }
 
-/// Morris (1997) SPH viscous-Laplacian weights, laid out parallel to `neighbors` (`out[i][k]` is
-/// the weight of `neighbors[i][k]`):
+/// Morris (1997) SPH viscous-Laplacian weights, laid out parallel to `neighbors.nbrs` (`out[k]` is
+/// the weight of the directed edge `neighbors.nbrs[k]`, i.e. of `neighbors.of(i)[k - offsets[i]]`
+/// for whichever `i` that `k` falls under):
 ///
 /// ```text
 /// c_ij = m_j * (mu_i + mu_j) / (rho_i * rho_j)
 ///        * |x_ij . grad_W_ij| / (|x_ij|^2 + eta^2), eta^2 = VISCOSITY_ETA_FACTOR * h^2
 /// ```
 ///
-/// so that `(Lv)_i = sum_j c_ij * (v_i - v_j)` (see [`laplacian_apply`]) discretises `-(mu/rho) *
+/// so that `(Lv)_i = sum_j c_ij * (v_i - v_j)` (see [`laplacian_apply_into`]) discretises `-(mu/rho) *
 /// laplacian(v)` at particle `i`. This crate's fluid is single-phase (`mu_i = mu_j = mu` for every
 /// particle), so the `(mu_i + mu_j)` term is simply `2*mu` here, but the two-sided form is kept
 /// for clarity against the cited derivation. `c_ij >= 0` for every pair (each factor is
@@ -252,59 +299,68 @@ fn dot(a: &[Vec2], b: &[Vec2]) -> f32 {
 /// conjugate-gradient solve relies on.
 fn morris_weights(
     x: &[Vec2],
-    neighbors: &[Vec<u32>],
+    neighbors: &NeighborLists,
     density: &[f32],
     mass: f32,
     mu: f32,
     h: f32,
-) -> Vec<Vec<f32>> {
+) -> Vec<f32> {
     let eta2 = VISCOSITY_ETA_FACTOR * h * h;
-    neighbors
-        .iter()
-        .enumerate()
-        .map(|(i, js)| {
-            let rho_i = density[i].max(1e-6);
-            js.iter()
-                .map(|&j| {
-                    let ju = j as usize;
-                    let rho_j = density[ju].max(1e-6);
-                    let delta = x[i] - x[ju];
-                    let r = delta.length();
-                    let grad = spiky_grad(delta, r, h);
-                    let numerator = (mass * 2.0 * mu / (rho_i * rho_j)) * delta.dot(grad).abs();
-                    numerator / (delta.length_squared() + eta2)
-                })
-                .collect()
-        })
-        .collect()
+    let mut weights = vec![0.0f32; neighbors.nbrs.len()];
+    for i in 0..x.len() {
+        let rho_i = density[i].max(1e-6);
+        // `k` indexes both the CSR range (`neighbors.nbrs[k]`, to get the neighbour `ju`) and the
+        // output `weights[k]` at that same position, so a plain iterator/enumerate over one
+        // collection doesn't fit cleanly here.
+        #[allow(clippy::needless_range_loop)]
+        for k in neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize {
+            let ju = neighbors.nbrs[k] as usize;
+            let rho_j = density[ju].max(1e-6);
+            let delta = x[i] - x[ju];
+            let r = delta.length();
+            let grad = spiky_grad(delta, r, h);
+            let numerator = (mass * 2.0 * mu / (rho_i * rho_j)) * delta.dot(grad).abs();
+            weights[k] = numerator / (delta.length_squared() + eta2);
+        }
+    }
+    weights
 }
 
 /// Matrix-free application of the graph Laplacian `(Lv)_i = sum_j c_ij * (v_i - v_j)`, `weights`
-/// laid out parallel to `neighbors` (see [`morris_weights`]).
-fn laplacian_apply(neighbors: &[Vec<u32>], weights: &[Vec<f32>], v: &[Vec2]) -> Vec<Vec2> {
-    neighbors
-        .iter()
-        .zip(weights)
-        .enumerate()
-        .map(|(i, (js, cs))| {
-            let mut sum = Vec2::ZERO;
-            for (&j, &c) in js.iter().zip(cs) {
-                sum += c * (v[i] - v[j as usize]);
-            }
-            sum
-        })
-        .collect()
+/// laid out parallel to `neighbors.nbrs` (see [`morris_weights`]), writing into the caller-owned
+/// `out` (same length as `v`) instead of allocating a fresh `Vec` -- see
+/// [`solve_implicit_viscosity`]'s doc comment for why this matters (it is the innermost operator
+/// application of a conjugate-gradient loop run up to [`VISCOSITY_CG_MAX_ITERS`] times every
+/// sub-step).
+fn laplacian_apply_into(neighbors: &NeighborLists, weights: &[f32], v: &[Vec2], out: &mut [Vec2]) {
+    for i in 0..v.len() {
+        let mut sum = Vec2::ZERO;
+        // `k` indexes both the CSR range and `weights[k]` at that same position -- see
+        // `morris_weights`'s identical rationale.
+        #[allow(clippy::needless_range_loop)]
+        for k in neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize {
+            let j = neighbors.nbrs[k] as usize;
+            sum += weights[k] * (v[i] - v[j]);
+        }
+        out[i] = sum;
+    }
 }
 
-/// Applies the implicit-viscosity system operator `A = I + dt*L` to `v`.
-fn apply_viscosity_system(
-    neighbors: &[Vec<u32>],
-    weights: &[Vec<f32>],
+/// Applies the implicit-viscosity system operator `A = I + dt*L` to `v`, writing into `out`
+/// (using `lv_scratch` as scratch space for the intermediate `L*v` -- both caller-owned, see
+/// [`laplacian_apply_into`]'s doc comment).
+fn apply_viscosity_system_into(
+    neighbors: &NeighborLists,
+    weights: &[f32],
     dt: f32,
     v: &[Vec2],
-) -> Vec<Vec2> {
-    let lv = laplacian_apply(neighbors, weights, v);
-    v.iter().zip(&lv).map(|(&vi, &lvi)| vi + dt * lvi).collect()
+    lv_scratch: &mut [Vec2],
+    out: &mut [Vec2],
+) {
+    laplacian_apply_into(neighbors, weights, v, lv_scratch);
+    for i in 0..v.len() {
+        out[i] = v[i] + dt * lv_scratch[i];
+    }
 }
 
 /// Solves `(I + dt*L) v_new = v` in place by conjugate gradient, warm-started from `v` itself
@@ -322,8 +378,8 @@ fn apply_viscosity_system(
 /// equivalent to running the scalar algorithm twice -- just without the bookkeeping of splitting
 /// and re-merging the two components).
 fn solve_implicit_viscosity(
-    neighbors: &[Vec<u32>],
-    weights: &[Vec<f32>],
+    neighbors: &NeighborLists,
+    weights: &[f32],
     v: &mut [Vec2],
     dt: f32,
 ) -> u32 {
@@ -337,16 +393,25 @@ fn solve_implicit_viscosity(
     }
     let target = VISCOSITY_CG_TOLERANCE * b_norm;
 
-    let ax = apply_viscosity_system(neighbors, weights, dt, v);
+    // Every buffer this loop needs is allocated exactly once here (5 total), then reused for
+    // every one of up to [`VISCOSITY_CG_MAX_ITERS`] iterations via [`apply_viscosity_system_into`]
+    // -- the version this replaced allocated two fresh `Vec<Vec2>` per iteration (one inside its
+    // `laplacian_apply`, one for its `apply_viscosity_system`'s own return), up to ~100 short-
+    // lived allocations per call at this solver's iteration ceiling.
+    let n = v.len();
+    let mut lv_scratch = vec![Vec2::ZERO; n];
+    let mut ax = vec![Vec2::ZERO; n];
+    apply_viscosity_system_into(neighbors, weights, dt, v, &mut lv_scratch, &mut ax);
     let mut r: Vec<Vec2> = v.iter().zip(&ax).map(|(&bi, &axi)| bi - axi).collect();
     let mut p = r.clone();
+    let mut ap = vec![Vec2::ZERO; n];
     let mut rs_old = dot(&r, &r);
     if rs_old.sqrt() <= target {
         return 0;
     }
 
     for iter in 1..=VISCOSITY_CG_MAX_ITERS {
-        let ap = apply_viscosity_system(neighbors, weights, dt, &p);
+        apply_viscosity_system_into(neighbors, weights, dt, &p, &mut lv_scratch, &mut ap);
         let p_ap = dot(&p, &ap);
         if p_ap <= 0.0 || !p_ap.is_finite() {
             // Unreachable for a genuinely SPD operator; bail out rather than divide by ~0 if f32
@@ -381,7 +446,7 @@ fn solve_implicit_viscosity(
 fn mean_shear_rate(
     x: &[Vec2],
     v: &[Vec2],
-    neighbors: &[Vec<u32>],
+    neighbors: &NeighborLists,
     density: &[f32],
     mass: f32,
     h: f32,
@@ -394,7 +459,7 @@ fn mean_shear_rate(
     let mut count = 0u32;
     for i in 0..n {
         let (mut gxx, mut gxy, mut gyx, mut gyy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-        for &j in &neighbors[i] {
+        for &j in neighbors.of(i) {
             let ju = j as usize;
             let delta = x[i] - x[ju];
             let r = delta.length();
@@ -749,22 +814,48 @@ impl FluidParticles {
 
         // --- 3. Density-constraint solve (Jacobi-style: compute all deltas, then apply) -----
         // `iterations` is a floor here, not a fixed count -- see [`ADAPTIVE_MAX_EXTRA_ITERATIONS`].
+        //
+        // The density pass (former separate loop) and the lambda pass are fused into one loop
+        // over `i`'s neighbours: density accumulation only ever needs `density[i]` itself (not any
+        // other particle's), and the lambda pass's gradient sum doesn't depend on `density` at
+        // all except through that same `density[i]` -- so nothing here actually required them to
+        // be two separate full passes over every neighbour. Each accumulator (`rho`, `grad_self`,
+        // `sum_grad_sq`) still sums its neighbour's contributions in the exact order it always
+        // did (`neighbors.of(i)`'s order is unchanged), so this is a pure fusion, not a change in
+        // floating-point summation order. `grad_cache` additionally records each directed edge's
+        // raw `spiky_grad(delta, r, h)` (pre-`/rest_density`) so the delta_p pass below can reuse
+        // it instead of recomputing `delta`/`r`/`spiky_grad` a second time per edge -- safe because
+        // positions (`self.x`) are not mutated again until after that pass, later in this same
+        // outer iteration.
         let mut density = vec![0.0f32; n];
+        let mut lambda = vec![0.0f32; n];
+        let mut delta_p = vec![Vec2::ZERO; n];
+        let mut grad_cache = vec![Vec2::ZERO; neighbors.nbrs.len()];
         let base_iterations = iterations.max(1);
         let mut iter_count = 0u32;
         loop {
-            for i in 0..n {
-                let mut rho = mass * poly6(0.0, h);
-                for &j in &neighbors[i] {
-                    let r2 = (self.x[i] - self.x[j as usize]).length_squared();
-                    rho += mass * poly6(r2, h);
-                }
-                density[i] = rho;
-            }
-
-            let mut lambda = vec![0.0f32; n];
             let mut max_c = 0.0f32;
             for i in 0..n {
+                let mut rho = mass * poly6(0.0, h);
+                let mut grad_self = Vec2::ZERO;
+                let mut sum_grad_sq = 0.0f32;
+                // `k` indexes both the CSR range and `grad_cache[k]` at that same position -- see
+                // `morris_weights`'s identical rationale.
+                #[allow(clippy::needless_range_loop)]
+                for k in neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize {
+                    let ju = neighbors.nbrs[k] as usize;
+                    let delta = self.x[i] - self.x[ju];
+                    let r2 = delta.length_squared();
+                    rho += mass * poly6(r2, h);
+                    let r = delta.length();
+                    let raw_grad = spiky_grad(delta, r, h);
+                    grad_cache[k] = raw_grad;
+                    let grad = raw_grad / rest_density;
+                    grad_self += grad;
+                    sum_grad_sq += grad.length_squared();
+                }
+                density[i] = rho;
+
                 // Pressure-only constraint: `C_i = max(0, rho_i/rest_density - 1)`, so only
                 // *over*-dense particles are projected apart and a density-deficient one is left
                 // alone. Macklin & Muller's original PBF leaves `C_i` unclamped and relies on an
@@ -782,28 +873,18 @@ impl FluidParticles {
                 // explicit, bounded, and tunable independently of the incompressibility solve.
                 let c_i = (density[i] / rest_density - 1.0).max(0.0);
                 max_c = max_c.max(c_i);
-                let mut grad_self = Vec2::ZERO;
-                let mut sum_grad_sq = 0.0f32;
-                for &j in &neighbors[i] {
-                    let ju = j as usize;
-                    let delta = self.x[i] - self.x[ju];
-                    let r = delta.length();
-                    let grad = spiky_grad(delta, r, h) / rest_density;
-                    grad_self += grad;
-                    sum_grad_sq += grad.length_squared();
-                }
                 sum_grad_sq += grad_self.length_squared();
                 lambda[i] = -c_i / (sum_grad_sq + EPSILON_RELAX);
             }
 
-            let mut delta_p = vec![Vec2::ZERO; n];
             for i in 0..n {
                 let mut sum = Vec2::ZERO;
-                for &j in &neighbors[i] {
-                    let ju = j as usize;
-                    let delta = self.x[i] - self.x[ju];
-                    let r = delta.length();
-                    sum += (lambda[i] + lambda[ju]) * spiky_grad(delta, r, h);
+                // `k` indexes both the CSR range and `grad_cache[k]` at that same position -- see
+                // `morris_weights`'s identical rationale.
+                #[allow(clippy::needless_range_loop)]
+                for k in neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize {
+                    let ju = neighbors.nbrs[k] as usize;
+                    sum += (lambda[i] + lambda[ju]) * grad_cache[k];
                 }
                 delta_p[i] = sum / rest_density;
             }
@@ -849,11 +930,17 @@ impl FluidParticles {
             // `i` indexes both `self.x`/`self.v` (mutated in place, alongside `push_velocity_excess`)
             // and is looked up via the grid, so a plain iterator/enumerate over one collection
             // doesn't fit cleanly here.
+            //
+            // `nearby` is declared once outside this loop and `clear()`-ed per particle (retaining
+            // its allocation) rather than a fresh `Vec::new()` per particle -- this loop runs once
+            // per fluid particle every sub-step (thousands of times at this project's default
+            // fluid counts), so a fresh short-lived allocation each time was real, avoidable churn.
+            let mut nearby: Vec<u32> = Vec::new();
             #[allow(clippy::needless_range_loop)]
             for i in 0..n {
-                let mut nearby: Vec<u32> = Vec::new();
+                nearby.clear();
                 ball_grid.for_each_near(self.x[i], |b| nearby.push(b));
-                for b in nearby {
+                for &b in &nearby {
                     let b = b as usize;
                     let delta = self.x[i] - balls.x[b];
                     let dist = delta.length();
@@ -944,9 +1031,12 @@ impl FluidParticles {
             * COHESION_ACCEL_FACTOR
             * GRAVITY.abs();
         if cohesion_accel > 0.0 {
+            // `i` indexes `self.x`, `neighbors.of(i)`, and the output `cohesion_velocity_delta[i]`,
+            // so a plain iterator/enumerate over one collection doesn't fit cleanly here.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..n {
                 let mut pull = Vec2::ZERO;
-                for &j in &neighbors[i] {
+                for &j in neighbors.of(i) {
                     let ju = j as usize;
                     let delta = self.x[i] - self.x[ju];
                     let r = delta.length();
@@ -995,6 +1085,12 @@ impl FluidParticles {
             let count_per_ball = boundary_points_per_ball(balls.radius, dx) as usize;
             if !boundary_pos.is_empty() && h_adhesion > 0.0 {
                 let adhesion_accel = wettability * ADHESION_ACCEL_FACTOR * GRAVITY.abs();
+                // Both declared once outside the ball loop and `clear()`-ed per use (retaining
+                // their allocation) instead of a fresh `Vec::new()` per ball (`items`) or per
+                // boundary point (`nearby`, the more frequent of the two) -- see step 3.5's
+                // identical rationale.
+                let mut items: Vec<(usize, Vec2, f32)> = Vec::new();
+                let mut nearby: Vec<u32> = Vec::new();
                 for b in 0..balls.len() {
                     if !balls.x[b].is_finite() {
                         continue; // see the identical guard rationale in steps 3.5/6.5/6.6
@@ -1006,11 +1102,11 @@ impl FluidParticles {
                     // boundary points (routine: they are ~dx apart, well inside `h_adhesion` of
                     // each other at this project's typical resolutions) contributes once with its
                     // combined weight/direction, not once per boundary point.
-                    let mut items: Vec<(usize, Vec2, f32)> = Vec::new();
+                    items.clear();
                     for &bp in &boundary_pos[start..end] {
-                        let mut nearby: Vec<u32> = Vec::new();
+                        nearby.clear();
                         grid.for_each_near(bp, |j| nearby.push(j));
-                        for j in nearby {
+                        for &j in &nearby {
                             let ju = j as usize;
                             let delta = bp - self.x[ju]; // points from the fluid toward the ball
                             let r = delta.length();
@@ -1068,7 +1164,7 @@ impl FluidParticles {
                     let lever = ball_pull_dir * balls.radius;
                     coupling.angular_impulses[b] += balls.mass * cross2(lever, dv_b);
 
-                    for (ju, _dir, w) in items {
+                    for &(ju, _dir, w) in &items {
                         let frac = w / weight_sum;
                         // `-dv_b` points toward the ball (opposite `ball_pull_dir`), i.e. exactly
                         // `fluid_pull_dir_sum`'s direction -- consistent with each pair's own
@@ -1242,24 +1338,29 @@ impl FluidParticles {
                 // though `self.v` is updated in place as the loop progresses.
                 let coupling_fluid_grid = UniformGrid::build(&self.x, h_c.max(1e-6));
                 let i_b = balls.inertia;
+                // Both declared once outside the ball loop and `clear()`-ed per ball (retaining
+                // their allocation) instead of a fresh `Vec::new()`/`Vec::with_capacity` per ball
+                // -- see step 3.5's identical rationale.
+                let mut nearby: Vec<u32> = Vec::new();
+                let mut items: Vec<(usize, Vec2, f32)> = Vec::new();
                 for b in 0..balls.len() {
                     if !balls.x[b].is_finite() {
                         // See the identical rationale in step 6.6 below: a non-finite ball
                         // position must never manufacture a plausible-looking reaction.
                         continue;
                     }
-                    let mut nearby: Vec<u32> = Vec::new();
+                    nearby.clear();
                     coupling_fluid_grid.for_each_near(balls.x[b], |j| nearby.push(j));
                     if nearby.is_empty() {
                         continue;
                     }
-                    let mut items: Vec<(usize, Vec2, f32)> = Vec::with_capacity(nearby.len());
+                    items.clear();
                     let mut m_ent = 0.0f32;
                     let mut r_sum = Vec2::ZERO;
                     let mut v_sum = Vec2::ZERO;
                     let mut i_ent = 0.0f32;
                     let mut l_sum = 0.0f32;
-                    for j in nearby {
+                    for &j in &nearby {
                         let ju = j as usize;
                         let r_i = self.x[ju] - balls.x[b];
                         let r2 = r_i.length_squared();
@@ -1436,6 +1537,11 @@ impl FluidParticles {
         // before, or the reconstruction would discard it).
         if !balls.is_empty() && balls.radius > 0.0 {
             let area = std::f32::consts::PI * balls.radius * balls.radius;
+            // Both declared once outside the ball loop and `clear()`-ed per ball (retaining their
+            // allocation) instead of a fresh `Vec::new()`/`Vec::with_capacity` per ball -- see
+            // step 3.5's identical rationale.
+            let mut nearby: Vec<u32> = Vec::new();
+            let mut weights: Vec<(usize, f32)> = Vec::new();
             for b in 0..balls.len() {
                 if !balls.x[b].is_finite() {
                     // See the identical guard rationale in steps 3.5/6.5 above: a non-finite ball
@@ -1444,14 +1550,14 @@ impl FluidParticles {
                     // fluid neighbours near the grid origin).
                     continue;
                 }
-                let mut nearby: Vec<u32> = Vec::new();
+                nearby.clear();
                 grid.for_each_near(balls.x[b], |j| nearby.push(j));
                 if nearby.is_empty() {
                     continue;
                 }
                 let mut rho_local = 0.0f32;
-                let mut weights: Vec<(usize, f32)> = Vec::with_capacity(nearby.len());
-                for j in nearby {
+                weights.clear();
+                for &j in &nearby {
                     let ju = j as usize;
                     let r2 = (balls.x[b] - self.x[ju]).length_squared();
                     let w = mass * poly6(r2, h);
@@ -1509,7 +1615,7 @@ impl FluidParticles {
                 // Acts through the ball's centroid, so it contributes no angular impulse.
                 let impulse_on_ball = -rho_eff * area * g_eff * dt;
                 coupling.impulses[b] += impulse_on_ball;
-                for (ju, w) in weights {
+                for &(ju, w) in &weights {
                     let frac = w / rho_local;
                     let dv = -(impulse_on_ball * frac) / mass;
                     self.v[ju] += dv;
@@ -1523,9 +1629,12 @@ impl FluidParticles {
         let mut viscosity_iterations = 0u32;
         // Recompute density once more at the final (post-boundary-projection) positions, so both
         // the viscosity solve and the shear-rate readout below use up-to-date neighbour densities.
+        // `i` indexes both `self.x`/`neighbors.of(i)` and the output `density[i]`, so a plain
+        // iterator/enumerate over one collection doesn't fit cleanly here.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             let mut rho = mass * poly6(0.0, h);
-            for &j in &neighbors[i] {
+            for &j in neighbors.of(i) {
                 let r2 = (self.x[i] - self.x[j as usize]).length_squared();
                 rho += mass * poly6(r2, h);
             }

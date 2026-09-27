@@ -96,8 +96,10 @@ defaults: roughly 20-45%** (of radius) at `dem_iterations = 2`, the current defa
 actively-cascading charge does not fully converge its contact network in only 2 Gauss-Seidel
 passes per sub-step. This is a real, known trade-off (`dem_iterations` was halved, from 4 to 2,
 when `substeps` was doubled, to keep DEM cost roughly flat while improving the tunnelling-risk
-ratio below) — raising `dem_iterations` back up reduces this at a real-time performance cost; left
-as-is pending the M6 performance pass creating headroom. A companion **Max ball-wall overlap (of
+ratio below) — raising `dem_iterations` back up reduces this at a real-time performance cost. The
+2026-09-27 M6 solver pass (`docs/PERF.md`) mostly bought back headroom on the PBF/coupling side, not
+the isolated DEM broad-phase specifically (its own `dem_step` micro-benchmark measured a small
+regression there, investigated and accepted -- see that section); left as-is. A companion **Max ball-wall overlap (of
 radius)** reads much smaller with no lifters (~1-2%) but **~31-33% with `lifters.count = 8`** — see
 `docs/PHYSICS.md` §9 for that specific, separately-noted finding.
 
@@ -236,9 +238,10 @@ These were also raised by the same review and are documented project scope decis
 Two items from the same review turned out to be real, not deliberate, and are fixed as of this pass
 rather than staying deferred:
 
-- **Real-time performance** — the full M6 SIMD/wasm-opt/neighbour-list-reuse pass still has not been
-  done, but `Achieved speed` reading well under `1.0x` (0.12x measured) was compounded by two real,
-  independently-fixed problems, not solely "M6 not done yet": the worker recomputed
+- **Real-time performance** — at the time of this pass, the full M6 SIMD/wasm-opt/neighbour-list-reuse
+  work had not been done yet (it has since landed, 2026-09-27, `docs/PERF.md`), but `Achieved speed`
+  reading well under `1.0x` (0.12x measured) was compounded by two real, independently-fixed problems,
+  not solely "M6 not done yet": the worker recomputed
   `fluidSurface()`/`metricsJson()` unconditionally every rendered frame regardless of render rate
   (now throttled to ~15 Hz, `web/src/worker.ts`), and the default ball/fluid particle counts were
   tuned for fidelity, not speed. The default "Realtime" quality preset now reaches ~1.0-1.1x; see
