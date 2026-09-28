@@ -1446,6 +1446,52 @@ state after calling `compute`:
     Reproduce: `cargo run -p mill-core --release --example oscillation_probe --
     --percent-critical 70 --slurry off --settle-s 3 --measure-s 10 --stop-after-settle
     --release-friction-ball-wall 0.05 --release-friction-ball-ball 0.05 --seed 1`.
+  - **User rejected the release-only finding (2026-09-29): needs the crossing swing DURING
+    continuous rotation specifically, not as a stop-transient.** An extensive further search of
+    driven-rotation (never-stopped) mechanisms all failed to produce a robust `crosses_bottom =
+    true`: high static + low kinetic wall friction (the classic "climbs while stuck, breaks free,
+    slides, overshoots" mental model -- still one-sided, and *smaller* amplitude than the Phase-1
+    recipe); low ball-ball friction with normal/high wall friction (a detached avalanche layer
+    flowing freely); fill fraction 0.5-0.7 (rigid-block precession); a 2:1 parametric-resonance
+    check (`%Nc` 55-75, where the rotation period is close to twice the pendulum period -- no
+    resonance effect, bias angle stayed pinned at ~163.5 deg across the whole range); and a
+    combined wall-stick-slip + low-ball-ball-friction avalanche. A structural explanation for why:
+    a continuously rotating wall's "stuck" state ties the ball to the *wall's own nonzero,
+    constantly-refreshed speed*, not to rest -- every time the slip speed re-approaches zero the
+    ball re-locks near wall speed rather than continuing to build independent momentum, capping
+    achievable swing energy near `~(wall speed)^2` regardless of the friction law's shape (this is
+    different from the release case, where `v_t = 0` means the wall itself, and thus the "target"
+    speed to re-lock to, is at rest). Two alternative model extensions were proposed (a
+    torque-limited/compliant-motor dynamic-drum model; an azimuthally wall-friction-textured
+    liner) and both declined by the user as too specialized a modelling assumption.
+  - **Literature search (2026-09-29, WebSearch): the classic single-species "slumping regime" is
+    exactly this model's one-sided result; a genuinely symmetric driven oscillation in the
+    literature needs a second granular fraction this simulator doesn't have.** The rotating-drum
+    granular-physics literature describes the classic low-Froude-number "slumping regime" (e.g.
+    Rajchenbach-style avalanche dynamics) as the free-surface slope oscillating *between the angle
+    of repose and the angle of marginal stability* -- i.e. the same one-sided sawtooth this
+    project's DEM already reproduces (Phase 1's recipe); it is not described as crossing the
+    drum's low point either. A real, literature-documented *symmetric* "self-oscillating"/
+    "auto-excited" pulsation during continuous rotation exists (Deineka et al.,
+    Eastern-European Journal of Enterprise Technologies, "Establishing the rotation speed
+    variation range limits for auto-excitation of self-oscillating grinding in a tumbling mill";
+    "Revealing the mechanism of stability loss of a two-fraction granular flow in a rotating
+    drum"), but its driving mechanism is **dilatancy between two granular fractions** (coarse
+    grinding media + fine ground material/ore), not wall friction at all -- this simulator has no
+    second solid granular phase (only media balls + a continuum SPH liquid). The user's own
+    reference, however, was water + media only (no ore/fines), which this specific mechanism does
+    not explain either. A related, independently-sourced term from wet-milling literature --
+    "sloshing" (the charge moves as a liquid rather than tumbling as a coherent granular mass when
+    slurry solids content is below ~70 wt%) -- prompted a follow-up test: low media fill
+    (0.05-0.15) with high slurry fill (0.6-0.8), tracking the *slurry population's own centroid*
+    (`oscillation_probe.rs`'s new `fluid_centroid`, independent of the sparse ball population).
+    Result: weak and inconsistent (`symmetry_ratio` only 0.07-0.39 across the configs that crossed
+    at all, vs. 0.55-0.88 for the genuine release finding above) -- not a robust phenomenon, though
+    not conclusively ruled out either (only the fluid's mass-weighted centroid was checked, not its
+    free-surface extent, which a real sloshing wave crest might show more clearly). **Status: open,
+    unresolved** -- no driven-rotation mechanism tried so far reproduces a robust symmetric
+    low-point-crossing swing; see the project memory entry for this investigation for the
+    prioritized list of what to try next.
 - **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
   stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
   lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above
