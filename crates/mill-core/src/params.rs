@@ -140,10 +140,57 @@ pub struct MediaParams {
     pub density_kg_m3: f32,
     pub restitution_ball_ball: f32,
     pub restitution_ball_wall: f32,
+    /// Kinetic (sliding) Coulomb friction coefficient. The contact's friction cone limit at high
+    /// relative tangential speed -- see `friction_ball_ball_static`'s doc comment for how this
+    /// blends with the static coefficient.
     pub friction_ball_ball: f32,
+    /// Kinetic (sliding) Coulomb friction coefficient; see `friction_ball_wall_static`.
     pub friction_ball_wall: f32,
+    /// Static (stick) Coulomb friction coefficient, contact-point tangential speed -> 0. Must be
+    /// `>= friction_ball_ball`: physically, static friction is never lower than kinetic friction
+    /// (a resting contact grips at least as well as a sliding one). Defaults equal to
+    /// `friction_ball_ball` (no stick/slip distinction) so an older client's JSON, which predates
+    /// this field, still deserializes to the exact prior single-coefficient behaviour -- see
+    /// `dem.rs`'s `effective_friction` for how the two blend continuously with relative speed
+    /// (2026-09-28's large-amplitude-surging investigation, docs/PHYSICS.md ss9: a hard
+    /// static/kinetic switch was considered and rejected in favour of this smooth blend, which
+    /// avoids introducing a velocity discontinuity into a fixed-substep solver).
+    #[serde(default = "default_friction_ball_ball")]
+    pub friction_ball_ball_static: f32,
+    /// Static (stick) Coulomb friction coefficient; see `friction_ball_ball_static`'s doc comment
+    /// (same rationale, `friction_ball_wall`'s wall-contact counterpart).
+    #[serde(default = "default_friction_ball_wall")]
+    pub friction_ball_wall_static: f32,
+    /// Relative tangential contact-point speed (m/s) at which the effective friction coefficient
+    /// has decayed roughly halfway from `*_static` toward its paired kinetic coefficient (see
+    /// `dem.rs`'s `effective_friction`). Small relative to a typical wall speed
+    /// (`drum.radius_m * omega`, of order 0.1-2 m/s across this project's speed range) so the
+    /// blend is sharp enough to still produce a stick/slip-like grip-then-release cycle, but never
+    /// introduces an actual discontinuity.
+    #[serde(default = "default_friction_velocity_scale_m_s")]
+    pub friction_velocity_scale_m_s: f32,
     /// Rolling-resistance coefficient (dimensionless torque coefficient).
     pub rolling_friction: f32,
+}
+
+/// `#[serde(default = ...)]` target for [`MediaParams::friction_ball_ball_static`] -- must match
+/// `MediaParams::default()`'s own `friction_ball_ball` value, not an arbitrary constant, so an
+/// older client's JSON (predating this field) deserializes to the exact prior no-stick-distinction
+/// behaviour rather than some other static/kinetic split it never asked for.
+fn default_friction_ball_ball() -> f32 {
+    0.25
+}
+
+/// `#[serde(default = ...)]` target for [`MediaParams::friction_ball_wall_static`]; see
+/// `default_friction_ball_ball`'s doc comment for why this must track `friction_ball_wall`'s own
+/// default rather than being an arbitrary constant.
+fn default_friction_ball_wall() -> f32 {
+    0.35
+}
+
+/// `#[serde(default = ...)]` target for [`MediaParams::friction_velocity_scale_m_s`].
+fn default_friction_velocity_scale_m_s() -> f32 {
+    0.02
 }
 
 impl Default for MediaParams {
@@ -168,6 +215,11 @@ impl Default for MediaParams {
             restitution_ball_wall: 0.5,
             friction_ball_ball: 0.25,
             friction_ball_wall: 0.35,
+            // Equal to the kinetic coefficients above: no stick/slip distinction by default, exact
+            // prior single-coefficient behaviour (see `friction_ball_ball_static`'s doc comment).
+            friction_ball_ball_static: default_friction_ball_ball(),
+            friction_ball_wall_static: default_friction_ball_wall(),
+            friction_velocity_scale_m_s: default_friction_velocity_scale_m_s(),
             rolling_friction: 0.01,
         }
     }
@@ -198,11 +250,27 @@ impl MediaParams {
         for (name, mu) in [
             ("friction_ball_ball", self.friction_ball_ball),
             ("friction_ball_wall", self.friction_ball_wall),
+            ("friction_ball_ball_static", self.friction_ball_ball_static),
+            ("friction_ball_wall_static", self.friction_ball_wall_static),
             ("rolling_friction", self.rolling_friction),
         ] {
             if !(mu >= 0.0 && mu.is_finite()) {
                 return Err(format!("media.{name} must be >= 0"));
             }
+        }
+        if self.friction_ball_ball_static < self.friction_ball_ball {
+            return Err(
+                "media.friction_ball_ball_static must be >= media.friction_ball_ball".into(),
+            );
+        }
+        if self.friction_ball_wall_static < self.friction_ball_wall {
+            return Err(
+                "media.friction_ball_wall_static must be >= media.friction_ball_wall".into(),
+            );
+        }
+        if !(self.friction_velocity_scale_m_s > 0.0 && self.friction_velocity_scale_m_s.is_finite())
+        {
+            return Err("media.friction_velocity_scale_m_s must be > 0".into());
         }
         Ok(())
     }

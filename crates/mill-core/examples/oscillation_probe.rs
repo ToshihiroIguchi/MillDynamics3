@@ -36,10 +36,15 @@ const WALL_ADJACENT_BALL_RADII: f32 = 1.5;
 
 struct Args {
     percent_critical: f32,
+    ball_diameter_mm: f32,
+    drum_diameter_mm: f32,
     slurry_enabled: bool,
     viscosity_pa_s: f32,
     friction_ball_wall: f32,
     friction_ball_ball: f32,
+    friction_ball_wall_static: Option<f32>,
+    friction_ball_ball_static: Option<f32>,
+    friction_velocity_scale_m_s: f32,
     rolling_friction: f32,
     fill_fraction: f32,
     slurry_fill_fraction: f32,
@@ -57,10 +62,15 @@ impl Args {
     fn parse() -> Self {
         let mut a = Args {
             percent_critical: 20.0,
+            ball_diameter_mm: 63.0,
+            drum_diameter_mm: 1000.0,
             slurry_enabled: true,
             viscosity_pa_s: 50.0,
             friction_ball_wall: 0.35,
             friction_ball_ball: 0.25,
+            friction_ball_wall_static: None,
+            friction_ball_ball_static: None,
+            friction_velocity_scale_m_s: 0.02,
             rolling_friction: 0.01,
             fill_fraction: 0.30,
             slurry_fill_fraction: 0.35,
@@ -83,6 +93,8 @@ impl Args {
             };
             match flag.as_str() {
                 "--percent-critical" => a.percent_critical = next_f32(),
+                "--ball-diameter-mm" => a.ball_diameter_mm = next_f32(),
+                "--drum-diameter-mm" => a.drum_diameter_mm = next_f32(),
                 "--slurry" => {
                     let v = args.next().expect("--slurry needs on/off");
                     a.slurry_enabled = v == "on";
@@ -90,6 +102,9 @@ impl Args {
                 "--viscosity" => a.viscosity_pa_s = next_f32(),
                 "--friction-ball-wall" => a.friction_ball_wall = next_f32(),
                 "--friction-ball-ball" => a.friction_ball_ball = next_f32(),
+                "--friction-ball-wall-static" => a.friction_ball_wall_static = Some(next_f32()),
+                "--friction-ball-ball-static" => a.friction_ball_ball_static = Some(next_f32()),
+                "--friction-velocity-scale" => a.friction_velocity_scale_m_s = next_f32(),
                 "--rolling-friction" => a.rolling_friction = next_f32(),
                 "--fill" => a.fill_fraction = next_f32(),
                 "--slurry-fill" => a.slurry_fill_fraction = next_f32(),
@@ -103,8 +118,11 @@ impl Args {
                 "--csv" => a.csv_path = Some(args.next().expect("--csv needs a path")),
                 "--help" | "-h" => {
                     println!(
-                        "Flags: --percent-critical <f32> --slurry <on|off> --viscosity <f32> \
+                        "Flags: --percent-critical <f32> --ball-diameter-mm <f32> \
+                         --drum-diameter-mm <f32> --slurry <on|off> --viscosity <f32> \
                          --friction-ball-wall <f32> --friction-ball-ball <f32> \
+                         --friction-ball-wall-static <f32> --friction-ball-ball-static <f32> \
+                         --friction-velocity-scale <f32> \
                          --rolling-friction <f32> --fill <f32> --slurry-fill <f32> \
                          --restitution-wall <f32> --lifters <u32> --max-balls <u32> \
                          --resolution <u32> --seed <u64> --settle-s <f32> --measure-s <f32> \
@@ -136,14 +154,23 @@ fn main() {
     let args = Args::parse();
 
     let mut params = Params::default();
+    params.mill.diameter_m = args.drum_diameter_mm / 1000.0;
     params.mill.speed_mode = SpeedMode::PercentCritical;
     params.mill.speed_value = args.percent_critical;
+    params.media.ball_diameter_m = args.ball_diameter_mm / 1000.0;
     params.mill.direction = Direction::CounterClockwise;
     params.lifters.count = args.lifters_count;
     params.slurry.enabled = args.slurry_enabled;
     params.slurry.viscosity_pa_s = args.viscosity_pa_s;
     params.media.friction_ball_wall = args.friction_ball_wall;
     params.media.friction_ball_ball = args.friction_ball_ball;
+    params.media.friction_ball_wall_static = args
+        .friction_ball_wall_static
+        .unwrap_or(args.friction_ball_wall);
+    params.media.friction_ball_ball_static = args
+        .friction_ball_ball_static
+        .unwrap_or(args.friction_ball_ball);
+    params.media.friction_velocity_scale_m_s = args.friction_velocity_scale_m_s;
     params.media.rolling_friction = args.rolling_friction;
     params.media.fill_fraction = args.fill_fraction;
     params.media.restitution_ball_wall = args.restitution_wall;
@@ -479,6 +506,43 @@ fn report(args: &Args, samples: &[Sample]) {
         let pendulum_period_s = std::f32::consts::TAU * (radius_mean / 9.81).sqrt();
         println!(
             "pendulum sanity check: mean centroid radius={radius_mean:.3} m => 2*pi*sqrt(R/g) = {pendulum_period_s:.3} s"
+        );
+    }
+
+    // Symmetry about the drum's vertical low point (180 deg in this convention -- see
+    // `to_vertical_degrees`'s doc comment): a genuine pendulum-style "rocks through the bottom and
+    // back" surge should spend time on *both* sides of 180 deg with comparable extents, not just
+    // wobble within one side while sitting at a rotation-carried steady-state offset (the ordinary
+    // cascading toe/shoulder asymmetry). Uses the *raw* (not cumulatively unwrapped) per-sample
+    // signed offset from 180 deg, since this is about instantaneous position relative to the
+    // physical bottom of the drum, not cumulative drift.
+    let offsets_from_bottom: Vec<f32> = samples
+        .iter()
+        .map(|s| s.centroid_deg)
+        .filter(|v| v.is_finite())
+        // `deg` is already confined to a single [0, 360) period (`to_vertical_degrees` ends in
+        // `.rem_euclid(360.0)`), so the naive difference from the 180 deg reference is already the
+        // shortest signed angular distance -- no further wrapping needed (and wrapping it again, an
+        // earlier bug here, corrupted small negative offsets like -14.9 into +165.1).
+        .map(|deg| deg - 180.0) // in [-180, 180)
+        .collect();
+    if !offsets_from_bottom.is_empty() {
+        let max_offset = offsets_from_bottom.iter().cloned().fold(f32::MIN, f32::max);
+        let min_offset = offsets_from_bottom.iter().cloned().fold(f32::MAX, f32::min);
+        // Positive offset = one side of the drum, negative = the other (sign is arbitrary, tied to
+        // `to_vertical_degrees`'s convention, not "left"/"right" in the viewer's own frame).
+        let side_a_extent = max_offset.max(0.0);
+        let side_b_extent = (-min_offset).max(0.0);
+        let crosses_bottom = side_a_extent > 0.5 && side_b_extent > 0.5;
+        let symmetry_ratio = if side_a_extent.max(side_b_extent) > 1e-6 {
+            side_a_extent.min(side_b_extent) / side_a_extent.max(side_b_extent)
+        } else {
+            0.0
+        };
+        println!(
+            "vertical-crossing symmetry: side_a_extent={side_a_extent:.2} deg, side_b_extent={side_b_extent:.2} \
+             deg, crosses_bottom={crosses_bottom}, symmetry_ratio={symmetry_ratio:.2} (1.0 = perfectly \
+             symmetric both-side swing through the drum's low point, 0.0 = confined entirely to one side)"
         );
     }
 

@@ -1352,6 +1352,53 @@ state after calling `compute`:
     (which would add a mechanism for even more pronounced stick-slip and a wider stable parameter
     band) remains a possible future addition if a wider/more-robust surging band is ever needed, not
     a blocker for reproducing the effect today.
+  - **Static/kinetic friction split added (2026-09-28), but a symmetric both-side "rocks through
+    the drum's low point" swing was still not reproduced.** A user report described a real wet
+    mill's charge swinging left and right by roughly equal angles (i.e. spending comparable time,
+    and reaching comparable extents, on *both* sides of the drum's vertical low point), distinct
+    from the one-sided wobble measured above (every centroid-angle trace so far sits at a
+    steady-state offset toward the ascending/ "up" side, wobbling *within* that one side, never
+    crossing back past vertical to the other). Two changes followed:
+    1. `MediaParams` gained `friction_ball_ball_static`/`friction_ball_wall_static` (defaulting to
+       their existing kinetic counterparts -- an old client's JSON deserializes to the exact prior
+       single-coefficient behaviour) and `friction_velocity_scale_m_s`. `dem.rs`'s new
+       `effective_friction(mu_kinetic, mu_static, v_t, velocity_scale)` blends the two with
+       `mu_kinetic + (mu_static - mu_kinetic) * exp(-(v_t/velocity_scale)^2)` -- smooth (an even,
+       everywhere-differentiable function of the contact's relative tangential speed `v_t`) rather
+       than a hard Karnopp-style if/else switch, specifically chosen over a hard switch (an earlier
+       version of this plan) to avoid injecting a velocity discontinuity into step 5's fixed-
+       substep, per-contact-then-resync solve, which can make a contact chatter between "just
+       stuck" and "just slipping" every sub-step at the switch boundary. Verified bit-exact for
+       every shipped default via `examples/perf_probe.rs`'s hash oracle (identical hashes,
+       `git stash`-compared same-session) -- this is a strictly additive, opt-in capability.
+    2. `oscillation_probe.rs` gained `--friction-ball-wall-static`/`--friction-ball-ball-static`/
+       `--friction-velocity-scale`, `--ball-diameter-mm`/`--drum-diameter-mm` (to test other mill
+       scales), and a "vertical-crossing symmetry" report line (extents of the raw centroid-angle
+       offset from the 180 deg low point on each side, and whether the trace crosses it at all).
+    Swept broadly (all wet, no lifters): `%Nc` 1-80 at the shipped 63 mm ball / 1 m drum scale,
+    `%Nc` 10-50 at a 2 mm ball / 63 mm drum scale (the user's own earlier small-scale experiment --
+    note this scale needs `simulation.resolution` capped low, e.g. 10, or the auto-raised fluid
+    resolution makes a CLI sweep impractically slow), viscosity from thick (50 Pa*s) down to real
+    water's (~0.001 Pa*s), and -- with the new split -- `friction_ball_wall_static` up to 2.0 (a
+    physically extreme value; most real material pairs' static coefficient is below ~0.8) crossed
+    with `friction_ball_ball_static` up to 1.5. In every one of these runs (~100 total), the
+    centroid-angle trace's `side_a_extent`/`side_b_extent` symmetry metric came back one-sided
+    (`crosses_bottom=false`): the mean position always sits 10-35 deg to one side of vertical, and
+    the oscillation on top of that mean stays confined to a 3-15 deg window without ever crossing
+    back through the low point to the other side. The likely reason: a *continuously rotating* wall
+    inherently carries the charge toward the ascending side (that carry is exactly what drives
+    cascading at all), so the charge's time-averaged position cannot sit at vertical -- the
+    static/kinetic split changes how abruptly the charge grips and releases the wall, and how large
+    the resulting wobble is, but doesn't remove that one-sided bias, because the bias's cause (net
+    angular momentum injection from a one-directional wall) is unrelated to which friction law is
+    used. Tested down to `%Nc = 1` (near-zero net rotation) with no different outcome -- the charge
+    just settles into a small, still-one-sided jitter rather than swinging. **Not yet tried**:
+    releasing the charge from an off-center/lifted position with the drum stationary (a genuine
+    free-pendulum release, rather than a steadily-driven wall), which might be closer to what
+    produces a real two-sided swing. No default values were changed by this investigation; the
+    static/kinetic friction capability is available for future use (e.g. a UI control, or lifter-
+    driven surging) but is not, on its own, the missing piece for a symmetric low-point-crossing
+    swing.
 - **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
   stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
   lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above

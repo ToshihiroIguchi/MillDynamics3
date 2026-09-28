@@ -25,6 +25,8 @@ This reference documents every user-facing simulation parameter. The table data 
 | `media.friction_ball_wall` | Friction (ball-wall) | — | 0.35 | 0–2 | 0.01 | Coefficient of kinetic friction for ball–wall contact. |
 | `media.rolling_friction` | Rolling friction | — | 0.01 | 0–1 | 0.001 | Rolling-resistance coefficient (dimensionless torque coefficient). |
 
+Not yet UI-exposed (no `schema.ts` entry): `media.friction_ball_ball_static`/`media.friction_ball_wall_static` (static/stick Coulomb friction coefficients, each defaulting to its kinetic counterpart above -- no behavior change until set higher) and `media.friction_velocity_scale_m_s` (default 0.02 m/s, the relative-speed scale over which friction blends from the static to the kinetic coefficient). See `dem.rs`'s `effective_friction` and docs/PHYSICS.md §9's 2026-09-28 entry.
+
 ## Lifters Parameters
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |

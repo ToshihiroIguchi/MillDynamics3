@@ -93,6 +93,35 @@ fn impact_energy_bin(e: f32) -> Option<usize> {
     Some(idx.min(IMPACT_ENERGY_HISTOGRAM_BINS - 1))
 }
 
+/// Blends a contact's static and kinetic Coulomb friction coefficients into one effective
+/// coefficient, continuous (in fact smooth: an even function of `v_t`, so no kink at `v_t = 0`)
+/// in the relative tangential contact-point speed `v_t` (m/s) -- `mu_static` as `v_t -> 0`,
+/// `mu_kinetic` for `|v_t|` large relative to `velocity_scale_m_s`. Used in place of a hard
+/// Karnopp-style if/else switch between the two regimes specifically to avoid introducing a
+/// velocity discontinuity into step 5's fixed-substep, per-contact-then-resync solve (a
+/// discontinuous switch can make a contact oscillate between "just stuck" and "just slipping"
+/// every sub-step at the boundary, rather than settling into one regime) -- see
+/// docs/PHYSICS.md ss9's 2026-09-28 large-amplitude-surging entry for the reasoning and the
+/// alternative (hard switch) this was chosen over.
+///
+/// `mu_static == mu_kinetic` (this project's shipped default, see
+/// [`crate::params::MediaParams::friction_ball_ball_static`]'s doc comment) makes this an exact,
+/// `v_t`-independent constant equal to that shared value -- bit-identical to the single-
+/// coefficient friction this function replaces, for every existing caller that has not opted into
+/// a static/kinetic split.
+#[inline]
+fn effective_friction(mu_kinetic: f32, mu_static: f32, v_t: f32, velocity_scale_m_s: f32) -> f32 {
+    if mu_static <= mu_kinetic {
+        // Also the `mu_static == mu_kinetic` fast path (the shipped default): skips the
+        // `exp`/division below entirely, and is exact (no float error from a `weight * 0.0`
+        // pass-through) rather than merely bit-close.
+        return mu_kinetic;
+    }
+    let ratio = v_t / velocity_scale_m_s;
+    let weight = (-(ratio * ratio)).exp(); // 1.0 at v_t=0, -> 0.0 as |v_t| grows.
+    mu_kinetic + (mu_static - mu_kinetic) * weight
+}
+
 /// Per-sub-step DEM solver diagnostics (docs/PLAN.md ss3.5), returned by
 /// [`DemState::step_with_external_forces`]. Everything here is a *per-metre-of-mill-depth*
 /// quantity, consistent with this crate's unit-depth disc convention ([`ball_mass`]); a caller
@@ -672,7 +701,13 @@ impl DemState {
                 continue;
             }
             let raw = -v_t * dt / w_sum_t;
-            let max_mag = media.friction_ball_ball * lambda_n;
+            let mu = effective_friction(
+                media.friction_ball_ball,
+                media.friction_ball_ball_static,
+                v_t,
+                media.friction_velocity_scale_m_s,
+            );
+            let max_mag = mu * lambda_n;
             let d_lambda_t = raw.clamp(-max_mag, max_mag);
 
             balls.x[iu] += w * d_lambda_t * t_hat;
@@ -711,7 +746,13 @@ impl DemState {
                 continue;
             }
             let raw = -v_t * dt / w_sum_t;
-            let max_mag = media.friction_ball_wall * lambda_n;
+            let mu = effective_friction(
+                media.friction_ball_wall,
+                media.friction_ball_wall_static,
+                v_t,
+                media.friction_velocity_scale_m_s,
+            );
+            let max_mag = mu * lambda_n;
             let d_lambda_t = raw.clamp(-max_mag, max_mag);
 
             balls.x[iu] += w * d_lambda_t * t_hat;
@@ -920,6 +961,38 @@ mod tests {
 
     fn media_defaults() -> MediaParams {
         MediaParams::default()
+    }
+
+    #[test]
+    fn effective_friction_is_exactly_kinetic_when_static_equals_kinetic() {
+        // The shipped default (`MediaParams::default()`'s `*_static == *_kinetic`): must be an
+        // exact, v_t-independent constant, not merely bit-close, so every existing caller that
+        // never opted into a static/kinetic split sees bit-identical behaviour (verified
+        // separately at the whole-simulation level by `examples/perf_probe.rs`'s hash oracle).
+        for v_t in [-10.0f32, -0.02, 0.0, 0.001, 5.0] {
+            assert_eq!(effective_friction(0.35, 0.35, v_t, 0.02), 0.35);
+        }
+    }
+
+    #[test]
+    fn effective_friction_blends_smoothly_from_static_to_kinetic() {
+        let (mu_k, mu_s, vs) = (0.35, 1.2, 0.02);
+        // At v_t = 0, exactly the static coefficient.
+        assert_eq!(effective_friction(mu_k, mu_s, 0.0, vs), mu_s);
+        // Symmetric in v_t (an even function -- see this fn's own doc comment on why).
+        assert_eq!(
+            effective_friction(mu_k, mu_s, 0.05, vs),
+            effective_friction(mu_k, mu_s, -0.05, vs)
+        );
+        // Monotonically decreases toward mu_kinetic as |v_t| grows.
+        let mu_small = effective_friction(mu_k, mu_s, 0.01, vs);
+        let mu_mid = effective_friction(mu_k, mu_s, 0.05, vs);
+        let mu_large = effective_friction(mu_k, mu_s, 1.0, vs);
+        assert!(mu_s > mu_small && mu_small > mu_mid && mu_mid > mu_large);
+        assert!(
+            (mu_large - mu_k).abs() < 1e-6,
+            "should have decayed to mu_kinetic by v_t=1.0 m/s at vs=0.02"
+        );
     }
 
     fn still_drum(radius_m: f32) -> Drum {
