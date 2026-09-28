@@ -55,6 +55,14 @@ struct Args {
     seed: u64,
     settle_s: f32,
     measure_s: f32,
+    /// Free-pendulum-release mode: after the settle phase (drum spinning normally, lifting the
+    /// charge up the ascending side as usual), abruptly sets `mill.speed_value = 0` (drum stops
+    /// dead) and only then starts the measurement window -- tests whether a charge *released* from
+    /// a displaced position (rather than steadily carried by a continuously rotating wall) swings
+    /// back through the vertical low point onto the *other* side, which the 2026-09-28 investigation
+    /// (docs/PHYSICS.md ss9) never got a driven/rotating charge to do at any tested friction or
+    /// speed.
+    stop_after_settle: bool,
     csv_path: Option<String>,
 }
 
@@ -81,6 +89,7 @@ impl Args {
             seed: 1,
             settle_s: 6.0,
             measure_s: 8.0,
+            stop_after_settle: false,
             csv_path: None,
         };
         let mut args = env::args().skip(1);
@@ -115,6 +124,7 @@ impl Args {
                 "--seed" => a.seed = next_f32() as u64,
                 "--settle-s" => a.settle_s = next_f32(),
                 "--measure-s" => a.measure_s = next_f32(),
+                "--stop-after-settle" => a.stop_after_settle = true,
                 "--csv" => a.csv_path = Some(args.next().expect("--csv needs a path")),
                 "--help" | "-h" => {
                     println!(
@@ -126,7 +136,7 @@ impl Args {
                          --rolling-friction <f32> --fill <f32> --slurry-fill <f32> \
                          --restitution-wall <f32> --lifters <u32> --max-balls <u32> \
                          --resolution <u32> --seed <u64> --settle-s <f32> --measure-s <f32> \
-                         --csv <path>"
+                         --stop-after-settle --csv <path>"
                     );
                     std::process::exit(0);
                 }
@@ -186,6 +196,27 @@ fn main() {
     let settle_frames = (args.settle_s * 60.0).round() as u32;
     for _ in 0..settle_frames {
         sim.step(1.0 / 60.0);
+    }
+
+    if args.stop_after_settle {
+        // Free-pendulum-release mode (see `Args::stop_after_settle`'s doc comment): the charge has
+        // just been lifted up the ascending side by `settle_s` of normal driven rotation, same as
+        // every other mode here -- now abruptly remove the driving (wall speed -> 0) and watch
+        // whether momentum + gravity alone carry it back through the low point to the other side,
+        // rather than a continuously rotating wall's steady one-sided carry. `drum` (used below only
+        // for geometry/angle sampling, not dynamics) keeps its original nonzero `omega` -- that only
+        // fixes `to_vertical_degrees`'s sign convention and does not affect the *actual* simulated
+        // dynamics, which read `sim`'s own params (now updated) each step; it does mean
+        // `mean_wall_slip_ratio` below is no longer meaningful after this point (it normalizes by
+        // the stale pre-stop wall speed), so ignore that column in this mode.
+        params.mill.speed_value = 0.0;
+        sim.set_params(params).expect("invalid params");
+        println!(
+            "--stop-after-settle: drum speed set to 0 after {:.1}s settle; measuring the free \
+             swing for the next {:.1}s (wall_slip_ratio below is now meaningless -- it normalizes \
+             by the stale pre-stop wall speed)",
+            args.settle_s, args.measure_s
+        );
     }
 
     let measure_frames = (args.measure_s * 60.0).round() as u32;

@@ -1392,13 +1392,32 @@ state after calling `compute`:
     the resulting wobble is, but doesn't remove that one-sided bias, because the bias's cause (net
     angular momentum injection from a one-directional wall) is unrelated to which friction law is
     used. Tested down to `%Nc = 1` (near-zero net rotation) with no different outcome -- the charge
-    just settles into a small, still-one-sided jitter rather than swinging. **Not yet tried**:
-    releasing the charge from an off-center/lifted position with the drum stationary (a genuine
-    free-pendulum release, rather than a steadily-driven wall), which might be closer to what
-    produces a real two-sided swing. No default values were changed by this investigation; the
-    static/kinetic friction capability is available for future use (e.g. a UI control, or lifter-
-    driven surging) but is not, on its own, the missing piece for a symmetric low-point-crossing
-    swing.
+    just settles into a small, still-one-sided jitter rather than swinging. No default values were
+    changed by this investigation; the static/kinetic friction capability is available for future
+    use (e.g. a UI control, or lifter-driven surging).
+  - **Free-pendulum release tried next (still 2026-09-28): decisively overdamped, no crossing at
+    all.** `oscillation_probe.rs` gained `--stop-after-settle`: runs the usual driven settle phase
+    (lifting the charge up the ascending side as normal), then calls `Simulation::set_params` to
+    set `mill.speed_value = 0` (wall stops dead, mid-run, no reseed) and measures what the charge
+    does purely under gravity + its own momentum from then on -- a genuine release, unlike every
+    other measurement in this section which keeps the wall actively driving the charge throughout.
+    Tried from both a modest initial displacement (settled at 30 `%Nc`, released ~15 deg off
+    vertical) and a large one (settled at 70 `%Nc`, released ~28 deg off vertical), both at real
+    water's viscosity. In both cases the centroid angle **crept monotonically back toward vertical
+    over several seconds and never overshot past it even once** (e.g. the 70 `%Nc` case: released
+    at 152.6 deg, still only at 177.3 deg -- short of 180 -- after a further 8 s) -- not a damped
+    oscillation with decaying overshoot, a plain overdamped relaxation with no overshoot at all.
+    This rules out "just release it" as a mechanism for a symmetric swing in this model: the
+    granular charge's own dissipation (Coulomb friction + restitution + rolling resistance --
+    present even at negligible slurry viscosity, so this is not a fluid-drag effect) removes
+    kinetic energy faster than one pendulum period, i.e. the effective damping ratio is `>= 1` for
+    this mode across the tested range. Reaching an underdamped release would need pushing
+    restitution/friction/rolling-friction to combinations well outside what any real media or wall
+    material exhibits, which was not attempted (would no longer describe a physically plausible
+    mill). Together with the driven-rotation result above, both natural mechanisms for a genuine
+    both-side low-point-crossing swing have now been tried and ruled out within this model's
+    realistic parameter space; reproducing the user's report would need either a different
+    mechanism entirely or a re-examination of what was actually observed.
 - **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
   stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
   lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above
