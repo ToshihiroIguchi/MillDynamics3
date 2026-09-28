@@ -185,6 +185,12 @@ struct Sample {
     shoulder_deg: Option<f32>,
     wall_slip_ratio: f32,
     total_ke_j: f32,
+    /// The *fluid* (slurry) population's own centroid angle, same `to_vertical_degrees`
+    /// convention as `centroid_deg` -- distinct from the ball charge's centroid, since a
+    /// water-dominated ("sloshing", low media fill / high slurry fill) mill might swing as a
+    /// liquid wave largely independent of the (possibly sparse) ball population. `NaN` if the
+    /// fluid population is empty (`slurry.enabled = false` or zero fluid particles).
+    fluid_centroid_deg: f32,
 }
 
 fn main() {
@@ -284,6 +290,9 @@ fn main() {
 
         let wall_slip_ratio = mean_wall_slip_ratio(balls, &drum, drum_angle);
         let total_ke_j = mill_core::metrics::total_kinetic_energy_j(balls);
+        let fluid_centroid_deg = fluid_centroid(sim.fluid())
+            .map(|(x, y)| to_vertical_degrees(y.atan2(x), drum.omega))
+            .unwrap_or(f32::NAN);
 
         samples.push(Sample {
             t_s: f as f32 / 60.0,
@@ -293,6 +302,7 @@ fn main() {
             shoulder_deg,
             wall_slip_ratio,
             total_ke_j,
+            fluid_centroid_deg,
         });
     }
 
@@ -301,6 +311,18 @@ fn main() {
     }
 
     report(&args, &samples);
+}
+
+/// The fluid (slurry) particle population's centroid, mirroring `charge_centroid` (metrics.rs) for
+/// balls -- `None` if the population is empty. Used to test whether a water-dominated ("sloshing")
+/// mill's *liquid* swings symmetrically even when the (possibly sparse) ball population does not.
+fn fluid_centroid(fluid: &mill_core::pbf::FluidParticles) -> Option<(f32, f32)> {
+    if fluid.x.is_empty() {
+        return None;
+    }
+    let sum = fluid.x.iter().fold(glam::Vec2::ZERO, |acc, &p| acc + p);
+    let centroid = sum / fluid.x.len() as f32;
+    Some((centroid.x, centroid.y))
 }
 
 /// Mean, over balls within `WALL_ADJACENT_BALL_RADII * radius` of the wall, of the contact-point
@@ -339,13 +361,13 @@ fn write_csv(path: &str, samples: &[Sample]) {
     let mut f = File::create(path).expect("failed to create csv file");
     writeln!(
         f,
-        "t_s,centroid_deg,centroid_radius_m,toe_deg,shoulder_deg,wall_slip_ratio,total_ke_j"
+        "t_s,centroid_deg,centroid_radius_m,toe_deg,shoulder_deg,wall_slip_ratio,total_ke_j,fluid_centroid_deg"
     )
     .unwrap();
     for s in samples {
         writeln!(
             f,
-            "{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{}",
             s.t_s,
             s.centroid_deg,
             s.centroid_radius_m,
@@ -353,6 +375,7 @@ fn write_csv(path: &str, samples: &[Sample]) {
             s.shoulder_deg.map(|v| v.to_string()).unwrap_or_default(),
             s.wall_slip_ratio,
             s.total_ke_j,
+            s.fluid_centroid_deg,
         )
         .unwrap();
     }
@@ -432,6 +455,43 @@ fn autocorrelation(x: &[f32], max_lag: usize) -> Vec<f32> {
             s / var
         })
         .collect()
+}
+
+/// Prints the vertical-crossing symmetry report line for a series of `to_vertical_degrees`-
+/// convention angles (e.g. ball or fluid centroid), labelled `name`. Uses the *raw* (not
+/// cumulatively unwrapped) per-sample signed offset from 180 deg, since this is about
+/// instantaneous position relative to the physical bottom of the drum, not cumulative drift.
+fn print_vertical_crossing_symmetry(name: &str, angles: impl Iterator<Item = f32>) {
+    let offsets_from_bottom: Vec<f32> = angles
+        .filter(|v| v.is_finite())
+        // `deg` is already confined to a single [0, 360) period (`to_vertical_degrees` ends in
+        // `.rem_euclid(360.0)`), so the naive difference from the 180 deg reference is already the
+        // shortest signed angular distance -- no further wrapping needed (and wrapping it again, an
+        // earlier bug here, corrupted small negative offsets like -14.9 into +165.1).
+        .map(|deg| deg - 180.0) // in [-180, 180)
+        .collect();
+    if offsets_from_bottom.is_empty() {
+        println!("vertical-crossing symmetry ({name}): no finite samples");
+        return;
+    }
+    let max_offset = offsets_from_bottom.iter().cloned().fold(f32::MIN, f32::max);
+    let min_offset = offsets_from_bottom.iter().cloned().fold(f32::MAX, f32::min);
+    // Positive offset = one side of the drum, negative = the other (sign is arbitrary, tied to
+    // `to_vertical_degrees`'s convention, not "left"/"right" in the viewer's own frame).
+    let side_a_extent = max_offset.max(0.0);
+    let side_b_extent = (-min_offset).max(0.0);
+    let crosses_bottom = side_a_extent > 0.5 && side_b_extent > 0.5;
+    let symmetry_ratio = if side_a_extent.max(side_b_extent) > 1e-6 {
+        side_a_extent.min(side_b_extent) / side_a_extent.max(side_b_extent)
+    } else {
+        0.0
+    };
+    println!(
+        "vertical-crossing symmetry ({name}): side_a_extent={side_a_extent:.2} deg, \
+         side_b_extent={side_b_extent:.2} deg, crosses_bottom={crosses_bottom}, \
+         symmetry_ratio={symmetry_ratio:.2} (1.0 = perfectly symmetric both-side swing through the \
+         drum's low point, 0.0 = confined entirely to one side)"
+    );
 }
 
 fn mean_std(x: &[f32]) -> (f32, f32) {
@@ -589,38 +649,12 @@ fn report(args: &Args, samples: &[Sample]) {
     // `to_vertical_degrees`'s doc comment): a genuine pendulum-style "rocks through the bottom and
     // back" surge should spend time on *both* sides of 180 deg with comparable extents, not just
     // wobble within one side while sitting at a rotation-carried steady-state offset (the ordinary
-    // cascading toe/shoulder asymmetry). Uses the *raw* (not cumulatively unwrapped) per-sample
-    // signed offset from 180 deg, since this is about instantaneous position relative to the
-    // physical bottom of the drum, not cumulative drift.
-    let offsets_from_bottom: Vec<f32> = samples
-        .iter()
-        .map(|s| s.centroid_deg)
-        .filter(|v| v.is_finite())
-        // `deg` is already confined to a single [0, 360) period (`to_vertical_degrees` ends in
-        // `.rem_euclid(360.0)`), so the naive difference from the 180 deg reference is already the
-        // shortest signed angular distance -- no further wrapping needed (and wrapping it again, an
-        // earlier bug here, corrupted small negative offsets like -14.9 into +165.1).
-        .map(|deg| deg - 180.0) // in [-180, 180)
-        .collect();
-    if !offsets_from_bottom.is_empty() {
-        let max_offset = offsets_from_bottom.iter().cloned().fold(f32::MIN, f32::max);
-        let min_offset = offsets_from_bottom.iter().cloned().fold(f32::MAX, f32::min);
-        // Positive offset = one side of the drum, negative = the other (sign is arbitrary, tied to
-        // `to_vertical_degrees`'s convention, not "left"/"right" in the viewer's own frame).
-        let side_a_extent = max_offset.max(0.0);
-        let side_b_extent = (-min_offset).max(0.0);
-        let crosses_bottom = side_a_extent > 0.5 && side_b_extent > 0.5;
-        let symmetry_ratio = if side_a_extent.max(side_b_extent) > 1e-6 {
-            side_a_extent.min(side_b_extent) / side_a_extent.max(side_b_extent)
-        } else {
-            0.0
-        };
-        println!(
-            "vertical-crossing symmetry: side_a_extent={side_a_extent:.2} deg, side_b_extent={side_b_extent:.2} \
-             deg, crosses_bottom={crosses_bottom}, symmetry_ratio={symmetry_ratio:.2} (1.0 = perfectly \
-             symmetric both-side swing through the drum's low point, 0.0 = confined entirely to one side)"
-        );
-    }
+    // cascading toe/shoulder asymmetry).
+    print_vertical_crossing_symmetry("ball centroid", samples.iter().map(|s| s.centroid_deg));
+    print_vertical_crossing_symmetry(
+        "fluid centroid",
+        samples.iter().map(|s| s.fluid_centroid_deg),
+    );
 
     let toe_count = samples.iter().filter(|s| s.toe_deg.is_some()).count();
     println!(
