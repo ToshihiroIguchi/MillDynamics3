@@ -14,8 +14,10 @@
 //! surface periodically avalanches while the wall-adjacent layer keeps rolling/sliding -- wall
 //! slip stays roughly flat while the shoulder/centroid angle saw-tooths).
 //!
-//! This binary makes no solver changes; it only measures the existing model. Run with `--help`
-//! for every flag.
+//! This binary makes no solver changes; it only measures the existing model. Besides the geometry/
+//! speed/friction flags above, it also accepts `--rolling-friction`, `--fill` (ball fill fraction),
+//! `--slurry-fill` (slurry fill fraction), and `--restitution-wall` (ball-wall restitution) for
+//! sweeping those parameters too. Run with `--help` for every flag.
 
 use std::env;
 use std::fs::File;
@@ -38,6 +40,10 @@ struct Args {
     viscosity_pa_s: f32,
     friction_ball_wall: f32,
     friction_ball_ball: f32,
+    rolling_friction: f32,
+    fill_fraction: f32,
+    slurry_fill_fraction: f32,
+    restitution_wall: f32,
     lifters_count: u32,
     max_balls: u32,
     resolution: u32,
@@ -55,6 +61,10 @@ impl Args {
             viscosity_pa_s: 50.0,
             friction_ball_wall: 0.35,
             friction_ball_ball: 0.25,
+            rolling_friction: 0.01,
+            fill_fraction: 0.30,
+            slurry_fill_fraction: 0.35,
+            restitution_wall: 0.5,
             lifters_count: 0,
             max_balls: 600,
             resolution: 40,
@@ -80,6 +90,10 @@ impl Args {
                 "--viscosity" => a.viscosity_pa_s = next_f32(),
                 "--friction-ball-wall" => a.friction_ball_wall = next_f32(),
                 "--friction-ball-ball" => a.friction_ball_ball = next_f32(),
+                "--rolling-friction" => a.rolling_friction = next_f32(),
+                "--fill" => a.fill_fraction = next_f32(),
+                "--slurry-fill" => a.slurry_fill_fraction = next_f32(),
+                "--restitution-wall" => a.restitution_wall = next_f32(),
                 "--lifters" => a.lifters_count = next_f32() as u32,
                 "--max-balls" => a.max_balls = next_f32() as u32,
                 "--resolution" => a.resolution = next_f32() as u32,
@@ -90,9 +104,11 @@ impl Args {
                 "--help" | "-h" => {
                     println!(
                         "Flags: --percent-critical <f32> --slurry <on|off> --viscosity <f32> \
-                         --friction-ball-wall <f32> --friction-ball-ball <f32> --lifters <u32> \
-                         --max-balls <u32> --resolution <u32> --seed <u64> --settle-s <f32> \
-                         --measure-s <f32> --csv <path>"
+                         --friction-ball-wall <f32> --friction-ball-ball <f32> \
+                         --rolling-friction <f32> --fill <f32> --slurry-fill <f32> \
+                         --restitution-wall <f32> --lifters <u32> --max-balls <u32> \
+                         --resolution <u32> --seed <u64> --settle-s <f32> --measure-s <f32> \
+                         --csv <path>"
                     );
                     std::process::exit(0);
                 }
@@ -128,6 +144,10 @@ fn main() {
     params.slurry.viscosity_pa_s = args.viscosity_pa_s;
     params.media.friction_ball_wall = args.friction_ball_wall;
     params.media.friction_ball_ball = args.friction_ball_ball;
+    params.media.rolling_friction = args.rolling_friction;
+    params.media.fill_fraction = args.fill_fraction;
+    params.media.restitution_ball_wall = args.restitution_wall;
+    params.slurry.fill_fraction = args.slurry_fill_fraction;
     params.simulation.max_balls = args.max_balls;
     params.simulation.resolution = args.resolution;
     params.simulation.seed = args.seed;
@@ -377,7 +397,7 @@ fn report(args: &Args, samples: &[Sample]) {
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
     });
 
-    match (trough, rebound) {
+    let detected_period_s: Option<f32> = match (trough, rebound) {
         (Some((trough_lag, &trough_val)), Some((rebound_lag, &rebound_val)))
             if trough_val <= -0.3 && rebound_val >= 0.3 =>
         {
@@ -390,6 +410,7 @@ fn report(args: &Args, samples: &[Sample]) {
             println!(
                 "=> periodic signal DETECTED, dominant period ~= {period_s:.3} s (trough<=-0.3 and rebound>=0.3)"
             );
+            Some(period_s)
         }
         (Some((trough_lag, &trough_val)), rebound) => {
             let rebound_desc = rebound
@@ -399,8 +420,48 @@ fn report(args: &Args, samples: &[Sample]) {
                 "detrended-rate autocorr: trough {trough_val:.3} at lag {trough_lag}, best rebound {rebound_desc}"
             );
             println!("=> no clear periodic signal (trough/rebound below the +-0.3 threshold)");
+            None
         }
-        _ => println!("=> no clear periodic signal (autocorrelation too flat to assess)"),
+        _ => {
+            println!("=> no clear periodic signal (autocorrelation too flat to assess)");
+            None
+        }
+    };
+
+    // Amplitude: median peak-to-peak swing of the (linearly detrended) *raw* centroid angle,
+    // measured per detected oscillation period -- distinct from `centroid_p2p` above, which is a
+    // single global peak-to-peak over the whole measurement window and can be inflated by settle-in
+    // drift or a single outlier swing. Chopping into windows of the detected period and taking the
+    // median is more robust to both of those, and gives a number that maps directly to "how big is
+    // one typical surge swing", which is what a large-amplitude-surging search cares about.
+    match detected_period_s {
+        Some(period_s) if period_s > 0.0 => {
+            let detrended_centroid = linear_detrend(&centroid);
+            let window_len = (period_s * 60.0).round() as usize;
+            if let Some(n_windows) = detrended_centroid.len().checked_div(window_len) {
+                if n_windows < 2 {
+                    println!("amplitude: n/a (no periodic signal / too few periods)");
+                } else {
+                    let mut swings: Vec<f32> = (0..n_windows)
+                        .map(|w| {
+                            let chunk = &detrended_centroid[w * window_len..(w + 1) * window_len];
+                            chunk.iter().cloned().fold(f32::MIN, f32::max)
+                                - chunk.iter().cloned().fold(f32::MAX, f32::min)
+                        })
+                        .collect();
+                    swings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let median = if swings.len() % 2 == 1 {
+                        swings[swings.len() / 2]
+                    } else {
+                        (swings[swings.len() / 2 - 1] + swings[swings.len() / 2]) / 2.0
+                    };
+                    println!("amplitude (median swing per period): {median:.2} deg");
+                }
+            } else {
+                println!("amplitude: n/a (no periodic signal / too few periods)");
+            }
+        }
+        _ => println!("amplitude: n/a (no periodic signal / too few periods)"),
     }
 
     // Sanity check against a physical-pendulum estimate: if the observed period tracks

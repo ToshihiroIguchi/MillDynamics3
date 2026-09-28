@@ -1325,6 +1325,33 @@ state after calling `compute`:
     with no lifters, and watch the existing "Toe angle" / "Shoulder angle" metrics-panel sparklines
     (`web/src/metrics/specs.ts`, already `sparkline: true`) -- both already surface the same
     vertical-degree convention `oscillation_probe.rs` samples.
+  - **Large-amplitude recipe (2026-09-28 follow-up, still no code change).** The prior entry only
+    established that a periodic mode *exists*; it did not target amplitude, and the default ball
+    diameter has since moved to 63 mm (no coarse-graining) so period/amplitude numbers needed
+    re-measuring. `oscillation_probe.rs` gained `--rolling-friction`/`--fill`/`--slurry-fill`/
+    `--restitution-wall` flags and a "median swing per detected period" amplitude metric (distinct
+    from the pre-existing whole-window `p2p`, which a single outlier swing or settle-in drift can
+    inflate). A ~50-run sweep (wet, no lifters, default 63 mm balls) found: `slurry.viscosity_pa_s`
+    dominates by far (only <=~7 Pa*s ever shows a periodic swing at all; the 50 Pa*s default is
+    almost always flat), and within the periodic regime raising `media.friction_ball_ball` above its
+    0.25 default consistently increases amplitude (more ball-ball grip makes the charge move more as
+    a rigid block rather than shedding energy through internal rolling), while
+    `media.friction_ball_wall` needs enough headroom above 0.35 to keep the mode from breaking back
+    into non-periodic sloshing at low `%Nc`. Recipe periodic across all 3 tested seeds (1/2/3),
+    amplitude (median swing per period) 6.1-9.5 deg, whole-window centroid p2p 12.2-15.9 deg, period
+    ~1.3-1.6 s: `slurry.viscosity_pa_s = 5`, `mill.speed_value = 20` (`%Nc` mode), `lifters.count =
+    0`, `media.friction_ball_wall = 0.6`, `media.friction_ball_ball = 0.5`,
+    `media.rolling_friction` left at its 0.01 default. Reproduce with:
+    `cargo run -p mill-core --release --example oscillation_probe -- --percent-critical 20 --slurry
+    on --viscosity 5 --friction-ball-wall 0.6 --friction-ball-ball 0.5 --seed <1|2|3>`. The
+    amplitude landscape is narrow and jaggy near its edges -- e.g. `%Nc = 40` with the same
+    frictions gave a larger single-seed amplitude (12.5 deg) but lost periodicity on a third seed --
+    so this `%Nc = 20` combination was chosen over higher-peak alternatives specifically for being
+    periodic on every seed tested, not for the single highest amplitude observed. No
+    `dem.rs`/`pbf.rs`/`params.rs` change was needed to reach this; static-vs-kinetic wall friction
+    (which would add a mechanism for even more pronounced stick-slip and a wider stable parameter
+    band) remains a possible future addition if a wider/more-robust surging band is ever needed, not
+    a blocker for reproducing the effect today.
 - **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
   stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
   lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above
