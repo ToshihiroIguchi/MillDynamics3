@@ -49,6 +49,7 @@ struct Args {
     fill_fraction: f32,
     slurry_fill_fraction: f32,
     restitution_wall: f32,
+    restitution_ball: f32,
     lifters_count: u32,
     max_balls: u32,
     resolution: u32,
@@ -63,6 +64,17 @@ struct Args {
     /// (docs/PHYSICS.md ss9) never got a driven/rotating charge to do at any tested friction or
     /// speed.
     stop_after_settle: bool,
+    /// Optional overrides applied at the same moment as `stop_after_settle`'s wall stop -- lets the
+    /// settle phase use normal friction/restitution (so the wall actually lifts/displaces the
+    /// charge, the way real cascading does it) while the *release* itself happens under different,
+    /// e.g. much lower dissipation, to test the best case for an underdamped free swing without
+    /// that best case also preventing the initial displacement (near-zero ball-wall friction can't
+    /// lift a charge via a rotating wall at all -- see docs/PHYSICS.md ss9's 2026-09-28 entry).
+    release_friction_ball_wall: Option<f32>,
+    release_friction_ball_ball: Option<f32>,
+    release_rolling_friction: Option<f32>,
+    release_restitution_wall: Option<f32>,
+    release_restitution_ball: Option<f32>,
     csv_path: Option<String>,
 }
 
@@ -83,6 +95,7 @@ impl Args {
             fill_fraction: 0.30,
             slurry_fill_fraction: 0.35,
             restitution_wall: 0.5,
+            restitution_ball: 0.7,
             lifters_count: 0,
             max_balls: 600,
             resolution: 40,
@@ -90,6 +103,11 @@ impl Args {
             settle_s: 6.0,
             measure_s: 8.0,
             stop_after_settle: false,
+            release_friction_ball_wall: None,
+            release_friction_ball_ball: None,
+            release_rolling_friction: None,
+            release_restitution_wall: None,
+            release_restitution_ball: None,
             csv_path: None,
         };
         let mut args = env::args().skip(1);
@@ -118,6 +136,7 @@ impl Args {
                 "--fill" => a.fill_fraction = next_f32(),
                 "--slurry-fill" => a.slurry_fill_fraction = next_f32(),
                 "--restitution-wall" => a.restitution_wall = next_f32(),
+                "--restitution-ball" => a.restitution_ball = next_f32(),
                 "--lifters" => a.lifters_count = next_f32() as u32,
                 "--max-balls" => a.max_balls = next_f32() as u32,
                 "--resolution" => a.resolution = next_f32() as u32,
@@ -125,6 +144,11 @@ impl Args {
                 "--settle-s" => a.settle_s = next_f32(),
                 "--measure-s" => a.measure_s = next_f32(),
                 "--stop-after-settle" => a.stop_after_settle = true,
+                "--release-friction-ball-wall" => a.release_friction_ball_wall = Some(next_f32()),
+                "--release-friction-ball-ball" => a.release_friction_ball_ball = Some(next_f32()),
+                "--release-rolling-friction" => a.release_rolling_friction = Some(next_f32()),
+                "--release-restitution-wall" => a.release_restitution_wall = Some(next_f32()),
+                "--release-restitution-ball" => a.release_restitution_ball = Some(next_f32()),
                 "--csv" => a.csv_path = Some(args.next().expect("--csv needs a path")),
                 "--help" | "-h" => {
                     println!(
@@ -134,9 +158,12 @@ impl Args {
                          --friction-ball-wall-static <f32> --friction-ball-ball-static <f32> \
                          --friction-velocity-scale <f32> \
                          --rolling-friction <f32> --fill <f32> --slurry-fill <f32> \
-                         --restitution-wall <f32> --lifters <u32> --max-balls <u32> \
+                         --restitution-wall <f32> --restitution-ball <f32> --lifters <u32> --max-balls <u32> \
                          --resolution <u32> --seed <u64> --settle-s <f32> --measure-s <f32> \
-                         --stop-after-settle --csv <path>"
+                         --stop-after-settle --release-friction-ball-wall <f32> \
+                         --release-friction-ball-ball <f32> --release-rolling-friction <f32> \
+                         --release-restitution-wall <f32> --release-restitution-ball <f32> \
+                         --csv <path>"
                     );
                     std::process::exit(0);
                 }
@@ -184,6 +211,7 @@ fn main() {
     params.media.rolling_friction = args.rolling_friction;
     params.media.fill_fraction = args.fill_fraction;
     params.media.restitution_ball_wall = args.restitution_wall;
+    params.media.restitution_ball_ball = args.restitution_ball;
     params.slurry.fill_fraction = args.slurry_fill_fraction;
     params.simulation.max_balls = args.max_balls;
     params.simulation.resolution = args.resolution;
@@ -210,6 +238,23 @@ fn main() {
         // `mean_wall_slip_ratio` below is no longer meaningful after this point (it normalizes by
         // the stale pre-stop wall speed), so ignore that column in this mode.
         params.mill.speed_value = 0.0;
+        if let Some(mu) = args.release_friction_ball_wall {
+            params.media.friction_ball_wall = mu;
+            params.media.friction_ball_wall_static = mu;
+        }
+        if let Some(mu) = args.release_friction_ball_ball {
+            params.media.friction_ball_ball = mu;
+            params.media.friction_ball_ball_static = mu;
+        }
+        if let Some(v) = args.release_rolling_friction {
+            params.media.rolling_friction = v;
+        }
+        if let Some(e) = args.release_restitution_wall {
+            params.media.restitution_ball_wall = e;
+        }
+        if let Some(e) = args.release_restitution_ball {
+            params.media.restitution_ball_ball = e;
+        }
         sim.set_params(params).expect("invalid params");
         println!(
             "--stop-after-settle: drum speed set to 0 after {:.1}s settle; measuring the free \

@@ -1407,17 +1407,45 @@ state after calling `compute`:
     over several seconds and never overshot past it even once** (e.g. the 70 `%Nc` case: released
     at 152.6 deg, still only at 177.3 deg -- short of 180 -- after a further 8 s) -- not a damped
     oscillation with decaying overshoot, a plain overdamped relaxation with no overshoot at all.
-    This rules out "just release it" as a mechanism for a symmetric swing in this model: the
-    granular charge's own dissipation (Coulomb friction + restitution + rolling resistance --
-    present even at negligible slurry viscosity, so this is not a fluid-drag effect) removes
-    kinetic energy faster than one pendulum period, i.e. the effective damping ratio is `>= 1` for
-    this mode across the tested range. Reaching an underdamped release would need pushing
-    restitution/friction/rolling-friction to combinations well outside what any real media or wall
-    material exhibits, which was not attempted (would no longer describe a physically plausible
-    mill). Together with the driven-rotation result above, both natural mechanisms for a genuine
-    both-side low-point-crossing swing have now been tried and ruled out within this model's
-    realistic parameter space; reproducing the user's report would need either a different
-    mechanism entirely or a re-examination of what was actually observed.
+    At the project's default friction (0.35 wall / 0.25 ball) this looked like it ruled out "just
+    release it" entirely -- but see the next entry, which isolates *why* and finds this is a
+    friction-magnitude threshold, not a dead end.
+  - **Root cause isolated (still 2026-09-28): kinetic friction alone controls whether a release
+    swing crosses the low point -- and it does, well below this project's shipped defaults.**
+    `oscillation_probe.rs` gained `--release-friction-ball-wall`/`--release-friction-ball-ball`/
+    `--release-rolling-friction`/`--release-restitution-wall`/`--release-restitution-ball`:
+    overrides applied at the same instant as `--stop-after-settle`'s wall stop, so the *settle*
+    phase still uses normal friction (the wall needs real friction to lift/displace the charge at
+    all -- see below) while the *release* itself can use different coefficients, letting the
+    "what displaces the charge" and "what damps its swing" questions be answered independently.
+    Sweeping the release-phase Coulomb friction coefficient (`friction_ball_wall`/
+    `friction_ball_ball`, applied equally, settle phase left at the 0.35/0.25 defaults, `slurry
+    off`, released from ~27 deg at 70 `%Nc`, seed 1) found a clean threshold: **`crosses_bottom =
+    true` for release friction `<= ~0.1`, `false` for `>= ~0.15`-`0.2`** -- e.g. at `mu = 0.05`:
+    `symmetry_ratio = 0.55`, p2p 45 deg, a clear multi-cycle decaying swing (153 -> 186 -> 172 ->
+    198 -> 160 deg ... settling near 180 deg by ~14 s, confirmed by inspecting the raw trace); at
+    `mu = 0.005` (near-frictionless): `symmetry_ratio = 0.88`, amplitude (first-period) 35.7 deg.
+    **Restitution and rolling friction turned out not to matter**: re-running `mu = 0.05` with
+    release restitution swept 0.7 (the project's own default) through 0.99 gave near-identical
+    results every time (`symmetry_ratio` 0.52-0.55 throughout), and leaving `rolling_friction` at
+    its 0.01 default instead of forcing it to 0 changed nothing either -- Coulomb (kinetic) friction
+    is the sole controlling variable for this mode's damping ratio in this solver, confirming the
+    "effective damping ratio `>= 1`" read above was specifically about friction, not restitution.
+    **But this crossing behaviour is release-only, not a driven-rotation phenomenon**: re-running
+    the driven-rotation sweep (no stop, continuously rotating wall) at this same low friction
+    (`mu = 0.05`, `%Nc` 5-15, water viscosity) still came back `crosses_bottom = false` every time
+    -- a continuously rotating wall injects net one-directional angular momentum regardless of how
+    low the friction coefficient is (friction only sets *how efficiently* that momentum couples
+    in, not its direction), so low friction alone cannot turn the driven steady state symmetric --
+    it only unlocks the underdamped free-release mode. **Net picture**: a genuine, large,
+    left-right-symmetric swing through the drum's low point is achievable in this model, but only
+    as a *decaying transient right after the drum stops* (e.g. an operator cutting power, not
+    steady-state running), and only with ball-wall/ball-ball kinetic friction well below this
+    project's ceramic-media defaults (roughly `<= 0.1`, vs. the shipped 0.35/0.25) -- consistent
+    with a much smoother/harder media-and-liner pairing than the default YSZ-on-steel model.
+    Reproduce: `cargo run -p mill-core --release --example oscillation_probe --
+    --percent-critical 70 --slurry off --settle-s 3 --measure-s 10 --stop-after-settle
+    --release-friction-ball-wall 0.05 --release-friction-ball-ball 0.05 --seed 1`.
 - **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
   stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
   lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above
