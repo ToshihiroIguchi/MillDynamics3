@@ -57,7 +57,7 @@ test("applying an off-step value round-trips through the WASM core", async ({ pa
   // media.density_kg_m3 is `resetRequired` (schema.ts) -- baked into the ball population's mass
   // at seed time -- so this Apply still goes through a real WASM reinit, same as before Apply
   // started hot-applying fields that don't need one.
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   // Apply triggers a real WASM reinit (resets the simulation), which can take a few seconds --
   // poll rather than using a fixed short timeout.
@@ -87,8 +87,9 @@ test("applying a hot-appliable (resetRequired: false) field shows Applied, not a
 
   const status = page.locator(".params-status");
   await expect(status).toHaveText("Edited — not applied");
+  await expect(page.getByRole("button", { name: /^Apply/ })).toHaveText("Apply (live)");
 
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   await expect(status).toHaveText("Applied");
   await expect(status).toHaveClass(/is-applied/);
@@ -118,7 +119,7 @@ test("an out-of-range value shows a visible error without freezing the simulatio
   const diameterInput = await openField(page, "Drum diameter (mm)");
   await diameterInput.fill("0");
 
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   const errorBanner = page.locator(".params-error");
   await expect(errorBanner).toBeVisible();
