@@ -22,7 +22,15 @@ import {
 import { createHelpIcon } from "./helpIcon";
 import { MEDIA_MATERIALS } from "../params/materials";
 import { QUALITY_PRESETS } from "../params/presets";
-import { fromDisplayValue, GROUPS, getPath, SCHEMA, toDisplayValue, withPath } from "../params/schema";
+import {
+  fromDisplayValue,
+  GROUPS,
+  getPath,
+  paramsChangeRequiresReset,
+  SCHEMA,
+  toDisplayValue,
+  withPath,
+} from "../params/schema";
 
 const GROUPS_STORAGE_KEY = "milldynamics.paramsGroups";
 
@@ -89,11 +97,10 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
   const applyBtn = document.createElement("button");
   applyBtn.type = "submit";
-  // Not "resets simulation" any more: main.ts's onApply callback hot-applies via "setParams"
-  // (Simulation::set_params) unless the changed field actually needs one
-  // (params/schema.ts's `paramsChangeRequiresReset`), in which case it resets -- this label can't
-  // know which in advance without duplicating that decision here, so it stays deliberately
-  // non-committal; see the browser console for which happened on a given Apply.
+  // main.ts's onApply callback hot-applies via "setParams" (Simulation::set_params) unless a
+  // changed field needs a full reset (params/schema.ts's `paramsChangeRequiresReset`). While the
+  // form is being edited, `setStatus("edited", ...)` below labels this button with which of the
+  // two the pending edit will do ("Apply (live)" / "Apply & reset"); otherwise it reads "Apply".
   applyBtn.textContent = "Apply";
 
   const revertBtn = document.createElement("button");
@@ -116,7 +123,11 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   // (e.g. two quick hot-applies) restarts the fade instead of leaving two overlapping timeouts.
   let appliedFlashTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
-  function setStatus(state: "applied" | "edited" | "error" | "applying"): void {
+  /**
+   * `resetLabel` is only used for the "edited" state: the label of the first changed field that
+   * needs a full simulation reset, or `null` when the pending edit can be applied live.
+   */
+  function setStatus(state: "applied" | "edited" | "error" | "applying", resetLabel: string | null = null): void {
     status.classList.remove("is-applied", "is-edited", "is-error", "is-applying");
     // Header itself (not just the status span) picks up the highlight: the header is
     // `position: sticky` so it stays on-screen while the panel is scrolled, but a small
@@ -124,6 +135,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     // down -- a background tint on the whole sticky bar is not (user feedback: the Apply
     // button/status is easy to lose track of while editing fields lower in the panel).
     header.classList.remove("is-edited");
+    applyBtn.textContent = "Apply";
     if (state === "applied") {
       status.textContent = "Applied";
       status.classList.add("is-applied");
@@ -136,7 +148,13 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         appliedFlashTimeoutId = setTimeout(() => header.classList.remove("is-applied-flash"), 600);
       }
     } else if (state === "edited") {
-      status.textContent = "Edited — not applied";
+      if (resetLabel !== null) {
+        status.textContent = `Edited — reset needed: ${resetLabel}`;
+        applyBtn.textContent = "Apply & reset";
+      } else {
+        status.textContent = "Edited — not applied";
+        applyBtn.textContent = "Apply (live)";
+      }
       status.classList.add("is-edited");
       header.classList.add("is-edited");
     } else if (state === "applying") {
@@ -357,7 +375,18 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       const labelText = document.createElement("span");
       labelText.className = "params-label";
       labelText.append((field.unit ? `${field.label} (${field.unit})` : field.label) + rangeSuffix);
-      const helpIcon = createHelpIcon(field.help);
+      if (field.resetRequired) {
+        // Marks fields whose change only takes effect through a full simulation reset (schema.ts's
+        // `resetRequired`); the tooltip note is appended here so it never needs repeating per field.
+        const glyph = document.createElement("span");
+        glyph.className = "reset-glyph";
+        glyph.textContent = "↻";
+        glyph.title = "Changing this restarts the simulation.";
+        labelText.appendChild(glyph);
+      }
+      const helpIcon = createHelpIcon(
+        field.help && field.resetRequired ? `${field.help} Changing this restarts the simulation.` : field.help,
+      );
       if (helpIcon) labelText.appendChild(helpIcon);
       row.appendChild(labelText);
 
@@ -387,7 +416,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         input = numberInput;
       }
       input.addEventListener("input", () => {
-        setStatus("edited");
+        setStatus("edited", paramsChangeRequiresReset(currentParams, readFormParams()));
         refreshDerived();
         if (field.path === "simulation.max_balls" || field.path === "simulation.resolution") {
           syncPresetSelectWithFields();
@@ -696,6 +725,20 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     }
   }
 
+  /** Builds the params object the form currently describes (SI units) on top of `currentParams`. */
+  function readFormParams(): ParamsJson {
+    let next = currentParams;
+    for (const [path, input] of inputs) {
+      const field = SCHEMA.find((f) => f.path === path);
+      let value: unknown;
+      if (field?.type === "number") value = fromDisplayValue(field, Number(input.value));
+      else if (field?.type === "boolean") value = (input as HTMLInputElement).checked;
+      else value = input.value;
+      next = withPath(next, path, value);
+    }
+    return next;
+  }
+
   function clearInvalid(): void {
     for (const row of rowsByPath.values()) {
       row.classList.remove("is-invalid");
@@ -751,16 +794,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
     clearInvalid();
     setStatus("applying");
-    let next = currentParams;
-    for (const [path, input] of inputs) {
-      const field = SCHEMA.find((f) => f.path === path);
-      let value: unknown;
-      if (field?.type === "number") value = fromDisplayValue(field, Number(input.value));
-      else if (field?.type === "boolean") value = (input as HTMLInputElement).checked;
-      else value = input.value;
-      next = withPath(next, path, value);
-    }
-    onApply(next);
+    onApply(readFormParams());
   });
 
   function setParams(params: ParamsJson): void {

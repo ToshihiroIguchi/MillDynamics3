@@ -452,6 +452,13 @@ body.params-collapsed .params-panel {
   outline: none;
 }
 
+/* "↻" marker after a label whose change restarts the simulation (ui/paramsPanel.ts). */
+.reset-glyph {
+  margin-left: 4px;
+  color: #e8a33d;
+  cursor: help;
+}
+
 .params-row input,
 .params-row select {
   background: #12161c;
