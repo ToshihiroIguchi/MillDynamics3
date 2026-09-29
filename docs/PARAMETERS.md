@@ -8,7 +8,7 @@ This reference documents every user-facing simulation parameter. The table data 
 |------|-------|-----------|--------------|--------------|-----------|-------|
 | `mill.diameter_m` | Drum diameter | m | 0.063 (63 mm) | 0.03–5 | 0.01 | Inner drum diameter; the low end covers small bench/lab jar mills (~3 cm). Validation range is (0.02, 20.0) m SI. |
 | `mill.speed_mode` | Speed mode | — | `rpm` | `percent_critical` / `rpm` | — | Whether speed is specified as absolute rpm or percentage of critical speed. |
-| `mill.speed_value` | Speed | — | 118.0 | 0–300 | 1 | Rotation speed: interpretation depends on `speed_mode`. Default (~70% Nc for the default 63 mm drum, Nc = 168.5 rpm). |
+| `mill.speed_value` | Speed | — | 30.0 | 0–300 | 1 | Rotation speed: interpretation depends on `speed_mode`. Default (30 rpm, ~18% Nc for the default 63 mm drum, Nc = 168.5 rpm). |
 | `mill.direction` | Direction | — | `counter_clockwise` | `counter_clockwise` / `clockwise` | — | Drum rotation direction viewed from the standard right-handed 2D frame (+x right, +y up). |
 
 ## Media Parameters

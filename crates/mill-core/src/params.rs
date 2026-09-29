@@ -61,9 +61,9 @@ impl Default for MillParams {
         Self {
             diameter_m: 0.063,
             speed_mode: SpeedMode::Rpm,
-            // ~70% Nc for the default 63 mm drum (Nc = 42.3 / sqrt(0.063) = 168.5 rpm), expressed
-            // directly in rpm.
-            speed_value: 118.0,
+            // 30 rpm = ~18% Nc for the default 63 mm drum (Nc = 42.3 / sqrt(0.063) = 168.5 rpm),
+            // expressed directly in rpm.
+            speed_value: 30.0,
             direction: Direction::CounterClockwise,
         }
     }
