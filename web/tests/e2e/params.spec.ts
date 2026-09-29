@@ -106,7 +106,7 @@ test("the Slurry group shows a static infiltration-limitation note", async ({ pa
   // static note, appended after the group's per-field rows in ui/paramsPanel.ts.
   await openField(page, "Viscosity (Pa·s)");
 
-  const slurryNote = page.locator(".params-note", { hasText: "Slurry percolation" });
+  const slurryNote = page.locator(".params-note", { hasText: "Slurry barely seeps" });
   await expect(slurryNote).toBeVisible();
 });
 
