@@ -1,35 +1,33 @@
 // Client-side "record the simulation as a video" feature, mirroring report/ module structure.
 //
-// Uses `HTMLCanvasElement.captureStream()` + `MediaRecorder` (both native browser APIs, zero new
-// dependencies) instead of an offline re-simulation/ffmpeg.wasm approach: this records exactly the
-// frames the user is actually watching, which is correct both for normal playback and for
-// `simulation.time_scale` running faster/slower than real time -- the video shows what was
-// rendered, not a separately-computed deterministic replay.
+// Frames are encoded with WebCodecs (via mediabunny, which also muxes the WebM container) rather
+// than `MediaRecorder`: MediaRecorder stamps frames with the *wall clock*, so a simulation running
+// slower (or faster, via `simulation.time_scale`) than real time would produce a video whose
+// duration does not match the simulated time. Here every frame is stamped with its *simulation*
+// time (`simTime - simTimeAtStart`), so the video always plays back in real-time physical scale:
+// 10 s of simulated time == a 10 s video, however long the computation took. Paused periods
+// (simTime not advancing) add no frames and therefore no video time.
 //
-// Frame-accurate capture: the canvas's stream is created in "manual" mode (`captureStream(0)`, see
-// MDN), so it only advances when `track.requestFrame()` is called explicitly (from main.ts's
-// `frameLoop`, right after `renderer.render(...)`) rather than being sampled on MediaRecorder's own
-// wall-clock timer. This keeps the recorded video's frame timing tied to what was actually drawn,
-// independent of `requestAnimationFrame` jitter.
+// Frames are captured at most `VIDEO_FPS` per simulated second, from the same canvas the user is
+// watching (one call to `captureFrame` per rendered frame).
 //
-// Container/codec: WebM, VP9 preferred with VP8 fallback -- natively supported by every browser
-// this project targets (Chrome/Firefox/Edge) with no codec license concerns (unlike MP4/H.264).
-// The candidate list + `MediaRecorder.isTypeSupported` check is a small ordered list, tried in
-// order; if none are supported the feature disables itself (see `isSupported`) rather than
-// throwing.
+// Container/codec: WebM, VP9 preferred, then VP8, then AV1 -- whichever the browser can encode.
+// If WebCodecs is unavailable the feature disables itself (see `isSupported`) rather than throwing.
 
-/** Ordered by preference: VP9 first (better compression), VP8 fallback, then an unspecified codec
- * within the WebM container as a last resort. */
-export const MIME_TYPE_CANDIDATES: string[] = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+import { BufferTarget, CanvasSource, Output, WebMOutputFormat, getFirstEncodableVideoCodec } from "mediabunny";
 
-/** Pure (no DOM/MediaRecorder access) so it can be unit-tested with a fake `isTypeSupported` --
- * see tests/unit/recorder.test.ts. Returns the first candidate `isTypeSupported` accepts, or
- * `null` if none are (including an empty candidate list). */
-export function pickSupportedMimeType(candidates: string[], isTypeSupported: (type: string) => boolean): string | null {
-  for (const candidate of candidates) {
-    if (isTypeSupported(candidate)) return candidate;
-  }
-  return null;
+/** Video frame rate, in frames per simulated second. */
+export const VIDEO_FPS = 30;
+
+/** Ordered by preference. */
+const CODEC_CANDIDATES = ["vp9", "vp8", "av1"] as const;
+
+/** Pure: whether a frame is due, given the simulated time elapsed since recording started and the
+ * timestamp of the last captured frame (`null` before the first). The first frame is always due;
+ * later ones once at least one frame interval of simulated time has passed. Unit-tested. */
+export function isFrameDue(simElapsed: number, lastFrameTime: number | null, fps: number = VIDEO_FPS): boolean {
+  if (lastFrameTime === null) return true;
+  return simElapsed - lastFrameTime >= 1 / fps - 1e-9;
 }
 
 /** Downloads `blob` as `filename`, mirroring ui/metricsPanel.ts's CSV export and
@@ -48,98 +46,103 @@ function downloadBlob(blob: Blob, filename: string): void {
 }
 
 export interface CanvasRecorder {
-  /** Feature-detects `captureStream` + `MediaRecorder` + at least one supported mime type from
-   * `MIME_TYPE_CANDIDATES`. Callers (ui/toolbar.ts) disable the Record button entirely rather than
-   * letting `start` throw when this is `false`. */
+  /** Feature-detects WebCodecs. Callers (ui/toolbar.ts) disable the Record button entirely rather
+   * than letting `start` fail when this is `false`. */
   isSupported(): boolean;
   isRecording(): boolean;
   /** Begins recording `canvas`. No-op if already recording or if `isSupported()` is `false`. */
   start(canvas: HTMLCanvasElement, simTimeAtStart: number): void;
-  /** Pushes one frame onto the recording. No-op (cheap boolean check) if not currently recording,
-   * so callers can call this unconditionally once per rendered frame. */
-  captureFrame(): void;
+  /** Pushes the canvas's current contents as a frame stamped with `simTime`, if a frame is due.
+   * No-op (cheap boolean check) if not currently recording, so callers can call this
+   * unconditionally once per rendered frame. */
+  captureFrame(simTime: number): void;
   /** Finalizes the recording, builds the Blob, and triggers its download. Resolves once the
    * download has been triggered. No-op (resolves immediately) if not currently recording. */
   stop(simTimeAtStop: number): Promise<void>;
 }
 
-/** Default `CanvasRecorder` implementation, backed by `HTMLCanvasElement.captureStream()` +
- * `MediaRecorder`. See the module doc comment above for the design rationale. */
-export class MediaRecorderCanvasRecorder implements CanvasRecorder {
+/** Default `CanvasRecorder` implementation, backed by WebCodecs + mediabunny. See the module doc
+ * comment above for the design rationale. */
+export class WebCodecsCanvasRecorder implements CanvasRecorder {
   private recording = false;
-  private mediaRecorder: MediaRecorder | null = null;
-  // `captureStream()`'s video track is a `CanvasCaptureMediaStreamTrack` at runtime (the subtype
-  // that carries `requestFrame()` for manual-mode capture); `MediaStream.getVideoTracks()` is
-  // typed to return the broader `MediaStreamTrack[]`, so this narrows it explicitly.
-  private track: CanvasCaptureMediaStreamTrack | null = null;
-  private stream: MediaStream | null = null;
-  private chunks: Blob[] = [];
-  private mimeType: string | null = null;
+  private simTimeAtStart = 0;
+  private lastFrameTime: number | null = null;
+  private output: Output<WebMOutputFormat, BufferTarget> | null = null;
+  private source: CanvasSource | null = null;
+  /** Set while the encoder is still accepting a frame (backpressure): frames are dropped, not
+   * queued, so a slow encoder never stalls the render loop. */
+  private busy = false;
+  /** Resolves when `start`'s async setup (codec probe, `output.start()`) has finished. */
+  private ready: Promise<void> = Promise.resolve();
+  private pending: Promise<void> = Promise.resolve();
 
   isSupported(): boolean {
-    if (typeof MediaRecorder === "undefined") return false;
-    if (typeof HTMLCanvasElement === "undefined" || typeof HTMLCanvasElement.prototype.captureStream !== "function") {
-      return false;
-    }
-    return pickSupportedMimeType(MIME_TYPE_CANDIDATES, (type) => MediaRecorder.isTypeSupported(type)) !== null;
+    return typeof VideoEncoder !== "undefined" && typeof VideoFrame !== "undefined";
   }
 
   isRecording(): boolean {
     return this.recording;
   }
 
-  start(canvas: HTMLCanvasElement, _simTimeAtStart: number): void {
+  start(canvas: HTMLCanvasElement, simTimeAtStart: number): void {
     if (this.recording || !this.isSupported()) return;
-
-    const mimeType = pickSupportedMimeType(MIME_TYPE_CANDIDATES, (type) => MediaRecorder.isTypeSupported(type));
-    if (!mimeType) return; // isSupported() already checked this, but guard defensively regardless.
-
-    // 0 fps = "manual" mode: the stream only advances on an explicit `track.requestFrame()` call
-    // (see `captureFrame` below), not on MediaRecorder's own wall-clock sampling.
-    const stream = canvas.captureStream(0);
-    const track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack | undefined;
-    if (!track) return;
-
-    const mediaRecorder = new MediaRecorder(stream, { mimeType });
-    this.chunks = [];
-    mediaRecorder.ondataavailable = (event: BlobEvent) => {
-      if (event.data.size > 0) this.chunks.push(event.data);
-    };
-    mediaRecorder.start();
-
-    this.mediaRecorder = mediaRecorder;
-    this.track = track;
-    this.stream = stream;
-    this.mimeType = mimeType;
     this.recording = true;
-  }
+    this.simTimeAtStart = simTimeAtStart;
+    this.lastFrameTime = null;
+    this.busy = true; // frames are dropped until setup completes
 
-  captureFrame(): void {
-    if (!this.recording || !this.track) return;
-    this.track.requestFrame();
-  }
-
-  stop(simTimeAtStop: number): Promise<void> {
-    if (!this.recording || !this.mediaRecorder) return Promise.resolve();
-
-    const mediaRecorder = this.mediaRecorder;
-    const mimeType = this.mimeType ?? "video/webm";
-    const stream = this.stream;
-
-    return new Promise((resolve) => {
-      mediaRecorder.onstop = () => {
-        const blob = new Blob(this.chunks, { type: mimeType });
-        downloadBlob(blob, `milldynamics-recording-${simTimeAtStop.toFixed(1)}s.webm`);
-
-        stream?.getTracks().forEach((t) => t.stop());
-        this.mediaRecorder = null;
-        this.track = null;
-        this.stream = null;
-        this.chunks = [];
-        this.recording = false;
-        resolve();
-      };
-      mediaRecorder.stop();
+    this.ready = (async () => {
+      const codec = await getFirstEncodableVideoCodec([...CODEC_CANDIDATES], {
+        width: canvas.width,
+        height: canvas.height,
+      });
+      if (!codec) throw new Error("no encodable video codec");
+      const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
+      const source = new CanvasSource(canvas, { codec, bitrate: 6_000_000 });
+      output.addVideoTrack(source, { frameRate: VIDEO_FPS });
+      await output.start();
+      this.output = output;
+      this.source = source;
+      this.busy = false;
+    })();
+    this.ready.catch((err) => {
+      console.error("[recorder] setup failed", err);
+      this.recording = false;
     });
+  }
+
+  captureFrame(simTime: number): void {
+    if (!this.recording || this.busy || !this.source) return;
+    const elapsed = Math.max(0, simTime - this.simTimeAtStart);
+    if (!isFrameDue(elapsed, this.lastFrameTime)) return;
+    this.lastFrameTime = elapsed;
+    this.busy = true;
+    this.pending = this.source
+      .add(elapsed, 1 / VIDEO_FPS)
+      .catch((err) => console.error("[recorder] frame encode failed", err))
+      .finally(() => {
+        this.busy = false;
+      });
+  }
+
+  async stop(simTimeAtStop: number): Promise<void> {
+    if (!this.recording) return;
+    this.recording = false;
+    try {
+      await this.ready;
+      await this.pending;
+      const { output, source } = this;
+      if (!output || !source) return;
+      source.close();
+      await output.finalize();
+      const buffer = output.target.buffer;
+      if (buffer) {
+        downloadBlob(new Blob([buffer], { type: "video/webm" }), `milldynamics-recording-${simTimeAtStop.toFixed(1)}s.webm`);
+      }
+    } finally {
+      this.output = null;
+      this.source = null;
+      this.busy = false;
+    }
   }
 }

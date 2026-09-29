@@ -7,7 +7,7 @@ import { createHud } from "./ui/hud";
 import { createMetricsPanel } from "./ui/metricsPanel";
 import { createParamsPanel } from "./ui/paramsPanel";
 import { createToolbar } from "./ui/toolbar";
-import { MediaRecorderCanvasRecorder } from "./video/recorder";
+import { WebCodecsCanvasRecorder } from "./video/recorder";
 
 const state = createInitialState();
 
@@ -22,7 +22,7 @@ if (!sceneWrapOrNull) {
 }
 const sceneWrap: HTMLElement = sceneWrapOrNull;
 const renderer = new CanvasRenderer(canvas);
-const recorder = new MediaRecorderCanvasRecorder();
+const recorder = new WebCodecsCanvasRecorder();
 
 function resizeToWrap(): void {
   const { clientWidth: w, clientHeight: h } = sceneWrap;
@@ -298,7 +298,7 @@ function frameLoop(nowMs: number): void {
     fluidDye: state.fluidDye,
     fluidSurface: state.fluidSurface,
   });
-  recorder.captureFrame(); // no-op when not recording, see video/recorder.ts
+  recorder.captureFrame(state.simTime); // no-op when not recording, see video/recorder.ts
   hud.update(state, smoothedFps);
   metricsPanel.update(state, smoothedFps, nowMs);
   requestAnimationFrame(frameLoop);

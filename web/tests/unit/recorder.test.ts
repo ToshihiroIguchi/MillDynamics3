@@ -1,25 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { pickSupportedMimeType } from "../../src/video/recorder";
+import { isFrameDue } from "../../src/video/recorder";
 
-describe("pickSupportedMimeType", () => {
-  it("picks the first supported candidate", () => {
-    const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-    const isTypeSupported = (type: string) => type === "video/webm;codecs=vp8" || type === "video/webm";
-    expect(pickSupportedMimeType(candidates, isTypeSupported)).toBe("video/webm;codecs=vp8");
+describe("isFrameDue", () => {
+  it("always captures the first frame", () => {
+    expect(isFrameDue(0, null)).toBe(true);
   });
 
-  it("returns the only supported candidate when it's first in the list", () => {
-    const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8"];
-    const isTypeSupported = (type: string) => type === "video/webm;codecs=vp9";
-    expect(pickSupportedMimeType(candidates, isTypeSupported)).toBe("video/webm;codecs=vp9");
+  it("waits one frame interval of simulated time between frames", () => {
+    expect(isFrameDue(0.02, 0, 30)).toBe(false);
+    expect(isFrameDue(1 / 30, 0, 30)).toBe(true);
+    expect(isFrameDue(0.5, 0.4, 30)).toBe(true);
   });
 
-  it("returns null when none of the candidates are supported", () => {
-    const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-    expect(pickSupportedMimeType(candidates, () => false)).toBeNull();
-  });
-
-  it("returns null for an empty candidate list", () => {
-    expect(pickSupportedMimeType([], () => true)).toBeNull();
+  it("captures nothing while simulated time is not advancing (paused)", () => {
+    expect(isFrameDue(1.0, 1.0, 30)).toBe(false);
   });
 });
