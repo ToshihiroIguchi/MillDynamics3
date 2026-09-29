@@ -281,7 +281,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     const coarseGrainingActive = eff.scaleFactor > 1;
     const nc = criticalSpeedRpm(config.mill.diameter_m);
 
-    drawKeyValueRow(doc, cursor, "Drum diameter", `${config.mill.diameter_m.toFixed(3)} m`);
+    drawKeyValueRow(doc, cursor, "Drum diameter", `${(config.mill.diameter_m * 1000).toFixed(1)} mm`);
     drawKeyValueRow(
       doc,
       cursor,
