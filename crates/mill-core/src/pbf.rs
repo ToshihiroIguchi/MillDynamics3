@@ -850,7 +850,12 @@ impl FluidParticles {
                     let r = delta.length();
                     let raw_grad = spiky_grad(delta, r, h);
                     grad_cache[k] = raw_grad;
-                    let grad = raw_grad / rest_density;
+                    // dC_i/dx_j = (m / rho0) * grad W: the constraint is `rho_i / rho0 - 1` with
+                    // `rho_i = m * sum W`, so the particle mass belongs in the gradient. It was
+                    // missing until 2026-09-30, which made the whole correction ~1/m too weak --
+                    // negligible at a 1 m drum, but ~1000x at the 63 mm default (fluid compressed
+                    // to mean +3500%, docs/METRICS.md).
+                    let grad = raw_grad * (mass / rest_density);
                     grad_self += grad;
                     sum_grad_sq += grad.length_squared();
                 }
@@ -886,7 +891,7 @@ impl FluidParticles {
                     let ju = neighbors.nbrs[k] as usize;
                     sum += (lambda[i] + lambda[ju]) * grad_cache[k];
                 }
-                delta_p[i] = sum / rest_density;
+                delta_p[i] = sum * (mass / rest_density);
             }
             for (x, dp) in self.x.iter_mut().zip(&delta_p) {
                 *x += *dp;

@@ -158,13 +158,16 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
 // as "alarms" rather than "continuously-read numbers".
 const COUPLING_CLAMP_HITS_WARN_THRESHOLD = 0;
 const SUBSTEP_DISPLACEMENT_WARN_THRESHOLD = 0.5;
-const MAX_COMPRESSION_ERROR_WARN_THRESHOLD = 0.05;
+// Mean, not max: the single worst particle spikes to tens of percent at any free surface even on a
+// healthy run (measured: max ~20-35% at rest, ~65% at 100 rpm, mean 2% / 6% -- docs/METRICS.md), so a
+// max-based alarm fires constantly. The mean tracks whether the whole fluid is actually compressed.
+const MEAN_COMPRESSION_ERROR_WARN_THRESHOLD = 0.1;
 const MAX_BALL_OVERLAP_WARN_THRESHOLD = 0.5;
 
 const WARN_THRESHOLDS = new Map<string, number>([
   ["coupling_clamp_hits", COUPLING_CLAMP_HITS_WARN_THRESHOLD],
   ["substep_displacement", SUBSTEP_DISPLACEMENT_WARN_THRESHOLD], // confirmed against metrics/specs.ts
-  ["max_compression_error", MAX_COMPRESSION_ERROR_WARN_THRESHOLD],
+  ["mean_compression_error", MEAN_COMPRESSION_ERROR_WARN_THRESHOLD],
   ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],
 ]);
 

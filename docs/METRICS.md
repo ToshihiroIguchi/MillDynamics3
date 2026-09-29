@@ -149,19 +149,18 @@ particles apart, and never tries to pull an under-dense one back together (that 
 solver's only fluid-fluid attraction, and it balled slurry into mid-air blobs at the free surface —
 see `docs/PHYSICS.md` §5.2's `c_i` discussion). This pair of metrics reports exactly that one-sided
 quantity, over the whole fluid population — the honest convergence readout for "is the
-incompressibility constraint actually converged." **Healthy: mean well under 1% at defaults; the
-max can spike higher (10-20%) during active splashing/impact, settling back down between events** —
+incompressibility constraint actually converged." **Healthy: mean a few percent at defaults; the
+max can spike much higher (20-65%) at free surfaces and during active splashing/impact, settling back down between events** —
 this is not a computed-once static reading, it's Sampled every frame during active motion, so a
 transient impact naturally shows up. A settled, undisturbed puddle converges to mean well under
 1%, max under a few percent (`metrics::tests::settled_puddle_compression_error_is_small`).
 
-**Known issue (measured 2026-09-30, `examples/compression_probe.rs`, not yet fixed):** at the
-shipped 63 mm bench-drum defaults the reading is far above the "healthy" figures above, and it is
-*not* a transient: mean ~3500% / max ~15000% at 100 rpm, and still mean ~1270% with the drum
-stopped (legacy 1 m / 30 rpm: mean ~2%, max ~28%). It persists with no balls (mean ~2400%), drops
-at 10% slurry fill (mean ~59%), and falls ~3.7x with surface tension = 0 (still ~660%). So the
-"Max compression error" warning is currently a true positive at these defaults, and its 5%
-threshold should not be loosened until the small-drum fluid density issue in `pbf.rs` is understood.
+**Measured (2026-09-30, `examples/compression_probe.rs`, 63 mm default drum):** mean 2% / max
+~20-35% at rest, mean ~6% / max ~65% at 100 rpm. The max is dominated by free-surface and impact
+particles and is displayed but does not raise a warning; Solver health warns on the **mean**
+exceeding 10%. (Before the 2026-09-30 constraint-scaling fix in `pbf.rs` -- the gradient lacked the
+particle-mass factor, making the density correction ~1/mass too weak at small drums -- these were
+mean ~3500% / max ~15000% at 100 rpm and mean ~1270% at rest.)
 
 ### Density spread, max/mean (incl. free surface)
 
