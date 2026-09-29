@@ -63,7 +63,7 @@ export const GROUPS: FieldSchema["group"][] = ["Mill", "Media", "Lifters", "Slur
 
 export const SCHEMA: FieldSchema[] = [
   // Mill
-  { path: "mill.diameter_m", group: "Mill", label: "Drum diameter", unit: "m", type: "number", min: 0.03, max: 5, step: 0.01, resetRequired: true },
+  { path: "mill.diameter_m", group: "Mill", label: "Drum diameter", unit: "mm", type: "number", min: 30, max: 5000, step: 1, displayScale: 1000, resetRequired: true },
   {
     path: "mill.speed_mode",
     group: "Mill",

@@ -467,7 +467,10 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       derived.replaceChildren();
       return;
     }
-    const diameterM = Number(diameterInput.value);
+    const drumDiameterField = SCHEMA.find((f) => f.path === "mill.diameter_m");
+    const diameterM = drumDiameterField
+      ? fromDisplayValue(drumDiameterField, Number(diameterInput.value))
+      : Number(diameterInput.value);
     const mill = { diameter_m: diameterM, speed_mode: modeInput.value, speed_value: Number(valueInput.value) };
     if (!(diameterM > 0)) {
       derived.replaceChildren();
