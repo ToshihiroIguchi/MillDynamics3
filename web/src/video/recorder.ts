@@ -88,7 +88,7 @@ export class WebCodecsCanvasRecorder implements CanvasRecorder {
   private simTimeAtStart = 0;
   private lastFrameTime: number | null = null;
   private output: Output<Mp4OutputFormat | WebMOutputFormat, BufferTarget> | null = null;
-  private container: Container = CONTAINERS[0];
+  private container: Container = CONTAINERS[0]!;
   private source: CanvasSource | null = null;
   /** Set while the encoder is still accepting a frame (backpressure): frames are dropped, not
    * queued, so a slow encoder never stalls the render loop. */
