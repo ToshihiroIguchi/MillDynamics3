@@ -1533,3 +1533,17 @@ state after calling `compute`:
     consistent, expected behaviour of a coarse-grained 2D model, not a solver defect. A UI note was
     added (`web/src/ui/paramsPanel.ts`'s Slurry group) explaining this so it is not mistaken for a
     bug; no `dem.rs`/`pbf.rs`/`params.rs` change or default-value change was made.
+
+### 2 mm / 63 mm shipped default: measured side effects (2026-09-29)
+
+The default became a 2 mm ball in a 63 mm drum (118 rpm ~ 70% Nc, `N_true` ~ 244, Realtime
+`max_balls` 150 -> 300). Measured consequences, disclosed rather than tuned away:
+
+- `Params::effective_substeps` now returns 16 (the cap) at every quality tier: `D / d = 31.5`
+  needs ~19 sub-steps for the 0.5 displacement-ratio target, so the shipped default costs ~2x the
+  former 8 sub-steps per frame.
+- Transient ball-ball overlap at `dem_iterations = 2` is 0.3-0.5 of a radius (dry and static drum
+  alike, so it is DEM contact resolution of a dense pile); `dem_iterations = 6` gives ~0.12-0.15.
+- Wet: the maximum PBF compression error is 6-12 (sustained over 150 frames, not growing) --
+  single fluid particles pinched between the tiny balls; see the infiltration note above.
+  Energy-invariant tests still pass.

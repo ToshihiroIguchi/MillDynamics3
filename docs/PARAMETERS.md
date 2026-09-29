@@ -6,16 +6,16 @@ This reference documents every user-facing simulation parameter. The table data 
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
-| `mill.diameter_m` | Drum diameter | m | 1.0 | 0.03–5 | 0.01 | Inner drum diameter; the low end covers small bench/lab jar mills (~3 cm). Validation range is (0.02, 20.0) m SI. |
+| `mill.diameter_m` | Drum diameter | m | 0.063 (63 mm) | 0.03–5 | 0.01 | Inner drum diameter; the low end covers small bench/lab jar mills (~3 cm). Validation range is (0.02, 20.0) m SI. |
 | `mill.speed_mode` | Speed mode | — | `rpm` | `percent_critical` / `rpm` | — | Whether speed is specified as absolute rpm or percentage of critical speed. |
-| `mill.speed_value` | Speed | — | 30.0 | 0–300 | 1 | Rotation speed: interpretation depends on `speed_mode`. Default (~70% Nc for the default 1.0 m drum). |
+| `mill.speed_value` | Speed | — | 118.0 | 0–300 | 1 | Rotation speed: interpretation depends on `speed_mode`. Default (~70% Nc for the default 63 mm drum, Nc = 168.5 rpm). |
 | `mill.direction` | Direction | — | `counter_clockwise` | `counter_clockwise` / `clockwise` | — | Drum rotation direction viewed from the standard right-handed 2D frame (+x right, +y up). |
 
 ## Media Parameters
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
-| `media.ball_diameter_m` | Ball diameter | mm | 0.063 (63 mm) | 0.5–200 | 0.1 | Diameter of grinding balls. Defaults model yttria-stabilized zirconia (ZrO₂) ceramic media; 63 mm is a standard forged/ceramic tumbling-mill ball size, chosen so `True ball count` stays under every quality preset's `Max balls` (no coarse-graining out of the box, `k = 1.0`) at the default 1 m mill / fill / packing fraction. Validation range (0.0005, 1.0) m SI. |
+| `media.ball_diameter_m` | Ball diameter | mm | 0.002 (2 mm) | 0.5–200 | 0.1 | Diameter of grinding balls. Defaults model yttria-stabilized zirconia (ZrO₂) ceramic media in a lab-scale 63 mm drum; `True ball count` (~244) stays under every quality preset's `Max balls` (no coarse-graining out of the box, `k = 1.0`) at the default mill / fill / packing fraction. Validation range (0.0005, 1.0) m SI. |
 | `media.fill_fraction` | Fill fraction (J) | — | 0.30 | 0–0.9 | 0.01 | Fraction of drum cross-sectional area filled with media including voids (conventional "J" ball-loading fraction). |
 | `media.packing_fraction_2d` | 2D packing fraction | — | 0.82 | 0.5–0.907 | 0.001 | Areal packing fraction of settled disc charge (solid area / footprint area). Random close packing ≈ 0.82; hexagonal upper bound ≈ 0.907. |
 | `media.density_kg_m3` | Media density | kg/m³ | 6000.0 | 100–20000 | 100 | Ball material density. Default (6000 kg/m³) models ZrO₂ ceramic. Balls modelled as unit-depth discs. A "Media material" dropdown in the UI (`web/src/params/materials.ts`) offers representative densities for common grinding media as a shortcut into this field: YSZ (6000, the default), stainless steel (7700), alumina (3600), mullite (3000); an explicit "(custom)" option keeps the raw number editable. |
@@ -62,7 +62,7 @@ Not yet UI-exposed (no `schema.ts` entry): `media.friction_ball_ball_static`/`me
 |------|-------|-----------|--------------|--------------|-----------|-------|
 | `simulation.substeps` | Sub-steps / frame | — | 8 | 1–16 | 1 | Fixed sub-steps per rendered frame at 1× time scale. Nominal PBF step rate is `substeps × 60` Hz before frame-budget throttling. The sub-step count actually used by the solver can be silently raised above this value (capped at 16) by `Params::effective_substeps` when a coarse-grained ball population would otherwise push the XPBD stability criterion `max_substep_displacement_over_diameter` too close to 1 -- see `docs/PHYSICS.md` §9 for the full rationale and measured numbers (unchanged at `Params::default()` and every quality preset at the default 0.30 fill fraction; raises 8 -> 12 at `max_balls = 1500` with the Realtime preset's `resolution = 15`). |
 | `simulation.dem_iterations` | Ball solver iterations | — | 2 | 1–20 | 1 | XPBD non-penetration solver iterations per sub-step for the ball population. Trades contact-resolution accuracy for cost rather than stability. Halved (from 4) alongside doubling `substeps` (from 4) to keep DEM cost per rendered frame roughly flat while approximately halving the tunnelling-risk ratio `max_substep_displacement_over_diameter`; see `docs/PHYSICS.md` ss9. |
-| `simulation.max_balls` | Max balls (coarse-graining target) | — | 600 (mill-core `Default`); **150 at a fresh app load** (the Realtime quality preset, `web/src/worker.ts`) | 10–50000 | 10 | Target upper bound on simulated ball particles. If the true media population exceeds this, coarse-graining applies transparent particle scaling to preserve total charge mass and footprint area. See `docs/PLAN.md` ss3.2. mill-core's own `SimulationParams::default()` is deliberately left at this project's original, best-fidelity value (native tests/benches compare against it, `docs/PERF.md`) rather than changed to match the web app's own initial preset — see the Quality presets section below. |
+| `simulation.max_balls` | Max balls (coarse-graining target) | — | 600 (mill-core `Default`); **300 at a fresh app load** (the Realtime quality preset, `web/src/worker.ts`) | 10–50000 | 10 | Target upper bound on simulated ball particles. If the true media population exceeds this, coarse-graining applies transparent particle scaling to preserve total charge mass and footprint area. See `docs/PLAN.md` ss3.2. mill-core's own `SimulationParams::default()` is deliberately left at this project's original, best-fidelity value (native tests/benches compare against it, `docs/PERF.md`) rather than changed to match the web app's own initial preset — see the Quality presets section below. |
 | `simulation.resolution` | Slurry resolution (particles/radius) | — | 40 (mill-core `Default`); **15 at a fresh app load** (Realtime preset) | 4–200 | 1 | Fluid particles spanning the drum radius; sets the PBF lattice spacing `dx = drum_radius_m / resolution` and kernel radius `h = 2*dx`, baked in at seed time (`FluidParticles::seed_lattice`) -- changing it via `Simulation::set_params` alone has no effect on an already-seeded population, a full reset is required (`web/src/params/schema.ts`'s `resetRequired: true`). The resolution actually used to seed the fluid can be silently raised above this value by `Params::effective_fluid_resolution` when a coarse-grained ball population would otherwise leave the fluid lattice wider than a ball -- see `docs/PHYSICS.md` ss9 for the full rationale. |
 | `simulation.time_scale` | Time scale | — | 1.0 | 0.1–5 | 0.1 | Wall-clock-to-simulation-time multiplier requested by the user. Achieved rate is reported back and may be lower depending on frame budget. |
 
@@ -80,25 +80,25 @@ and disclosed here, not hidden, and reducing it needs either the M6 performance 
 aggressive ball coarse-graining than any of these three tiers use.
 
 **Stale `Achieved speed` column.** These figures were measured before `media.ball_diameter_m`'s
-default was raised from 10 mm to 63 mm (chosen so the shipped config needs no ball coarse-graining
--- see the Media table above). At the old default, each tier coarse-grained the true ~2460-ball
-population down to a different simulated ball count (150/300/600); at the new default `N_true`
-(~62) sits under all three tiers' `max_balls`, so every tier now simulates the *same* ~62 real
-63 mm balls -- only `resolution` (fluid particle count) still differs between tiers. `Fluid
+default changed to a 2 mm ball in a 63 mm drum (chosen so the shipped config needs no ball coarse-graining
+-- see the Media table above). At the old default, each tier coarse-grained a
+different simulated ball count; at the new default `N_true` (~244) sits under all three tiers'
+`max_balls` (300/300/600), so every tier now simulates the *same* ~244 real 2 mm balls -- only `resolution` (fluid particle count) still differs between tiers. `Fluid
 spacing / ball diameter` below is recomputed for the new default (`dx / d_eff` with `d_eff` fixed
-at 63 mm across all three tiers); `Achieved speed` has not been re-measured against the new,
+at 2 mm across all three tiers; the solver auto-raises the fluid resolution when this exceeds the
+warning threshold, `Params::effective_fluid_resolution`); `Achieved speed` has not been re-measured against the new,
 much smaller ball population and should be treated as directional only until `docs/PERF.md` is
 refreshed.
 
 | Preset | `max_balls` | `resolution` | Achieved speed (stale, see above) | Fluid spacing / ball diameter |
 |---|---|---|---|---|
-| **Realtime** (default at a fresh app load) | 150 | 15 | ~1.0-1.1x | ~0.53 |
-| Balanced | 300 | 25 | ~0.7-0.75x | ~0.32 |
-| Accuracy (mill-core's own `Default`) | 600 | 40 | ~0.3-0.4x | ~0.20 |
+| **Realtime** (default at a fresh app load) | 300 | 15 | ~1.0-1.1x | ~1.05 |
+| Balanced | 300 | 25 | ~0.7-0.75x | ~0.63 |
+| Accuracy (mill-core's own `Default`) | 600 | 40 | ~0.3-0.4x | ~0.39 |
 
-All three stay under the panel's own `> 1.0` "a single fluid particle is wider than a ball" warning
-threshold (a fluid particle is not literally larger than a coarse-grained ball at any of these
-settings), but all three are still coarse relative to what a visually smooth *thin film* specifically
+Realtime's ratio (~1.05) sits just over the panel's own `> 1.0` "a single fluid particle is wider
+than a ball" warning threshold at the new 2 mm default (the solver auto-raises its effective
+resolution in that case), Balanced and Accuracy stay under it, and all three are still coarse relative to what a visually smooth *thin film* specifically
 needs (a film a few millimetres thick is not resolvable by particles a third-to-half a ball diameter
 across) -- the warning threshold and "a thin wetting film looks smooth" are different bars, and none
 of these three tiers clears the second one.
