@@ -18,5 +18,5 @@ test("Record toggles a recording and downloads a WebM video on stop", async ({ p
   await page.getByRole("button", { name: "Stop recording" }).click();
   const download = await downloadPromise;
 
-  expect(download.suggestedFilename()).toMatch(/^milldynamics-recording-.*\.webm$/);
+  expect(download.suggestedFilename()).toMatch(/^milldynamics-recording-.*\.(mp4|webm)$/);
 });

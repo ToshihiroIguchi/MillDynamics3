@@ -420,6 +420,45 @@ body.params-collapsed .params-panel {
   font-size: 13px;
 }
 
+.params-label {
+  min-width: 0;
+}
+
+/* Small "?" tooltip affordance after a label (ui/helpIcon.ts), shared by the params and
+   metrics panels. */
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-left: 5px;
+  border: 1px solid #5a6472;
+  border-radius: 50%;
+  color: #9aa3b0;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+  vertical-align: middle;
+  flex: none;
+  user-select: none;
+}
+
+.help-icon:hover,
+.help-icon:focus-visible {
+  color: #e6e9ef;
+  border-color: #e6e9ef;
+  outline: none;
+}
+
+/* "↻" marker after a label whose change restarts the simulation (ui/paramsPanel.ts). */
+.reset-glyph {
+  margin-left: 4px;
+  color: #e8a33d;
+  cursor: help;
+}
+
 .params-row input,
 .params-row select {
   background: #12161c;

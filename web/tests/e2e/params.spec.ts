@@ -22,7 +22,7 @@ test("derived N_sim readout in the parameters panel never exceeds the max-balls 
 
   await expect(page.locator("#params-panel")).toBeVisible();
 
-  // "Max balls" lives in the "Simulation" group, which is collapsed by default.
+  // "Max balls" lives in the "Numerical accuracy" group, which is collapsed by default.
   const maxBallsInput = await openField(page, "Max balls (coarse-graining target)");
   const maxBallsValue = Number(await maxBallsInput.inputValue());
 
@@ -57,7 +57,7 @@ test("applying an off-step value round-trips through the WASM core", async ({ pa
   // media.density_kg_m3 is `resetRequired` (schema.ts) -- baked into the ball population's mass
   // at seed time -- so this Apply still goes through a real WASM reinit, same as before Apply
   // started hot-applying fields that don't need one.
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   // Apply triggers a real WASM reinit (resets the simulation), which can take a few seconds --
   // poll rather than using a fixed short timeout.
@@ -87,8 +87,9 @@ test("applying a hot-appliable (resetRequired: false) field shows Applied, not a
 
   const status = page.locator(".params-status");
   await expect(status).toHaveText("Edited — not applied");
+  await expect(page.getByRole("button", { name: /^Apply/ })).toHaveText("Apply (live)");
 
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   await expect(status).toHaveText("Applied");
   await expect(status).toHaveClass(/is-applied/);
@@ -105,7 +106,7 @@ test("the Slurry group shows a static infiltration-limitation note", async ({ pa
   // static note, appended after the group's per-field rows in ui/paramsPanel.ts.
   await openField(page, "Viscosity (Pa·s)");
 
-  const slurryNote = page.locator(".params-note", { hasText: "Slurry percolation" });
+  const slurryNote = page.locator(".params-note", { hasText: "Slurry barely seeps" });
   await expect(slurryNote).toBeVisible();
 });
 
@@ -118,7 +119,7 @@ test("an out-of-range value shows a visible error without freezing the simulatio
   const diameterInput = await openField(page, "Drum diameter (mm)");
   await diameterInput.fill("0");
 
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   const errorBanner = page.locator(".params-error");
   await expect(errorBanner).toBeVisible();

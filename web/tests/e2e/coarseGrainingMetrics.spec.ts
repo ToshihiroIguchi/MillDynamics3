@@ -43,7 +43,7 @@ test("collision rate and impact histogram are hidden with an explanatory banner 
   // be, turning coarse-graining on (k > 1).
   const ballDiameterInput = await openField(page, "Ball diameter (mm)");
   await ballDiameterInput.fill("10");
-  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await page.getByRole("button", { name: /^Apply/ }).click();
 
   // Apply triggers a real WASM reinit (media.ball_diameter_m is resetRequired), which can take a
   // few seconds -- poll rather than using a fixed short timeout.

@@ -255,7 +255,20 @@ const panelEl = document.querySelector<HTMLElement>("#metrics-panel");
 if (!panelEl) {
   throw new Error("Missing #metrics-panel element");
 }
-const metricsPanel = createMetricsPanel(panelEl, pauseForAutoReport);
+const metricsPanel = createMetricsPanel(panelEl, pauseForAutoReport, () => {
+  try {
+    // Downscale so the embedded PNG stays small (the report shows it at <= 90 mm wide).
+    const scale = Math.min(1, 700 / Math.max(canvas.width, canvas.height));
+    if (scale >= 1) return canvas.toDataURL("image/png");
+    const off = document.createElement("canvas");
+    off.width = Math.max(1, Math.round(canvas.width * scale));
+    off.height = Math.max(1, Math.round(canvas.height * scale));
+    off.getContext("2d")?.drawImage(canvas, 0, 0, off.width, off.height);
+    return off.toDataURL("image/png");
+  } catch {
+    return null;
+  }
+});
 
 const SPACE_GUARD_SELECTOR = "input, select, textarea, summary, button, [contenteditable]";
 

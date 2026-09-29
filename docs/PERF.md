@@ -135,7 +135,7 @@ steady cascading after ~10 s of sim time), with the metrics/surface throttling f
 | 600 | 40 (mill-core's own `Default`) | ~0.3-0.4x | ~0.62 |
 
 The first, third, and fourth rows are exposed as the "Realtime" / "Balanced" / "Accuracy" quality
-presets (`web/src/params/presets.ts`, selectable in the parameters panel's Simulation group); a
+presets (`web/src/params/presets.ts`, selectable in the parameters panel's Numerical accuracy group); a
 fresh app load with no explicit params starts at Realtime (`web/src/worker.ts`), not mill-core's
 own `SimulationParams::default()` (kept at the `600`/`40` "Accuracy" values since native
 tests/benches on this page compare against it directly). All three presets stay under the

@@ -155,6 +155,14 @@ this is not a computed-once static reading, it's Sampled every frame during acti
 transient impact naturally shows up. A settled, undisturbed puddle converges to mean well under
 1%, max under a few percent (`metrics::tests::settled_puddle_compression_error_is_small`).
 
+**Known issue (measured 2026-09-30, `examples/compression_probe.rs`, not yet fixed):** at the
+shipped 63 mm bench-drum defaults the reading is far above the "healthy" figures above, and it is
+*not* a transient: mean ~3500% / max ~15000% at 100 rpm, and still mean ~1270% with the drum
+stopped (legacy 1 m / 30 rpm: mean ~2%, max ~28%). It persists with no balls (mean ~2400%), drops
+at 10% slurry fill (mean ~59%), and falls ~3.7x with surface tension = 0 (still ~660%). So the
+"Max compression error" warning is currently a true positive at these defaults, and its 5%
+threshold should not be loosened until the small-drum fluid density issue in `pbf.rs` is understood.
+
 ### Density spread, max/mean (incl. free surface)
 
 The *absolute-value* reading, `|rho_i/rho0 - 1|`, over the whole population — kept for CSV/back-
