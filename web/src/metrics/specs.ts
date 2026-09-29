@@ -37,6 +37,8 @@ export interface MetricSpec {
   group: MetricGroupName;
   label: string;
   unit?: string;
+  /** One/two-sentence explanation shown as a tooltip on the "?" icon next to the label. */
+  help?: string;
   /** Extracts this metric's raw numeric value from the current context, or `null` if
    * unavailable/undefined for the current state (e.g. toe angle while centrifuged). */
   value(ctx: MetricContext): number | null;
@@ -97,23 +99,25 @@ const m = <K extends keyof Metrics>(key: K) =>
 
 export const METRIC_SPECS: MetricSpec[] = [
   // --- Drum -------------------------------------------------------------------------------
-  { id: "sim_time", group: "Drum", label: "Sim time", unit: "s", value: (ctx) => ctx.simTime, format: fixed(1), csv: true },
-  { id: "fps", group: "Drum", label: "FPS", value: (ctx) => ctx.fps, format: fixed(0) },
-  { id: "achieved_speed", group: "Drum", label: "Achieved speed", unit: "x", value: (ctx) => ctx.achievedTimeScale, format: fixed(2), csv: true },
-  { id: "substeps_achieved_per_s", group: "Drum", label: "Sub-steps/s (achieved)", value: (ctx) => ctx.subStepsPerSecondAchieved, format: fixed(0), csv: true },
-  { id: "substeps_required_per_s", group: "Drum", label: "Sub-steps/s (required for 1x)", value: (ctx) => ctx.subStepsPerSecondRequired, format: fixed(0), csv: true },
-  { id: "rpm", group: "Drum", label: "Speed", unit: "rpm", value: (ctx) => ctx.rpm, format: fixed(1), csv: true },
-  { id: "percent_critical", group: "Drum", label: "Speed", unit: "% Nc", value: (ctx) => ctx.percentCritical, format: fixed(0), csv: true },
-  { id: "critical_speed_rpm", group: "Drum", label: "Critical speed", unit: "rpm", value: (ctx) => ctx.criticalSpeedRpm, format: fixed(1) },
-  { id: "drum_omega", group: "Drum", label: "Angular velocity", unit: "rad/s", value: m("drum_omega_rad_s"), format: fixed(2) },
+  { id: "sim_time", help: "Simulated (physical) time elapsed since the last reset.", group: "Drum", label: "Sim time", unit: "s", value: (ctx) => ctx.simTime, format: fixed(1), csv: true },
+  { id: "fps", help: "Rendered frames per second of the browser display loop.", group: "Drum", label: "FPS", value: (ctx) => ctx.fps, format: fixed(0) },
+  { id: "achieved_speed", help: "Simulated time per wall-clock time actually achieved. Below the requested Time scale means the computer cannot keep up.", group: "Drum", label: "Achieved speed", unit: "x", value: (ctx) => ctx.achievedTimeScale, format: fixed(2), csv: true },
+  { id: "substeps_achieved_per_s", help: "Solver sub-steps actually computed per wall-clock second.", group: "Drum", label: "Sub-steps/s (achieved)", value: (ctx) => ctx.subStepsPerSecondAchieved, format: fixed(0), csv: true },
+  { id: "substeps_required_per_s", help: "Sub-steps per second needed to run at the requested Time scale (1x means real time).", group: "Drum", label: "Sub-steps/s (required for 1x)", value: (ctx) => ctx.subStepsPerSecondRequired, format: fixed(0), csv: true },
+  { id: "rpm", help: "Current drum rotation speed in revolutions per minute.", group: "Drum", label: "Speed", unit: "rpm", value: (ctx) => ctx.rpm, format: fixed(1), csv: true },
+  { id: "percent_critical", help: "Current drum speed as a percentage of the critical speed Nc.", group: "Drum", label: "Speed", unit: "% Nc", value: (ctx) => ctx.percentCritical, format: fixed(0), csv: true },
+  { id: "critical_speed_rpm", help: "Critical speed Nc: the speed at which a ball at the wall just stops falling and centrifuges, from the drum diameter.", group: "Drum", label: "Critical speed", unit: "rpm", value: (ctx) => ctx.criticalSpeedRpm, format: fixed(1) },
+  { id: "drum_omega", help: "Drum angular velocity in radians per second (signed by rotation direction).", group: "Drum", label: "Angular velocity", unit: "rad/s", value: m("drum_omega_rad_s"), format: fixed(2) },
 
   // --- Media (charge geometry) --------------------------------------------------------------
-  { id: "true_ball_count", group: "Media", label: "True ball count", value: m("true_ball_count"), format: fixed(0), csv: true },
-  { id: "simulated_ball_count", group: "Media", label: "Simulated balls", value: m("simulated_ball_count"), format: fixed(0), csv: true },
-  { id: "coarse_graining_factor", group: "Media", label: "Coarse-graining (k)", value: m("coarse_graining_factor"), format: fixed(2), csv: true },
-  { id: "effective_ball_diameter_mm", group: "Media", label: "Effective diameter", unit: "mm", value: (ctx) => (ctx.metrics ? ctx.metrics.effective_ball_diameter_m * 1000 : null), format: fixed(2) },
+  { id: "true_ball_count", help: "Number of balls a real mill with these settings would hold (from Fill fraction, packing fraction and Ball diameter).", group: "Media", label: "True ball count", value: m("true_ball_count"), format: fixed(0), csv: true },
+  { id: "simulated_ball_count", help: "Number of balls actually simulated. Lower than the true count when coarse-graining is active.", group: "Media", label: "Simulated balls", value: m("simulated_ball_count"), format: fixed(0), csv: true },
+  { id: "coarse_graining_factor", help: "Ball-size scale factor k. 1 means true-size balls; above 1 balls are enlarged so total charge mass and footprint are preserved.", group: "Media", label: "Coarse-graining (k)", value: m("coarse_graining_factor"), format: fixed(2), csv: true },
+  { id: "effective_ball_diameter_mm", help: "Diameter of the balls actually simulated (true diameter multiplied by k).", group: "Media", label: "Effective diameter", unit: "mm", value: (ctx) => (ctx.metrics ? ctx.metrics.effective_ball_diameter_m * 1000 : null), format: fixed(2) },
   {
     id: "toe_angle_deg",
+
+    help: "Angle of the charge toe, where balls rejoin the bed at the bottom, measured from vertical. Not defined when the charge centrifuges.",
     group: "Media",
     label: "Toe angle",
     unit: "° from vertical",
@@ -134,6 +138,8 @@ export const METRIC_SPECS: MetricSpec[] = [
   },
   {
     id: "shoulder_angle_deg",
+
+    help: "Angle of the charge shoulder, where balls leave the bed at the top, measured from vertical. Not defined when the charge centrifuges.",
     group: "Media",
     label: "Shoulder angle",
     unit: "° from vertical",
@@ -150,17 +156,19 @@ export const METRIC_SPECS: MetricSpec[] = [
         ? "Centrifuging"
         : null,
   },
-  { id: "centroid_x", group: "Media", label: "Charge centroid X", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[0] ?? null, format: fixed(3), csv: true },
-  { id: "centroid_y", group: "Media", label: "Charge centroid Y", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[1] ?? null, format: fixed(3), csv: true },
-  { id: "total_kinetic_energy", group: "Media", label: "Total kinetic energy", unit: "J/m", value: m("total_kinetic_energy_j"), format: fixed(2), sparkline: true, csv: true, key: true },
-  { id: "max_ball_overlap", group: "Media", label: "Max ball overlap (of radius)", value: m("max_ball_overlap_fraction"), format: percentOf1(2), csv: true },
-  { id: "max_ball_wall_overlap", group: "Media", label: "Max ball-wall overlap (of radius)", value: m("max_ball_wall_overlap_fraction"), format: percentOf1(2), csv: true },
+  { id: "centroid_x", help: "Horizontal position of the ball charge's centre of mass, relative to the drum centre.", group: "Media", label: "Charge centroid X", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[0] ?? null, format: fixed(3), csv: true },
+  { id: "centroid_y", help: "Vertical position of the ball charge's centre of mass, relative to the drum centre (negative is below).", group: "Media", label: "Charge centroid Y", unit: "m", value: (ctx) => ctx.metrics?.charge_centroid_m?.[1] ?? null, format: fixed(3), csv: true },
+  { id: "total_kinetic_energy", help: "Translational plus rotational kinetic energy of all balls, per metre of drum length. Levels off once the charge has settled into steady motion.", group: "Media", label: "Total kinetic energy", unit: "J/m", value: m("total_kinetic_energy_j"), format: fixed(2), sparkline: true, csv: true, key: true },
+  { id: "max_ball_overlap", help: "Largest ball-ball penetration as a fraction of the ball radius. A solver-accuracy indicator; raise Ball solver iterations to reduce it.", group: "Media", label: "Max ball overlap (of radius)", value: m("max_ball_overlap_fraction"), format: percentOf1(2), csv: true },
+  { id: "max_ball_wall_overlap", help: "Largest ball-wall (or lifter) penetration as a fraction of the ball radius. A solver-accuracy indicator.", group: "Media", label: "Max ball-wall overlap (of radius)", value: m("max_ball_wall_overlap_fraction"), format: percentOf1(2), csv: true },
 
   // --- Grinding (power draw / collisions / dissipation) -------------------------------------
-  { id: "power_draw", group: "Grinding", label: "Power draw", unit: "W/m", value: m("power_draw_w"), format: fixed(2), sparkline: true, csv: true, key: true },
-  { id: "torque", group: "Grinding", label: "Torque", unit: "N·m/m", value: m("torque_nm"), format: fixed(3), csv: true },
+  { id: "power_draw", help: "Mechanical power the drum wall delivers to the charge (and slurry), per metre of drum length. Near zero when centrifuging.", group: "Grinding", label: "Power draw", unit: "W/m", value: m("power_draw_w"), format: fixed(2), sparkline: true, csv: true, key: true },
+  { id: "torque", help: "Torque the drum applies to the charge (and slurry), per metre of drum length.", group: "Grinding", label: "Torque", unit: "N·m/m", value: m("torque_nm"), format: fixed(3), csv: true },
   {
     id: "collision_rate",
+
+    help: "Ball collisions per second per metre of drum length. Hidden while coarse-graining is active because it would not be comparable to a real mill.",
     group: "Grinding",
     label: "Collision rate",
     unit: "1/s/m",
@@ -173,12 +181,14 @@ export const METRIC_SPECS: MetricSpec[] = [
     unavailable: (_value, ctx) => coarseGrainingReason(ctx),
     hideWhenUnavailable: true,
   },
-  { id: "dissipated_power", group: "Grinding", label: "Dissipated power", unit: "W/m", value: m("dissipated_power_w"), format: fixed(2), sparkline: true, csv: true, key: true },
+  { id: "dissipated_power", help: "Rate at which ball contacts (friction, inelastic impacts, rolling resistance) dissipate energy. Should be positive and of the same order as Power draw in a dry steady state.", group: "Grinding", label: "Dissipated power", unit: "W/m", value: m("dissipated_power_w"), format: fixed(2), sparkline: true, csv: true, key: true },
 
   // --- Slurry -------------------------------------------------------------------------------
-  { id: "fluid_particle_count", group: "Slurry", label: "Fluid particles", value: m("fluid_particle_count"), format: fixed(0), csv: true },
+  { id: "fluid_particle_count", help: "Number of slurry particles being simulated.", group: "Slurry", label: "Fluid particles", value: m("fluid_particle_count"), format: fixed(0), csv: true },
   {
     id: "pool_angle_range",
+
+    help: "Angular span around the drum that the slurry pool occupies.",
     group: "Slurry",
     label: "Pool angular extent",
     unit: "°",
@@ -188,11 +198,13 @@ export const METRIC_SPECS: MetricSpec[] = [
         : null,
     format: fixed(0),
   },
-  { id: "free_surface_angle", group: "Slurry", label: "Free-surface angle", unit: "°", value: (ctx) => (ctx.metrics?.free_surface_angle_rad != null ? (ctx.metrics.free_surface_angle_rad * 180) / Math.PI : null), format: fixed(1) },
-  { id: "free_surface_offset", group: "Slurry", label: "Free-surface offset", unit: "m", value: m("free_surface_offset_m"), format: fixed(3) },
-  { id: "pool_depth", group: "Slurry", label: "Pool depth (bottom)", unit: "m", value: m("pool_depth_m"), format: fixed(3), csv: true },
+  { id: "free_surface_angle", help: "Tilt of the slurry free surface relative to horizontal.", group: "Slurry", label: "Free-surface angle", unit: "°", value: (ctx) => (ctx.metrics?.free_surface_angle_rad != null ? (ctx.metrics.free_surface_angle_rad * 180) / Math.PI : null), format: fixed(1) },
+  { id: "free_surface_offset", help: "Vertical offset of the slurry free surface from the drum centre.", group: "Slurry", label: "Free-surface offset", unit: "m", value: m("free_surface_offset_m"), format: fixed(3) },
+  { id: "pool_depth", help: "Depth of the slurry pool measured at the bottom of the drum.", group: "Slurry", label: "Pool depth (bottom)", unit: "m", value: m("pool_depth_m"), format: fixed(3), csv: true },
   {
     id: "mixing_index",
+
+    help: "Lacey mixing index of the dye tracer: 0 is fully segregated, 1 is fully mixed. Hidden when slurry is off.",
     group: "Slurry",
     label: "Mixing index",
     value: m("mixing_index"),
@@ -205,16 +217,16 @@ export const METRIC_SPECS: MetricSpec[] = [
     unavailable: (_value, ctx) => (ctx.slurryEnabled === false ? "Slurry off" : null),
     hideWhenUnavailable: true,
   },
-  { id: "max_compression_error", group: "Slurry", label: "Max compression error", value: m("max_fluid_compression_error_fraction"), format: percentOf1(2), sparkline: true, csv: true },
-  { id: "mean_compression_error", group: "Slurry", label: "Mean compression error", value: m("mean_fluid_compression_error_fraction"), format: percentOf1(2), csv: true },
-  { id: "max_density_error", group: "Slurry", label: "Density spread, max (incl. free surface)", value: m("max_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
-  { id: "mean_density_error", group: "Slurry", label: "Density spread, mean (incl. free surface)", value: m("mean_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
-  { id: "mean_shear_rate", group: "Slurry", label: "Mean shear rate", unit: "1/s", value: m("mean_shear_rate_per_s"), format: fixed(2), csv: true },
-  { id: "viscosity_iterations", group: "Slurry", label: "Viscosity CG iterations", value: m("viscosity_solver_iterations"), format: fixed(0) },
+  { id: "max_compression_error", help: "Worst over-compression of any fluid particle (density above rest density) as a fraction. A solver-convergence indicator; it warns above 5%.", group: "Slurry", label: "Max compression error", value: m("max_fluid_compression_error_fraction"), format: percentOf1(2), sparkline: true, csv: true },
+  { id: "mean_compression_error", help: "Average over-compression across all fluid particles, as a fraction of rest density.", group: "Slurry", label: "Mean compression error", value: m("mean_fluid_compression_error_fraction"), format: percentOf1(2), csv: true },
+  { id: "max_density_error", help: "Largest deviation of fluid density from rest density, including under-dense free-surface particles, so it is expected to be large. Not a failure signal on its own.", group: "Slurry", label: "Density spread, max (incl. free surface)", value: m("max_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
+  { id: "mean_density_error", help: "Average deviation of fluid density from rest density, including free-surface particles. Not a failure signal on its own.", group: "Slurry", label: "Density spread, mean (incl. free surface)", value: m("mean_fluid_density_error_fraction"), format: percentOf1(1), csv: true },
+  { id: "mean_shear_rate", help: "Average velocity gradient within the slurry. Multiplied by viscosity it gives the viscous stress.", group: "Slurry", label: "Mean shear rate", unit: "1/s", value: m("mean_shear_rate_per_s"), format: fixed(2), csv: true },
+  { id: "viscosity_iterations", help: "Conjugate-gradient iterations the viscosity solver needed in the latest step. High values mean a stiff, thick fluid.", group: "Slurry", label: "Viscosity CG iterations", value: m("viscosity_solver_iterations"), format: fixed(0) },
 
   // --- Solver health --------------------------------------------------------------------------
-  { id: "coupling_clamp_hits", group: "Solver", label: "Coupling clamp hits", value: m("coupling_clamp_hits"), format: fixed(0), sparkline: true, csv: true },
-  { id: "substep_displacement", group: "Solver", label: "Substep displacement / diameter", value: m("max_substep_displacement_over_diameter"), format: fixed(3), csv: true },
+  { id: "coupling_clamp_hits", help: "Times the ball-fluid coupling force was limited for stability in the latest step. Any nonzero value warns of an over-stressed coupling.", group: "Solver", label: "Coupling clamp hits", value: m("coupling_clamp_hits"), format: fixed(0), sparkline: true, csv: true },
+  { id: "substep_displacement", help: "Largest distance a ball moves in one sub-step, relative to its diameter. Should stay well below 1; above 0.5 warns of tunnelling risk.", group: "Solver", label: "Substep displacement / diameter", value: m("max_substep_displacement_over_diameter"), format: fixed(3), csv: true },
 ];
 
 export const METRIC_GROUPS: MetricGroupName[] = ["Drum", "Media", "Grinding", "Slurry", "Solver"];

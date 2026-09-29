@@ -54,9 +54,11 @@ Not yet UI-exposed (no `schema.ts` entry): `media.friction_ball_ball_static`/`me
 
 **Derived: Interstitial filling (U).** The params panel's Derived section also shows `U = slurry.fill_fraction / (media.fill_fraction * (1 - media.packing_fraction_2d))`, the ratio of slurry volume to the ball charge's void volume; see `docs/PHYSICS.md` §9's "2D areal packing is not 3D voidage" entry for why this project's 2D packing makes the same `slurry.fill_fraction` correspond to a much higher `U` (and deeper-looking pool) than an equivalent real 3D mill.
 
-**Note: limited percolation into a settled bed.** The Slurry group in the params panel shows a note that slurry does not meaningfully seep into a stationary, settled ball bed, even at low viscosity with the drum stopped — expect most slurry to stay visible as a pool above the bed. This is an expected consequence of the fluid lattice spacing being comparable to the gaps between packed balls, compounded by the lower, less-connected void fraction of a 2D packed-circle bed versus a real 3D mill; see `docs/PHYSICS.md` §9's "Slurry does not seep into a settled/stationary ball bed" entry for the measurements.
+**Note: limited percolation into a settled bed.** The Slurry group in the params panel shows a one-line note (the longer explanation is in the Slurry resolution field's "?" tooltip) that slurry does not meaningfully seep into a stationary, settled ball bed, even at low viscosity with the drum stopped — expect most slurry to stay visible as a pool above the bed. This is an expected consequence of the fluid lattice spacing being comparable to the gaps between packed balls, compounded by the lower, less-connected void fraction of a 2D packed-circle bed versus a real 3D mill; see `docs/PHYSICS.md` §9's "Slurry does not seep into a settled/stationary ball bed" entry for the measurements.
 
-## Simulation Parameters
+## Numerical accuracy Parameters
+
+The panel group formerly called "Simulation" is now "Numerical accuracy"; the underlying Params paths remain `simulation.*`.
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
@@ -69,7 +71,7 @@ Not yet UI-exposed (no `schema.ts` entry): `media.friction_ball_ball_static`/`me
 ### Quality presets
 
 `web/src/params/presets.ts` offers three pre-measured `(max_balls, resolution)` pairs as one-click
-choices in the parameters panel's Simulation group ("Quality preset" selector), still requiring
+choices in the parameters panel's Numerical accuracy group ("Quality preset" selector), still requiring
 Apply (both fields reset the simulation) like any other field edit. Measured in-browser, WASM
 release build, default drum/media/slurry otherwise, `lifters.count = 0`, steady cascading after
 ~10 s of sim time -- see `docs/PERF.md` for the full methodology. "Fluid spacing / ball diameter"

@@ -1,4 +1,4 @@
-// Parameters left panel (v1: Mill / Media / Lifters / Slurry / Simulation groups, schema-driven
+// Parameters left panel (v1: Mill / Media / Lifters / Slurry / Numerical accuracy groups, schema-driven
 // from src/params/schema.ts, plus a Derived group). See docs/PLAN.md ss4.3. Replaces the earlier
 // <dialog>-based modal (ui/paramsModal.ts) with a persistent <aside> panel that sits beside the
 // canvas, symmetric with the metrics panel on the right. A Display tab and full validation UX
@@ -19,6 +19,7 @@ import {
   substepDisplacementOverDiameter,
   trueBallCount,
 } from "../params/derived";
+import { createHelpIcon } from "./helpIcon";
 import { MEDIA_MATERIALS } from "../params/materials";
 import { QUALITY_PRESETS } from "../params/presets";
 import { fromDisplayValue, GROUPS, getPath, SCHEMA, toDisplayValue, withPath } from "../params/schema";
@@ -30,7 +31,7 @@ const DEFAULT_GROUP_OPEN: Record<string, boolean> = {
   Media: true,
   Lifters: false,
   Slurry: false,
-  Simulation: false,
+  "Numerical accuracy": false,
   Derived: true,
 };
 
@@ -42,6 +43,11 @@ function readGroupOpenPrefs(): Record<string, boolean> {
     const result: Record<string, boolean> = { ...DEFAULT_GROUP_OPEN };
     for (const key of Object.keys(result)) {
       if (typeof parsed[key] === "boolean") result[key] = parsed[key] as boolean;
+    }
+    // "Numerical accuracy" was called "Simulation" in earlier versions: honour the old stored key
+    // when the new one is absent, so a user's open/closed choice survives the rename.
+    if (typeof parsed["Numerical accuracy"] !== "boolean" && typeof parsed.Simulation === "boolean") {
+      result["Numerical accuracy"] = parsed.Simulation;
     }
     return result;
   } catch {
@@ -228,11 +234,16 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     summary.textContent = group;
     details.appendChild(summary);
 
-    if (group === "Simulation") {
+    if (group === "Numerical accuracy") {
       const presetRow = document.createElement("label");
       presetRow.className = "params-row";
       const presetLabel = document.createElement("span");
-      presetLabel.textContent = "Quality preset";
+      presetLabel.className = "params-label";
+      presetLabel.append("Quality preset");
+      const presetHelp = createHelpIcon(
+        "One-click (Max balls, Slurry resolution) pair trading speed against accuracy. Apply is still needed, and both fields reset the simulation.",
+      );
+      if (presetHelp) presetLabel.appendChild(presetHelp);
       presetRow.appendChild(presetLabel);
 
       presetSelect = document.createElement("select");
@@ -288,7 +299,12 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       const materialRow = document.createElement("label");
       materialRow.className = "params-row";
       const materialLabel = document.createElement("span");
-      materialLabel.textContent = "Media material";
+      materialLabel.className = "params-label";
+      materialLabel.append("Media material");
+      const materialHelp = createHelpIcon(
+        "Fills in Media density from a common ball material. Choose (custom) to type your own density.",
+      );
+      if (materialHelp) materialLabel.appendChild(materialHelp);
       materialRow.appendChild(materialLabel);
 
       materialSelect = document.createElement("select");
@@ -339,7 +355,10 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       // so the valid range is otherwise invisible; show it in the label and as a hover tooltip.
       const rangeSuffix = field.min !== undefined && field.max !== undefined ? ` [${field.min}–${field.max}]` : "";
       const labelText = document.createElement("span");
-      labelText.textContent = (field.unit ? `${field.label} (${field.unit})` : field.label) + rangeSuffix;
+      labelText.className = "params-label";
+      labelText.append((field.unit ? `${field.label} (${field.unit})` : field.label) + rangeSuffix);
+      const helpIcon = createHelpIcon(field.help);
+      if (helpIcon) labelText.appendChild(helpIcon);
       row.appendChild(labelText);
 
       let input: HTMLInputElement | HTMLSelectElement;
@@ -390,7 +409,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       details.appendChild(mediaWarn);
     }
 
-    if (group === "Simulation") {
+    if (group === "Numerical accuracy") {
       coarseGrainingWarn = document.createElement("p");
       coarseGrainingWarn.className = "params-warn";
       coarseGrainingWarn.hidden = true;
@@ -398,21 +417,13 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     }
 
     if (group === "Slurry") {
-      // Static, always-visible background information (not a threshold-triggered alert like
-      // `mediaWarn` above, so `params-note` rather than `params-warn`, and no later toggling
-      // logic is needed): slurry percolation into a settled, stationary ball bed is inherently
-      // limited by this model's fluid-lattice resolution and by 2D areal packing having a lower,
-      // less-connected void fraction than a real 3D mill. See docs/PHYSICS.md ss9 ("Slurry does
-      // not seep into a settled/stationary ball bed...") for the full measured write-up (dx/d_eff
-      // ratios, covered-fraction numbers at two resolutions) -- this note only summarizes it.
+      // Static, always-visible one-line reminder (not a threshold-triggered alert like `mediaWarn`
+      // above, so `params-note` rather than `params-warn`). The longer explanation lives in the
+      // "Slurry resolution" field's help text (schema.ts) and docs/PHYSICS.md section 9.
       const slurryInfiltrationNote = document.createElement("p");
       slurryInfiltrationNote.className = "params-note";
       slurryInfiltrationNote.textContent =
-        "Slurry percolation into a settled, stationary ball bed is inherently limited in this model: " +
-        "the fluid particle spacing is comparable to the gaps between packed balls, and this project's " +
-        "2D cross-section has a lower, less-connected void fraction than a real 3D mill (see " +
-        "docs/PHYSICS.md §9). Expect most slurry to remain visible as a pool above the bed even at " +
-        "low viscosity with the drum stopped -- this is expected model behaviour, not a solver bug.";
+        "Slurry barely seeps into a settled bed in this 2D model -- expected, not a bug (docs/PHYSICS.md §9).";
       details.appendChild(slurryInfiltrationNote);
     }
 
@@ -534,28 +545,87 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const u = interstitialFilling(slurryFill, media);
     const coarseGrainingActive = eff.scaleFactor > 1;
 
-    const rows: [string, string, boolean?][] = [
-      ["Critical speed (Nc)", `${criticalSpeedRpm(diameterM).toFixed(1)} rpm`],
-      ["Current speed", `${rpmOf(mill).toFixed(1)} rpm (${percentCriticalOf(mill).toFixed(0)}% Nc)`],
-      ["True ball count (N_true)", nTrue.toFixed(0)],
-      ["Simulated balls (N_sim)", String(eff.ballCount)],
+    const rows: [string, string, boolean | undefined, string][] = [
+      [
+        "Critical speed (Nc)",
+        `${criticalSpeedRpm(diameterM).toFixed(1)} rpm`,
+        undefined,
+        "Speed at which a ball at the wall just stops falling and centrifuges, from the drum diameter.",
+      ],
+      [
+        "Current speed",
+        `${rpmOf(mill).toFixed(1)} rpm (${percentCriticalOf(mill).toFixed(0)}% Nc)`,
+        undefined,
+        "The drum speed entered above, shown both in rpm and as a percentage of critical speed.",
+      ],
+      [
+        "True ball count (N_true)",
+        nTrue.toFixed(0),
+        undefined,
+        "Number of balls a real mill with these Media settings would hold.",
+      ],
+      [
+        "Simulated balls (N_sim)",
+        String(eff.ballCount),
+        undefined,
+        "Number of balls actually simulated; lower than N_true when coarse-graining is active.",
+      ],
       [
         "Coarse-graining",
         coarseGrainingActive ? `ON (k = ${eff.scaleFactor.toFixed(3)})` : "OFF (k = 1, true size)",
+        undefined,
+        "Whether balls are enlarged by a factor k to keep the count manageable while preserving charge mass and footprint.",
       ],
-      ["Effective ball diameter", `${(eff.diameterM * 1000).toFixed(2)} mm`],
-      ["Interstitial filling (U)", u.toFixed(3)],
-      ["Fluid spacing vs ball diameter", fluidSpacingVsBall.toFixed(2), fluidSpacingVsBall > 1.0],
-      ["Effective slurry resolution", `${effectiveResolution}`, effectiveResolution > resolution],
-      ["Est. fluid particles", String(fluidCount)],
-      ["Effective sub-steps", `${effectiveSubstepCount}`, effectiveSubstepCount > substeps],
-      ["Sub-step displacement / diameter", substepDisp.toFixed(3), substepDisp > 0.3],
+      [
+        "Effective ball diameter",
+        `${(eff.diameterM * 1000).toFixed(2)} mm`,
+        undefined,
+        "Diameter of the balls actually simulated (true diameter times k).",
+      ],
+      [
+        "Interstitial filling (U)",
+        u.toFixed(3),
+        undefined,
+        "Slurry fill divided by the void space of the ball bed (J x void fraction). About 1 means the slurry just fills the gaps; above 1 leaves a pool over the bed.",
+      ],
+      [
+        "Fluid spacing vs ball diameter",
+        fluidSpacingVsBall.toFixed(2),
+        fluidSpacingVsBall > 1.0,
+        "Slurry particle spacing divided by the effective ball diameter. Above 1 a fluid particle is wider than a ball, so ball-fluid coupling is poorly resolved; raise Slurry resolution.",
+      ],
+      [
+        "Effective slurry resolution",
+        `${effectiveResolution}`,
+        effectiveResolution > resolution,
+        "Slurry resolution actually used. The solver raises it above your setting when coarse-graining would otherwise leave the fluid lattice wider than a ball.",
+      ],
+      [
+        "Est. fluid particles",
+        String(fluidCount),
+        undefined,
+        "Estimated number of slurry particles, the main driver of computation cost.",
+      ],
+      [
+        "Effective sub-steps",
+        `${effectiveSubstepCount}`,
+        effectiveSubstepCount > substeps,
+        "Sub-steps per frame actually used. The solver raises it above your setting when a coarse-grained charge would otherwise move too far per sub-step.",
+      ],
+      [
+        "Sub-step displacement / diameter",
+        substepDisp.toFixed(3),
+        substepDisp > 0.3,
+        "Distance the drum wall moves per sub-step relative to the ball diameter. Should stay well below 1 for stable contacts.",
+      ],
     ];
 
     derived.replaceChildren();
-    for (const [label, value, warn] of rows) {
+    for (const [label, value, warn, help] of rows) {
       const dt = document.createElement("dt");
-      dt.textContent = label;
+      dt.append(label);
+      const helpIcon = createHelpIcon(help);
+      if (helpIcon) dt.appendChild(helpIcon);
       const dd = document.createElement("dd");
       dd.textContent = value;
       dd.classList.toggle("is-warn", Boolean(warn));
@@ -577,7 +647,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
           `Coarse-graining is active (k = ${eff.scaleFactor.toFixed(3)}, mode: ${coarseGrainingMode}). ` +
           `Ball diameter has no effect on the simulation -- the solver runs ${eff.ballCount} balls of ` +
           `${(eff.diameterM * 1000).toFixed(2)} mm regardless. Change "Coarse-graining" in the ` +
-          `Simulation group to simulate the true diameter.`;
+          `Numerical accuracy group to simulate the true diameter.`;
       } else {
         mediaWarn.hidden = true;
       }

@@ -22,6 +22,7 @@ import type { ParamsJson } from "../protocol";
 import { ReportAggregator } from "../report/aggregator";
 import { buildReportPdf, downloadReportPdf } from "../report/pdf";
 import type { AppState } from "../state";
+import { createHelpIcon } from "./helpIcon";
 import { drawSparkline } from "./sparkline";
 
 export interface MetricsPanel {
@@ -297,7 +298,9 @@ export function createMetricsPanel(container: HTMLElement, onAutoReportPause: ()
 
     const label = document.createElement("span");
     label.className = "metric-label";
-    label.textContent = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
+    label.append(spec.unit ? `${spec.label} (${spec.unit})` : spec.label);
+    const helpIcon = createHelpIcon(spec.help);
+    if (helpIcon) label.appendChild(helpIcon);
 
     const value = document.createElement("span");
     value.className = "metric-value";
@@ -339,7 +342,11 @@ export function createMetricsPanel(container: HTMLElement, onAutoReportPause: ()
   healthRow.className = "metric-row is-key is-health metric-health-link";
   const healthLabel = document.createElement("span");
   healthLabel.className = "metric-label";
-  healthLabel.textContent = "Solver health";
+  healthLabel.append("Solver health");
+  const healthHelp = createHelpIcon(
+    "Roll-up of the solver diagnostics (ball overlap, sub-step displacement, compression error, coupling clamp hits). OK means none is over its warning threshold; click to open the offending group.",
+  );
+  if (healthHelp) healthLabel.appendChild(healthHelp);
   const healthValue = document.createElement("span");
   healthValue.className = "metric-value";
   healthValue.textContent = "OK";

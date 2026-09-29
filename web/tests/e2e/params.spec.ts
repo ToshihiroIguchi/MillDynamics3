@@ -22,7 +22,7 @@ test("derived N_sim readout in the parameters panel never exceeds the max-balls 
 
   await expect(page.locator("#params-panel")).toBeVisible();
 
-  // "Max balls" lives in the "Simulation" group, which is collapsed by default.
+  // "Max balls" lives in the "Numerical accuracy" group, which is collapsed by default.
   const maxBallsInput = await openField(page, "Max balls (coarse-graining target)");
   const maxBallsValue = Number(await maxBallsInput.inputValue());
 

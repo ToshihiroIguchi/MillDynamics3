@@ -432,7 +432,7 @@ render > 6 ms.
 
 ### 4.3 Parameters left panel (`ui/paramsPanel.ts`) — persistent `<aside>`, replaces the earlier `<dialog>` modal
 A collapsible-group panel beside the canvas (symmetric with the metrics panel on the right), not a
-modal: **Mill**, **Media**, **Lifters**, **Slurry**, **Simulation** groups as native
+modal: **Mill**, **Media**, **Lifters**, **Slurry**, **Numerical accuracy** (was "Simulation") groups as native
 `<details><summary>`, each collapsed/expanded state persisted per-browser. Each field is generated
 from `schema.ts`'s `FieldSchema` entries (`path`, `group`, `label`, `unit?`, `type`, `min?`, `max?`,
 `step?`, `options?`, `displayScale?` — no `default`/`hot`/`help` fields; those were an earlier,
