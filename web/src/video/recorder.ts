@@ -11,16 +11,36 @@
 // Frames are captured at most `VIDEO_FPS` per simulated second, from the same canvas the user is
 // watching (one call to `captureFrame` per rendered frame).
 //
-// Container/codec: WebM, VP9 preferred, then VP8, then AV1 -- whichever the browser can encode.
+// Container/codec: MP4 (H.264) preferred for compatibility; WebM (VP9/VP8/AV1) if H.264 cannot be
+// encoded.
 // If WebCodecs is unavailable the feature disables itself (see `isSupported`) rather than throwing.
 
-import { BufferTarget, CanvasSource, Output, WebMOutputFormat, getFirstEncodableVideoCodec } from "mediabunny";
+import {
+  BufferTarget,
+  CanvasSource,
+  Mp4OutputFormat,
+  Output,
+  WebMOutputFormat,
+  getFirstEncodableVideoCodec,
+  type VideoCodec,
+} from "mediabunny";
 
 /** Video frame rate, in frames per simulated second. */
 export const VIDEO_FPS = 30;
 
-/** Ordered by preference. */
-const CODEC_CANDIDATES = ["vp9", "vp8", "av1"] as const;
+interface Container {
+  codecs: VideoCodec[];
+  extension: "mp4" | "webm";
+  mime: string;
+  format: () => Mp4OutputFormat | WebMOutputFormat;
+}
+
+/** Ordered by preference: MP4/H.264 plays everywhere (Windows Media Player, PowerPoint, iOS,
+ * browsers); WebM is the fallback for browsers that cannot encode H.264 (e.g. some Firefox builds). */
+const CONTAINERS: Container[] = [
+  { codecs: ["avc"], extension: "mp4", mime: "video/mp4", format: () => new Mp4OutputFormat() },
+  { codecs: ["vp9", "vp8", "av1"], extension: "webm", mime: "video/webm", format: () => new WebMOutputFormat() },
+];
 
 /** Pure: whether a frame is due, given the simulated time elapsed since recording started and the
  * timestamp of the last captured frame (`null` before the first). The first frame is always due;
@@ -67,7 +87,8 @@ export class WebCodecsCanvasRecorder implements CanvasRecorder {
   private recording = false;
   private simTimeAtStart = 0;
   private lastFrameTime: number | null = null;
-  private output: Output<WebMOutputFormat, BufferTarget> | null = null;
+  private output: Output<Mp4OutputFormat | WebMOutputFormat, BufferTarget> | null = null;
+  private container: Container = CONTAINERS[0];
   private source: CanvasSource | null = null;
   /** Set while the encoder is still accepting a frame (backpressure): frames are dropped, not
    * queued, so a slow encoder never stalls the render loop. */
@@ -92,12 +113,21 @@ export class WebCodecsCanvasRecorder implements CanvasRecorder {
     this.busy = true; // frames are dropped until setup completes
 
     this.ready = (async () => {
-      const codec = await getFirstEncodableVideoCodec([...CODEC_CANDIDATES], {
-        width: canvas.width,
-        height: canvas.height,
-      });
-      if (!codec) throw new Error("no encodable video codec");
-      const output = new Output({ format: new WebMOutputFormat(), target: new BufferTarget() });
+      let chosen: { container: Container; codec: VideoCodec } | null = null;
+      for (const container of CONTAINERS) {
+        const codec = await getFirstEncodableVideoCodec(container.codecs, {
+          width: canvas.width,
+          height: canvas.height,
+        });
+        if (codec) {
+          chosen = { container, codec };
+          break;
+        }
+      }
+      if (!chosen) throw new Error("no encodable video codec");
+      const { container, codec } = chosen;
+      this.container = container;
+      const output = new Output({ format: container.format(), target: new BufferTarget() });
       const source = new CanvasSource(canvas, { codec, bitrate: 6_000_000 });
       output.addVideoTrack(source, { frameRate: VIDEO_FPS });
       await output.start();
@@ -137,7 +167,8 @@ export class WebCodecsCanvasRecorder implements CanvasRecorder {
       await output.finalize();
       const buffer = output.target.buffer;
       if (buffer) {
-        downloadBlob(new Blob([buffer], { type: "video/webm" }), `milldynamics-recording-${simTimeAtStop.toFixed(1)}s.webm`);
+        const { mime, extension } = this.container;
+        downloadBlob(new Blob([buffer], { type: mime }), `milldynamics-recording-${simTimeAtStop.toFixed(1)}s.${extension}`);
       }
     } finally {
       this.output = null;
