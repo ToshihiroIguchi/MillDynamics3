@@ -20,7 +20,7 @@ import type { ImpactEnergyHistogram } from "../metrics/types";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
 import { ReportAggregator } from "../report/aggregator";
-import { buildReportPdf, downloadReportPdf } from "../report/pdf";
+import { buildReportPdf, downloadReportPdf, energyCumulativeFraction } from "../report/pdf";
 import type { AppState } from "../state";
 import { createHelpIcon } from "./helpIcon";
 import { drawSparkline } from "./sparkline";
@@ -100,10 +100,30 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
     ctx.fillRect(x, y, Math.max(1, barW - 1), h);
   });
 
+  // Energy-weighted cumulative fraction (0 at the bottom, 1 at the top of the plot area).
+  const cum = energyCumulativeFraction(edges, counts);
+  if (cum) {
+    ctx.strokeStyle = "#e0803a";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    cum.forEach((f, i) => {
+      const x = padLeft + (i + 0.5) * barW;
+      const y = padTop + plotH * (1 - f);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
   ctx.fillStyle = "#9aa3b0";
   ctx.font = "9px system-ui, sans-serif";
   ctx.textAlign = "left";
   ctx.fillText(`${maxCount.toFixed(1)}/s`, padLeft, 10);
+  if (cum) {
+    ctx.fillStyle = "#e0803a";
+    ctx.textAlign = "right";
+    ctx.fillText("cum. energy", HIST_CSS_WIDTH - padRight, 10);
+  }
 
   // Decade tick labels: anchored `center` except within one label-width of either canvas edge,
   // where centering would draw half the text past the edge and clip it (this was most visible on
@@ -147,6 +167,10 @@ const WARN_THRESHOLDS = new Map<string, number>([
   ["max_compression_error", MAX_COMPRESSION_ERROR_WARN_THRESHOLD],
   ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],
 ]);
+
+const DEFAULT_REPORT_WARMUP_S = 2;
+const DEFAULT_REPORT_END_S = 7;
+const GENERATE_LABEL = "Generate report now";
 
 const GROUPS_STORAGE_KEY = "milldynamics.metricsGroups";
 
@@ -192,7 +216,11 @@ function writeGroupOpenPrefs(prefs: Record<string, boolean>): void {
  * toolbar's own pause path; this module only owns the aggregation/report-building/DOM side of the
  * feature (see report/aggregator.ts, report/pdf.ts).
  */
-export function createMetricsPanel(container: HTMLElement, onAutoReportPause: () => void): MetricsPanel {
+export function createMetricsPanel(
+  container: HTMLElement,
+  onAutoReportPause: () => void,
+  getSnapshotPng?: () => string | null,
+): MetricsPanel {
   const groupOpenPrefs = readGroupOpenPrefs();
 
   const header = document.createElement("div");
@@ -219,60 +247,110 @@ export function createMetricsPanel(container: HTMLElement, onAutoReportPause: ()
   reportHeading.textContent = "Report";
   reportSection.appendChild(reportHeading);
 
-  const reportEndTimeRow = document.createElement("div");
-  reportEndTimeRow.className = "metrics-report-row";
-  const reportEndTimeLabel = document.createElement("label");
-  reportEndTimeLabel.textContent = "Report end time (s)";
-  reportEndTimeLabel.htmlFor = "metrics-report-end-time";
-  const reportEndTimeInput = document.createElement("input");
-  reportEndTimeInput.type = "number";
-  reportEndTimeInput.id = "metrics-report-end-time";
-  reportEndTimeInput.className = "metrics-report-input";
-  reportEndTimeInput.min = "0";
-  reportEndTimeInput.step = "1";
+  function makeNumberRow(id: string, labelText: string, value: string): HTMLInputElement {
+    const row = document.createElement("div");
+    row.className = "metrics-report-row";
+    const label = document.createElement("label");
+    label.textContent = labelText;
+    label.htmlFor = id;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.id = id;
+    input.className = "metrics-report-input";
+    input.min = "0";
+    input.step = "0.5";
+    input.value = value;
+    row.appendChild(label);
+    row.appendChild(input);
+    reportSection.appendChild(row);
+    return input;
+  }
+  const reportWarmupInput = makeNumberRow("metrics-report-warmup", "Warm-up (s)", String(DEFAULT_REPORT_WARMUP_S));
+  const reportEndTimeInput = makeNumberRow("metrics-report-end-time", "Report end (s)", String(DEFAULT_REPORT_END_S));
   reportEndTimeInput.placeholder = "off";
-  reportEndTimeRow.appendChild(reportEndTimeLabel);
-  reportEndTimeRow.appendChild(reportEndTimeInput);
-  reportSection.appendChild(reportEndTimeRow);
+
+  const autoRow = document.createElement("div");
+  autoRow.className = "metrics-report-row";
+  const autoLabel = document.createElement("label");
+  autoLabel.htmlFor = "metrics-report-auto";
+  autoLabel.textContent = "Auto pause & download at end";
+  const autoCheckbox = document.createElement("input");
+  autoCheckbox.type = "checkbox";
+  autoCheckbox.id = "metrics-report-auto";
+  autoCheckbox.checked = false;
+  autoRow.appendChild(autoLabel);
+  autoRow.appendChild(autoCheckbox);
+  reportSection.appendChild(autoRow);
+
+  const revNote = document.createElement("div");
+  revNote.className = "metrics-note";
+  reportSection.appendChild(revNote);
 
   const generateReportButton = document.createElement("button");
   generateReportButton.type = "button";
   generateReportButton.className = "metrics-export metrics-report-generate";
-  generateReportButton.textContent = "Generate report now";
+  generateReportButton.textContent = GENERATE_LABEL;
   reportSection.appendChild(generateReportButton);
 
   const reportNote = document.createElement("div");
   reportNote.className = "metrics-note";
   reportNote.textContent =
-    "Generates a PDF summary of the mean/std/min/max of every metric over the run so far. " +
-    "Set an end time to auto-pause and download once sim time reaches it (leave empty/0 to disable).";
+    "PDF summary (stats, time series, snapshot, impact spectrum) over the window [warm-up, end]. " +
+    "Samples outside the window are ignored. Generating before the end uses [warm-up, now]. " +
+    "End = 0 or empty disables the end.";
   reportSection.appendChild(reportNote);
 
   container.appendChild(reportSection);
 
   const reportAggregator = new ReportAggregator();
-  let reportEndTimeS = 0;
+  let reportWarmupS = DEFAULT_REPORT_WARMUP_S;
+  let reportEndTimeS = DEFAULT_REPORT_END_S;
+  reportAggregator.setWindow(reportWarmupS, reportEndTimeS);
   let reportArmed = true;
+  let windowComplete = false;
   let lastAggregatedMetrics: AppState["metrics"] = null;
   let latestState: AppState | null = null;
+  let latestRpm: number | null = null;
+
+  function refreshReportUi(): void {
+    let note: string;
+    if (reportEndTimeS <= 0) note = "No end time set.";
+    else if (latestRpm === null) note = "";
+    else {
+      const revs = (latestRpm * Math.max(0, reportEndTimeS - reportWarmupS)) / 60;
+      note = `≈ ${revs.toFixed(1)} revolutions in the window`;
+    }
+    if (revNote.textContent !== note) revNote.textContent = note;
+    const label = windowComplete ? "Report window complete – download report" : GENERATE_LABEL;
+    if (generateReportButton.textContent !== label) generateReportButton.textContent = label;
+    generateReportButton.classList.toggle("is-complete", windowComplete);
+  }
+
+  function applyWindowInputs(): void {
+    const w = Number(reportWarmupInput.value);
+    const e = Number(reportEndTimeInput.value);
+    reportWarmupS = Number.isFinite(w) && w > 0 ? w : 0;
+    reportEndTimeS = Number.isFinite(e) && e > 0 ? e : 0;
+    reportAggregator.setWindow(reportWarmupS, reportEndTimeS);
+    // Any window edit re-arms the end trigger (raising the end after a completed window resumes it).
+    reportArmed = true;
+    windowComplete = latestState !== null && reportAggregator.isPastEnd(latestState.simTime);
+    refreshReportUi();
+  }
 
   function generateReport(state: AppState): void {
     const doc = buildReportPdf({
       params: state.params,
       aggregator: reportAggregator,
-      impactEnergyHistogram: state.metrics?.impact_energy_histogram,
+      impactEnergyHistogram: reportAggregator.windowHistogram() ?? state.metrics?.impact_energy_histogram,
       simTimeAtGeneration: state.simTime,
+      snapshotPng: getSnapshotPng ? getSnapshotPng() : null,
     });
     downloadReportPdf(doc, state.simTime);
   }
 
-  reportEndTimeInput.addEventListener("input", () => {
-    const parsed = Number(reportEndTimeInput.value);
-    reportEndTimeS = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-    // Any change to the end time re-arms the auto-trigger, whether the user is raising it after
-    // an earlier auto-fire or just editing it before the run reaches it.
-    reportArmed = true;
-  });
+  reportWarmupInput.addEventListener("input", applyWindowInputs);
+  reportEndTimeInput.addEventListener("input", applyWindowInputs);
 
   generateReportButton.addEventListener("click", () => {
     if (latestState) generateReport(latestState);
@@ -484,21 +562,25 @@ export function createMetricsPanel(container: HTMLElement, onAutoReportPause: ()
     // doc comment on `metrics`/`fluidSurface`), not once per render frame, so a metrics snapshot
     // that hasn't changed since last frame isn't double-counted into the running mean/variance.
     if (state.metrics && state.metrics !== lastAggregatedMetrics) {
-      reportAggregator.add(state.simTime, values);
+      reportAggregator.add(state.simTime, values, state.metrics.impact_energy_histogram);
       lastAggregatedMetrics = state.metrics;
     }
 
-    // Auto-trigger: pause + generate + download once, the first time an armed non-zero end time
-    // is reached or crossed; disarms itself immediately so it can't refire every subsequent frame
-    // (only `reset()` or changing the end-time input re-arms it, see those for why).
-    if (reportArmed && reportEndTimeS > 0 && state.simTime >= reportEndTimeS) {
+    // Window end: the first time sim time passes the end, mark the window complete; with the
+    // auto checkbox on, also pause + generate + download once (re-armed by reset()/window edits).
+    latestRpm = mill ? rpmOf(mill) : null;
+    if (reportArmed && reportEndTimeS > 0 && reportAggregator.isPastEnd(state.simTime)) {
       reportArmed = false;
-      onAutoReportPause();
-      generateReport(state);
+      windowComplete = true;
+      if (autoCheckbox.checked) {
+        onAutoReportPause();
+        generateReport(state);
+      }
     }
 
     if (nowMs - lastRenderMs < 100) return;
     lastRenderMs = nowMs;
+    refreshReportUi();
 
     for (const spec of METRIC_SPECS) {
       const raw = values[spec.id];
@@ -593,7 +675,9 @@ export function createMetricsPanel(container: HTMLElement, onAutoReportPause: ()
       // and a previously-fired auto-trigger would stay permanently disarmed.
       reportAggregator.reset();
       reportArmed = true;
+      windowComplete = false;
       lastAggregatedMetrics = null;
+      refreshReportUi();
     },
   };
 }

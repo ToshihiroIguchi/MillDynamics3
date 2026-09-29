@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ReportAggregator } from "../../src/report/aggregator";
+import { MAX_SERIES_POINTS, ReportAggregator } from "../../src/report/aggregator";
 
 describe("ReportAggregator", () => {
   it("reports no data (null stats, null window, 0 samples) before any add() call", () => {
@@ -97,5 +97,67 @@ describe("ReportAggregator", () => {
     expect(agg.endTime).toBe(5);
     expect(agg.samples).toBe(1);
     expect(agg.statsFor("a")!.mean).toBe(100);
+  });
+});
+
+describe("ReportAggregator windowing", () => {
+  it("ignores samples before warm-up and after the end", () => {
+    const agg = new ReportAggregator();
+    agg.setWindow(2, 7);
+    for (let t = 0; t <= 10; t += 1) agg.add(t, { a: t });
+    expect(agg.startTime).toBe(2);
+    expect(agg.endTime).toBe(7);
+    expect(agg.samples).toBe(6); // t = 2..7
+    expect(agg.statsFor("a")!.mean).toBeCloseTo(4.5, 10);
+    expect(agg.isPastEnd(7)).toBe(false);
+    expect(agg.isPastEnd(7.1)).toBe(true);
+  });
+
+  it("end = 0 means no end, and reset() keeps the window but clears data", () => {
+    const agg = new ReportAggregator();
+    agg.setWindow(1, 0);
+    agg.add(0.5, { a: 1 });
+    agg.add(100, { a: 2 });
+    expect(agg.samples).toBe(1);
+    agg.reset();
+    expect(agg.samples).toBe(0);
+    expect(agg.seriesFor("a")).toEqual([]);
+    expect(agg.getWindow()).toEqual({ warmupS: 1, endS: 0 });
+  });
+});
+
+describe("ReportAggregator series decimation", () => {
+  it("never stores more than MAX_SERIES_POINTS and keeps the full time span", () => {
+    const agg = new ReportAggregator();
+    const n = 20000;
+    for (let i = 0; i < n; i++) agg.add(i * 0.01, { a: i });
+    const pts = agg.seriesFor("a");
+    expect(pts.length).toBeLessThanOrEqual(MAX_SERIES_POINTS);
+    expect(pts.length).toBeGreaterThan(MAX_SERIES_POINTS / 2 - 1);
+    expect(pts[0]!.t).toBe(0);
+    expect(pts[pts.length - 1]!.t).toBeGreaterThan(n * 0.01 * 0.95);
+    // Exact stats are unaffected by decimation.
+    expect(agg.statsFor("a")!.count).toBe(n);
+  });
+});
+
+describe("ReportAggregator window-mean histogram", () => {
+  it("weights each frame's counts_per_s by its dt", () => {
+    const agg = new ReportAggregator();
+    const edges = [1, 10, 100];
+    agg.add(0, { a: 1 }, { bin_edges_j: edges, counts_per_s: [100, 100] }); // dt 0: no weight
+    agg.add(1, { a: 1 }, { bin_edges_j: edges, counts_per_s: [10, 0] }); // dt 1
+    agg.add(4, { a: 1 }, { bin_edges_j: edges, counts_per_s: [20, 40] }); // dt 3
+    const h = agg.windowHistogram()!;
+    expect(h.bin_edges_j).toEqual(edges);
+    expect(h.counts_per_s[0]).toBeCloseTo((10 * 1 + 20 * 3) / 4, 10);
+    expect(h.counts_per_s[1]).toBeCloseTo((0 * 1 + 40 * 3) / 4, 10);
+  });
+
+  it("is null with no histogram, and falls back to the sample for one frame", () => {
+    const agg = new ReportAggregator();
+    expect(agg.windowHistogram()).toBeNull();
+    agg.add(0, {}, { bin_edges_j: [1, 2], counts_per_s: [5] });
+    expect(agg.windowHistogram()!.counts_per_s).toEqual([5]);
   });
 });

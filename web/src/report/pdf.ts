@@ -1,4 +1,4 @@
-// Builds a client-side PDF "simulation report" (docs on why: a researcher wants a handful of
+﻿// Builds a client-side PDF "simulation report" (docs on why: a researcher wants a handful of
 // representative values -- mean power draw, collision rate, etc. -- summarized in a form suitable
 // for citing in a paper's methods/results section) from a `ReportAggregator`'s running statistics
 // plus the current run's configuration. No server involved: jsPDF renders entirely in the browser.
@@ -102,6 +102,23 @@ function directionLabel(direction: string): string {
   return direction === "clockwise" ? "Clockwise" : "Counter-clockwise";
 }
 
+/** Energy-weighted cumulative fraction per bin: cumulative sum of (rate x bin geometric-mean
+ * energy) normalised to 1 -- "what fraction of the delivered impact energy comes from impacts at or
+ * below this bin". Returns `null` if the total is zero or edges are unusable. */
+export function energyCumulativeFraction(edges: number[], counts: number[]): number[] | null {
+  if (counts.length === 0 || edges.length < counts.length + 1) return null;
+  const weights = counts.map((c, i) => {
+    const lo = edges[i]!;
+    const hi = edges[i + 1]!;
+    const e = lo > 0 && hi > 0 ? Math.sqrt(lo * hi) : (lo + hi) / 2;
+    return Math.max(0, c) * e;
+  });
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) return null;
+  let run = 0;
+  return weights.map((w) => (run += w) / total);
+}
+
 /** Draws the impact-energy histogram to an offscreen canvas and returns a PNG data URL, or `null`
  * if there is nothing to draw (no histogram yet, or every bin count is zero) -- callers fall back
  * to a text table in that case. Deliberately larger/plainer than ui/metricsPanel.ts's on-screen
@@ -125,7 +142,7 @@ function renderHistogramImage(histogram: ImpactEnergyHistogram | undefined | nul
   ctx.fillRect(0, 0, width, height);
 
   const padLeft = 60;
-  const padRight = 20;
+  const padRight = 44;
   const padTop = 40;
   const padBottom = 60;
   const plotW = width - padLeft - padRight;
@@ -140,6 +157,30 @@ function renderHistogramImage(histogram: ImpactEnergyHistogram | undefined | nul
     ctx.fillRect(x, y, Math.max(1, barW - 2), h);
   });
 
+  // Energy-weighted cumulative fraction on a right-hand 0-1 axis (a unit-free share of the total,
+  // not a rate, so it does not compete with the bar axis).
+  const cum = energyCumulativeFraction(edges, counts);
+  if (cum) {
+    ctx.strokeStyle = "#c2571a";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    cum.forEach((f, i) => {
+      const x = padLeft + (i + 0.5) * barW;
+      const y = padTop + plotH * (1 - f);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.fillStyle = "#c2571a";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "left";
+    for (const f of [0, 0.5, 1]) {
+      ctx.fillText(f.toFixed(1), padLeft + plotW + 4, padTop + plotH * (1 - f) + 4);
+    }
+    ctx.textAlign = "right";
+    ctx.fillText("Cumulative energy fraction", padLeft + plotW, 22);
+  }
+
   ctx.strokeStyle = "#333333";
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -149,6 +190,7 @@ function renderHistogramImage(histogram: ImpactEnergyHistogram | undefined | nul
 
   ctx.fillStyle = "#222222";
   ctx.font = "16px sans-serif";
+  ctx.textAlign = "left";
   ctx.textAlign = "left";
   ctx.fillText(`Peak: ${maxCount.toFixed(2)} impacts/s`, padLeft, 22);
 
@@ -177,6 +219,110 @@ function renderHistogramImage(histogram: ImpactEnergyHistogram | undefined | nul
   ctx.restore();
 
   return canvas.toDataURL("image/png");
+}
+
+/** Small-multiple line charts (one panel per metric, each with its own y scale -- never a shared
+ * or dual axis) of the decimated series, with the window mean as a dashed line. Returns the PNG
+ * data URL plus its pixel size, or `null` if no panel has at least two points. */
+function renderTimeSeriesImage(
+  aggregator: ReportAggregator,
+  panels: { id: string; title: string; unit: string }[],
+): { url: string; width: number; height: number } | null {
+  const usable = panels.filter((p) => aggregator.seriesFor(p.id).length >= 2);
+  if (usable.length === 0) return null;
+  const cols = 2;
+  const rows = Math.ceil(usable.length / cols);
+  const pw = 500;
+  const ph = 250;
+  const width = cols * pw;
+  const height = rows * ph;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  usable.forEach((panel, idx) => {
+    const ox = (idx % cols) * pw;
+    const oy = Math.floor(idx / cols) * ph;
+    const pts = aggregator.seriesFor(panel.id);
+    const stats = aggregator.statsFor(panel.id);
+    const padL = 62;
+    const padR = 16;
+    const padT = 34;
+    const padB = 36;
+    const plotW = pw - padL - padR;
+    const plotH = ph - padT - padB;
+    const t0 = pts[0]!.t;
+    const t1 = pts[pts.length - 1]!.t;
+    let vMin = Math.min(...pts.map((p) => p.v));
+    let vMax = Math.max(...pts.map((p) => p.v));
+    if (stats) {
+      vMin = Math.min(vMin, stats.mean);
+      vMax = Math.max(vMax, stats.mean);
+    }
+    if (vMax - vMin < 1e-12 * Math.max(1, Math.abs(vMax))) {
+      const d = Math.max(1e-9, Math.abs(vMax) * 0.1);
+      vMin -= d;
+      vMax += d;
+    }
+    const pad = (vMax - vMin) * 0.06;
+    vMin -= pad;
+    vMax += pad;
+    const xOf = (t: number) => ox + padL + (t1 > t0 ? ((t - t0) / (t1 - t0)) * plotW : 0);
+    const yOf = (v: number) => oy + padT + plotH * (1 - (v - vMin) / (vMax - vMin));
+    const num = (v: number) => (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toPrecision(3));
+
+    // Title in ink colour (not the series colour) and a light horizontal grid.
+    ctx.fillStyle = "#222222";
+    ctx.font = "bold 15px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(panel.unit ? `${panel.title} (${panel.unit})` : panel.title, ox + padL, oy + 20);
+    ctx.strokeStyle = "#e3e6ea";
+    ctx.lineWidth = 1;
+    ctx.fillStyle = "#555555";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "right";
+    for (let g = 0; g <= 3; g++) {
+      const v = vMin + ((vMax - vMin) * g) / 3;
+      const y = yOf(v);
+      ctx.beginPath();
+      ctx.moveTo(ox + padL, y);
+      ctx.lineTo(ox + padL + plotW, y);
+      ctx.stroke();
+      ctx.fillText(num(v), ox + padL - 6, y + 4);
+    }
+    ctx.textAlign = "center";
+    ctx.fillText(t0.toFixed(1), ox + padL, oy + ph - 18);
+    ctx.fillText(t1.toFixed(1), ox + padL + plotW, oy + ph - 18);
+    ctx.fillText("sim time (s)", ox + padL + plotW / 2, oy + ph - 6);
+
+    ctx.strokeStyle = "#3a82a8";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      if (i === 0) ctx.moveTo(xOf(p.t), yOf(p.v));
+      else ctx.lineTo(xOf(p.t), yOf(p.v));
+    });
+    ctx.stroke();
+
+    if (stats) {
+      ctx.strokeStyle = "#555555";
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ox + padL, yOf(stats.mean));
+      ctx.lineTo(ox + padL + plotW, yOf(stats.mean));
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#555555";
+      ctx.textAlign = "right";
+      ctx.fillText(`mean ${num(stats.mean)}`, ox + padL + plotW, oy + 20);
+    }
+  });
+  return { url: canvas.toDataURL("image/png"), width, height };
 }
 
 /** Formats one `MetricStats` value with `spec.format` if given (falls back to 2-decimal fixed),
@@ -223,6 +369,8 @@ export interface ReportInput {
   /** Sim time at generation, used only for the header line (the filename is built separately by
    * the caller, mirroring the CSV export's `lastSimTime.toFixed(1)` idiom). */
   simTimeAtGeneration: number;
+  /** PNG data URL of the `#scene` canvas at generation time; `null`/absent/blank => omitted. */
+  snapshotPng?: string | null;
 }
 
 /** The headline results block's metric ids, in display order -- a subset of
@@ -235,7 +383,7 @@ const HEADLINE_METRIC_IDS = ["power_draw", "torque", "collision_rate", "dissipat
  * `document.createElement("canvas")` in `renderHistogramImage` (browser-only; this module is never
  * imported by the aggregator's unit tests). */
 export function buildReportPdf(input: ReportInput): jsPDF {
-  const { params, aggregator, impactEnergyHistogram, simTimeAtGeneration } = input;
+  const { params, aggregator, impactEnergyHistogram, simTimeAtGeneration, snapshotPng } = input;
   const doc = new jsPDF({ unit: "mm", format: "a4" });
   const cursor: Cursor = { y: PAGE_MARGIN_MM };
 
@@ -253,14 +401,35 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   cursor.y += 5;
 
   const hasWindow = aggregator.startTime !== null && aggregator.endTime !== null;
+  const win = aggregator.getWindow();
+  const windowSetting = `warm-up ${win.warmupS.toFixed(1)} s, end ${win.endS > 0 ? `${win.endS.toFixed(1)} s` : "none"}`;
   const windowText = hasWindow
-    ? `Aggregation window: t = ${aggregator.startTime!.toFixed(1)} s -> ${aggregator.endTime!.toFixed(1)} s ` +
+    ? `Report window (${windowSetting}): t =${aggregator.startTime!.toFixed(1)} s -> ${aggregator.endTime!.toFixed(1)} s ` +
       `(duration ${(aggregator.endTime! - aggregator.startTime!).toFixed(1)} s, ${aggregator.samples} samples)`
-    : "Aggregation window: no data aggregated yet";
+    : `Report window (${windowSetting}): no data aggregated yet`;
   doc.text(windowText, PAGE_MARGIN_MM, cursor.y);
   cursor.y += 5;
   doc.text(`Sim time at generation: ${simTimeAtGeneration.toFixed(1)} s`, PAGE_MARGIN_MM, cursor.y);
   cursor.y += 8;
+
+  // --- Mill snapshot (skipped when the canvas is missing/blank) ---------------------------------
+  if (snapshotPng && snapshotPng.startsWith("data:image/png") && snapshotPng.length > 1000) {
+    try {
+      const props = doc.getImageProperties(snapshotPng);
+      const scale = Math.min(90 / props.width, 70 / props.height);
+      const w = props.width * scale;
+      const h = props.height * scale;
+      ensureSpace(doc, cursor, h + 6);
+      doc.addImage(snapshotPng, "PNG", PAGE_MARGIN_MM, cursor.y, w, h, undefined, "FAST");
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(8.5);
+      doc.setTextColor(110, 110, 110);
+      doc.text(`Mill snapshot at t = ${simTimeAtGeneration.toFixed(1)} s`, PAGE_MARGIN_MM + w + 4, cursor.y + 4);
+      cursor.y += h + 6;
+    } catch {
+      // A malformed/empty snapshot must never block the report.
+    }
+  }
 
   // --- Run configuration ---------------------------------------------------------------------
   doc.setFont("helvetica", "bold");
@@ -406,12 +575,48 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     cursor.y += 2;
   }
 
+  // --- Time series (small multiples) --------------------------------------------------------------
+  const coarse = config
+    ? effectiveMedia(config.mill.diameter_m, config.media, config.maxBalls, config.coarseGrainingMode, config.coarseGrainingK).scaleFactor > 1
+    : false;
+  const seriesIds = [
+    "power_draw",
+    "torque",
+    "total_kinetic_energy",
+    "dissipated_power",
+    ...(coarse ? [] : ["collision_rate"]),
+    ...(config?.slurryEnabled ? ["mixing_index"] : []),
+  ];
+  const seriesPanels = seriesIds.flatMap((id) => {
+    const spec = METRIC_SPECS.find((s) => s.id === id);
+    return spec ? [{ id, title: spec.label, unit: spec.unit ?? "" }] : [];
+  });
+  const tsImage = renderTimeSeriesImage(aggregator, seriesPanels);
+  if (tsImage) {
+    const wMm = CONTENT_RIGHT_MM - PAGE_MARGIN_MM;
+    const hMm = wMm * (tsImage.height / tsImage.width);
+    doc.addPage();
+    cursor.y = PAGE_MARGIN_MM;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(12);
+    doc.setTextColor(20, 20, 20);
+    doc.text("Time series over the report window", PAGE_MARGIN_MM, cursor.y + 4);
+    cursor.y += 8;
+    doc.addImage(tsImage.url, "PNG", PAGE_MARGIN_MM, cursor.y, wMm, hMm, undefined, "FAST");
+    cursor.y += hMm + 3;
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(8.5);
+    doc.setTextColor(110, 110, 110);
+    doc.text("Solid: sampled value (decimated to <= 1000 points). Dashed: window mean.", PAGE_MARGIN_MM, cursor.y);
+    cursor.y += 8;
+  }
+
   // --- Impact energy histogram -----------------------------------------------------------------
   ensureSpace(doc, cursor, 14);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12);
   doc.setTextColor(20, 20, 20);
-  doc.text("Impact energy distribution", PAGE_MARGIN_MM, cursor.y);
+  doc.text("Impact energy distribution (window-mean rates; line = energy-weighted cumulative fraction)", PAGE_MARGIN_MM, cursor.y);
   cursor.y += 7;
 
   const imageDataUrl = renderHistogramImage(impactEnergyHistogram);
@@ -419,7 +624,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     const imgWidthMm = CONTENT_RIGHT_MM - PAGE_MARGIN_MM;
     const imgHeightMm = imgWidthMm * (340 / 900);
     ensureSpace(doc, cursor, imgHeightMm + 4);
-    doc.addImage(imageDataUrl, "PNG", PAGE_MARGIN_MM, cursor.y, imgWidthMm, imgHeightMm);
+    doc.addImage(imageDataUrl, "PNG", PAGE_MARGIN_MM, cursor.y, imgWidthMm, imgHeightMm, undefined, "FAST");
     cursor.y += imgHeightMm + 6;
   } else {
     const counts = impactEnergyHistogram?.counts_per_s ?? [];
