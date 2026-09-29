@@ -14,15 +14,19 @@
 //! surface periodically avalanches while the wall-adjacent layer keeps rolling/sliding -- wall
 //! slip stays roughly flat while the shoulder/centroid angle saw-tooths).
 //!
-//! This binary makes no solver changes; it only measures the existing model. Run with `--help`
-//! for every flag.
+//! This binary makes no solver changes; it only measures the existing model. Besides the geometry/
+//! speed/friction flags above, it also accepts `--rolling-friction`, `--fill` (ball fill fraction),
+//! `--slurry-fill` (slurry fill fraction), and `--restitution-wall` (ball-wall restitution) for
+//! sweeping those parameters too. Run with `--help` for every flag.
 
 use std::env;
 use std::fs::File;
 use std::io::Write as _;
 
 use mill_core::geometry::Drum;
-use mill_core::metrics::{charge_centroid, charge_toe_shoulder, to_vertical_degrees};
+use mill_core::metrics::{
+    charge_centroid, charge_toe_shoulder, fluid_free_surface_line, to_vertical_degrees,
+};
 use mill_core::params::{Direction, SpeedMode};
 use mill_core::{Params, Simulation};
 
@@ -34,16 +38,45 @@ const WALL_ADJACENT_BALL_RADII: f32 = 1.5;
 
 struct Args {
     percent_critical: f32,
+    ball_diameter_mm: f32,
+    drum_diameter_mm: f32,
     slurry_enabled: bool,
     viscosity_pa_s: f32,
     friction_ball_wall: f32,
     friction_ball_ball: f32,
+    friction_ball_wall_static: Option<f32>,
+    friction_ball_ball_static: Option<f32>,
+    friction_velocity_scale_m_s: f32,
+    rolling_friction: f32,
+    fill_fraction: f32,
+    slurry_fill_fraction: f32,
+    restitution_wall: f32,
+    restitution_ball: f32,
     lifters_count: u32,
     max_balls: u32,
     resolution: u32,
     seed: u64,
     settle_s: f32,
     measure_s: f32,
+    /// Free-pendulum-release mode: after the settle phase (drum spinning normally, lifting the
+    /// charge up the ascending side as usual), abruptly sets `mill.speed_value = 0` (drum stops
+    /// dead) and only then starts the measurement window -- tests whether a charge *released* from
+    /// a displaced position (rather than steadily carried by a continuously rotating wall) swings
+    /// back through the vertical low point onto the *other* side, which the 2026-09-28 investigation
+    /// (docs/PHYSICS.md ss9) never got a driven/rotating charge to do at any tested friction or
+    /// speed.
+    stop_after_settle: bool,
+    /// Optional overrides applied at the same moment as `stop_after_settle`'s wall stop -- lets the
+    /// settle phase use normal friction/restitution (so the wall actually lifts/displaces the
+    /// charge, the way real cascading does it) while the *release* itself happens under different,
+    /// e.g. much lower dissipation, to test the best case for an underdamped free swing without
+    /// that best case also preventing the initial displacement (near-zero ball-wall friction can't
+    /// lift a charge via a rotating wall at all -- see docs/PHYSICS.md ss9's 2026-09-28 entry).
+    release_friction_ball_wall: Option<f32>,
+    release_friction_ball_ball: Option<f32>,
+    release_rolling_friction: Option<f32>,
+    release_restitution_wall: Option<f32>,
+    release_restitution_ball: Option<f32>,
     csv_path: Option<String>,
 }
 
@@ -51,16 +84,32 @@ impl Args {
     fn parse() -> Self {
         let mut a = Args {
             percent_critical: 20.0,
+            ball_diameter_mm: 63.0,
+            drum_diameter_mm: 1000.0,
             slurry_enabled: true,
             viscosity_pa_s: 50.0,
             friction_ball_wall: 0.35,
             friction_ball_ball: 0.25,
+            friction_ball_wall_static: None,
+            friction_ball_ball_static: None,
+            friction_velocity_scale_m_s: 0.02,
+            rolling_friction: 0.01,
+            fill_fraction: 0.30,
+            slurry_fill_fraction: 0.35,
+            restitution_wall: 0.5,
+            restitution_ball: 0.7,
             lifters_count: 0,
             max_balls: 600,
             resolution: 40,
             seed: 1,
             settle_s: 6.0,
             measure_s: 8.0,
+            stop_after_settle: false,
+            release_friction_ball_wall: None,
+            release_friction_ball_ball: None,
+            release_rolling_friction: None,
+            release_restitution_wall: None,
+            release_restitution_ball: None,
             csv_path: None,
         };
         let mut args = env::args().skip(1);
@@ -73,6 +122,8 @@ impl Args {
             };
             match flag.as_str() {
                 "--percent-critical" => a.percent_critical = next_f32(),
+                "--ball-diameter-mm" => a.ball_diameter_mm = next_f32(),
+                "--drum-diameter-mm" => a.drum_diameter_mm = next_f32(),
                 "--slurry" => {
                     let v = args.next().expect("--slurry needs on/off");
                     a.slurry_enabled = v == "on";
@@ -80,19 +131,41 @@ impl Args {
                 "--viscosity" => a.viscosity_pa_s = next_f32(),
                 "--friction-ball-wall" => a.friction_ball_wall = next_f32(),
                 "--friction-ball-ball" => a.friction_ball_ball = next_f32(),
+                "--friction-ball-wall-static" => a.friction_ball_wall_static = Some(next_f32()),
+                "--friction-ball-ball-static" => a.friction_ball_ball_static = Some(next_f32()),
+                "--friction-velocity-scale" => a.friction_velocity_scale_m_s = next_f32(),
+                "--rolling-friction" => a.rolling_friction = next_f32(),
+                "--fill" => a.fill_fraction = next_f32(),
+                "--slurry-fill" => a.slurry_fill_fraction = next_f32(),
+                "--restitution-wall" => a.restitution_wall = next_f32(),
+                "--restitution-ball" => a.restitution_ball = next_f32(),
                 "--lifters" => a.lifters_count = next_f32() as u32,
                 "--max-balls" => a.max_balls = next_f32() as u32,
                 "--resolution" => a.resolution = next_f32() as u32,
                 "--seed" => a.seed = next_f32() as u64,
                 "--settle-s" => a.settle_s = next_f32(),
                 "--measure-s" => a.measure_s = next_f32(),
+                "--stop-after-settle" => a.stop_after_settle = true,
+                "--release-friction-ball-wall" => a.release_friction_ball_wall = Some(next_f32()),
+                "--release-friction-ball-ball" => a.release_friction_ball_ball = Some(next_f32()),
+                "--release-rolling-friction" => a.release_rolling_friction = Some(next_f32()),
+                "--release-restitution-wall" => a.release_restitution_wall = Some(next_f32()),
+                "--release-restitution-ball" => a.release_restitution_ball = Some(next_f32()),
                 "--csv" => a.csv_path = Some(args.next().expect("--csv needs a path")),
                 "--help" | "-h" => {
                     println!(
-                        "Flags: --percent-critical <f32> --slurry <on|off> --viscosity <f32> \
-                         --friction-ball-wall <f32> --friction-ball-ball <f32> --lifters <u32> \
-                         --max-balls <u32> --resolution <u32> --seed <u64> --settle-s <f32> \
-                         --measure-s <f32> --csv <path>"
+                        "Flags: --percent-critical <f32> --ball-diameter-mm <f32> \
+                         --drum-diameter-mm <f32> --slurry <on|off> --viscosity <f32> \
+                         --friction-ball-wall <f32> --friction-ball-ball <f32> \
+                         --friction-ball-wall-static <f32> --friction-ball-ball-static <f32> \
+                         --friction-velocity-scale <f32> \
+                         --rolling-friction <f32> --fill <f32> --slurry-fill <f32> \
+                         --restitution-wall <f32> --restitution-ball <f32> --lifters <u32> --max-balls <u32> \
+                         --resolution <u32> --seed <u64> --settle-s <f32> --measure-s <f32> \
+                         --stop-after-settle --release-friction-ball-wall <f32> \
+                         --release-friction-ball-ball <f32> --release-rolling-friction <f32> \
+                         --release-restitution-wall <f32> --release-restitution-ball <f32> \
+                         --csv <path>"
                     );
                     std::process::exit(0);
                 }
@@ -114,20 +187,47 @@ struct Sample {
     shoulder_deg: Option<f32>,
     wall_slip_ratio: f32,
     total_ke_j: f32,
+    /// The *fluid* (slurry) population's own centroid angle, same `to_vertical_degrees`
+    /// convention as `centroid_deg` -- distinct from the ball charge's centroid, since a
+    /// water-dominated ("sloshing", low media fill / high slurry fill) mill might swing as a
+    /// liquid wave largely independent of the (possibly sparse) ball population. `NaN` if the
+    /// fluid population is empty (`slurry.enabled = false` or zero fluid particles).
+    fluid_centroid_deg: f32,
+    /// Tilt (degrees from horizontal, signed, in `(-90, 90]`) of the exposed slurry free surface
+    /// (`metrics::fluid_free_surface_line`'s fitted line, re-expressed as a tilt rather than a
+    /// mod-180-ambiguous direction angle) -- a genuine sloshing *wave*'s crest tips one way then
+    /// the other, which a mass-weighted fluid centroid can dilute away if most of the pool's mass
+    /// sits still near the bottom while only the crest itself swings. `NaN` if the free surface
+    /// has fewer than 3 non-wall-adjacent fluid particles to fit.
+    fluid_surface_tilt_deg: f32,
 }
 
 fn main() {
     let args = Args::parse();
 
     let mut params = Params::default();
+    params.mill.diameter_m = args.drum_diameter_mm / 1000.0;
     params.mill.speed_mode = SpeedMode::PercentCritical;
     params.mill.speed_value = args.percent_critical;
+    params.media.ball_diameter_m = args.ball_diameter_mm / 1000.0;
     params.mill.direction = Direction::CounterClockwise;
     params.lifters.count = args.lifters_count;
     params.slurry.enabled = args.slurry_enabled;
     params.slurry.viscosity_pa_s = args.viscosity_pa_s;
     params.media.friction_ball_wall = args.friction_ball_wall;
     params.media.friction_ball_ball = args.friction_ball_ball;
+    params.media.friction_ball_wall_static = args
+        .friction_ball_wall_static
+        .unwrap_or(args.friction_ball_wall);
+    params.media.friction_ball_ball_static = args
+        .friction_ball_ball_static
+        .unwrap_or(args.friction_ball_ball);
+    params.media.friction_velocity_scale_m_s = args.friction_velocity_scale_m_s;
+    params.media.rolling_friction = args.rolling_friction;
+    params.media.fill_fraction = args.fill_fraction;
+    params.media.restitution_ball_wall = args.restitution_wall;
+    params.media.restitution_ball_ball = args.restitution_ball;
+    params.slurry.fill_fraction = args.slurry_fill_fraction;
     params.simulation.max_balls = args.max_balls;
     params.simulation.resolution = args.resolution;
     params.simulation.seed = args.seed;
@@ -139,6 +239,44 @@ fn main() {
     let settle_frames = (args.settle_s * 60.0).round() as u32;
     for _ in 0..settle_frames {
         sim.step(1.0 / 60.0);
+    }
+
+    if args.stop_after_settle {
+        // Free-pendulum-release mode (see `Args::stop_after_settle`'s doc comment): the charge has
+        // just been lifted up the ascending side by `settle_s` of normal driven rotation, same as
+        // every other mode here -- now abruptly remove the driving (wall speed -> 0) and watch
+        // whether momentum + gravity alone carry it back through the low point to the other side,
+        // rather than a continuously rotating wall's steady one-sided carry. `drum` (used below only
+        // for geometry/angle sampling, not dynamics) keeps its original nonzero `omega` -- that only
+        // fixes `to_vertical_degrees`'s sign convention and does not affect the *actual* simulated
+        // dynamics, which read `sim`'s own params (now updated) each step; it does mean
+        // `mean_wall_slip_ratio` below is no longer meaningful after this point (it normalizes by
+        // the stale pre-stop wall speed), so ignore that column in this mode.
+        params.mill.speed_value = 0.0;
+        if let Some(mu) = args.release_friction_ball_wall {
+            params.media.friction_ball_wall = mu;
+            params.media.friction_ball_wall_static = mu;
+        }
+        if let Some(mu) = args.release_friction_ball_ball {
+            params.media.friction_ball_ball = mu;
+            params.media.friction_ball_ball_static = mu;
+        }
+        if let Some(v) = args.release_rolling_friction {
+            params.media.rolling_friction = v;
+        }
+        if let Some(e) = args.release_restitution_wall {
+            params.media.restitution_ball_wall = e;
+        }
+        if let Some(e) = args.release_restitution_ball {
+            params.media.restitution_ball_ball = e;
+        }
+        sim.set_params(params).expect("invalid params");
+        println!(
+            "--stop-after-settle: drum speed set to 0 after {:.1}s settle; measuring the free \
+             swing for the next {:.1}s (wall_slip_ratio below is now meaningless -- it normalizes \
+             by the stale pre-stop wall speed)",
+            args.settle_s, args.measure_s
+        );
     }
 
     let measure_frames = (args.measure_s * 60.0).round() as u32;
@@ -161,6 +299,22 @@ fn main() {
 
         let wall_slip_ratio = mean_wall_slip_ratio(balls, &drum, drum_angle);
         let total_ke_j = mill_core::metrics::total_kinetic_energy_j(balls);
+        let fluid_centroid_deg = fluid_centroid(sim.fluid())
+            .map(|(x, y)| to_vertical_degrees(y.atan2(x), drum.omega))
+            .unwrap_or(f32::NAN);
+        let fluid_surface_tilt_deg = fluid_free_surface_line(sim.fluid(), &drum, drum_angle)
+            .map(|(angle_rad, _offset_m)| {
+                // `angle_rad` is mod pi (a line has no inherent forward direction); re-express as
+                // a signed tilt from horizontal in (-90, 90] by picking the representative of the
+                // line's direction closest to 0.
+                let deg = angle_rad.rem_euclid(std::f32::consts::PI).to_degrees(); // [0, 180)
+                if deg > 90.0 {
+                    deg - 180.0
+                } else {
+                    deg
+                }
+            })
+            .unwrap_or(f32::NAN);
 
         samples.push(Sample {
             t_s: f as f32 / 60.0,
@@ -170,6 +324,8 @@ fn main() {
             shoulder_deg,
             wall_slip_ratio,
             total_ke_j,
+            fluid_centroid_deg,
+            fluid_surface_tilt_deg,
         });
     }
 
@@ -178,6 +334,18 @@ fn main() {
     }
 
     report(&args, &samples);
+}
+
+/// The fluid (slurry) particle population's centroid, mirroring `charge_centroid` (metrics.rs) for
+/// balls -- `None` if the population is empty. Used to test whether a water-dominated ("sloshing")
+/// mill's *liquid* swings symmetrically even when the (possibly sparse) ball population does not.
+fn fluid_centroid(fluid: &mill_core::pbf::FluidParticles) -> Option<(f32, f32)> {
+    if fluid.x.is_empty() {
+        return None;
+    }
+    let sum = fluid.x.iter().fold(glam::Vec2::ZERO, |acc, &p| acc + p);
+    let centroid = sum / fluid.x.len() as f32;
+    Some((centroid.x, centroid.y))
 }
 
 /// Mean, over balls within `WALL_ADJACENT_BALL_RADII * radius` of the wall, of the contact-point
@@ -216,13 +384,13 @@ fn write_csv(path: &str, samples: &[Sample]) {
     let mut f = File::create(path).expect("failed to create csv file");
     writeln!(
         f,
-        "t_s,centroid_deg,centroid_radius_m,toe_deg,shoulder_deg,wall_slip_ratio,total_ke_j"
+        "t_s,centroid_deg,centroid_radius_m,toe_deg,shoulder_deg,wall_slip_ratio,total_ke_j,fluid_centroid_deg,fluid_surface_tilt_deg"
     )
     .unwrap();
     for s in samples {
         writeln!(
             f,
-            "{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{}",
             s.t_s,
             s.centroid_deg,
             s.centroid_radius_m,
@@ -230,6 +398,8 @@ fn write_csv(path: &str, samples: &[Sample]) {
             s.shoulder_deg.map(|v| v.to_string()).unwrap_or_default(),
             s.wall_slip_ratio,
             s.total_ke_j,
+            s.fluid_centroid_deg,
+            s.fluid_surface_tilt_deg,
         )
         .unwrap();
     }
@@ -311,6 +481,56 @@ fn autocorrelation(x: &[f32], max_lag: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Prints a "crossing symmetry" report line for a series of angles (degrees) already expressed as
+/// a signed offset from whatever `reference_name`/`crossing_name` represents zero (e.g. 180 deg in
+/// the `to_vertical_degrees` convention for the drum's low point -- ball/fluid centroid -- or 0
+/// deg for a tilt-from-horizontal convention -- the fluid free surface). `angles` must already be
+/// pre-offset (caller's job, since the wrap convention differs per quantity); this fn only does
+/// the min/max/symmetry-ratio bookkeeping, labelled `name`.
+fn print_crossing_symmetry(name: &str, crossing_name: &str, offsets: impl Iterator<Item = f32>) {
+    let offsets: Vec<f32> = offsets.filter(|v| v.is_finite()).collect();
+    if offsets.is_empty() {
+        println!("{crossing_name} symmetry ({name}): no finite samples");
+        return;
+    }
+    let max_offset = offsets.iter().cloned().fold(f32::MIN, f32::max);
+    let min_offset = offsets.iter().cloned().fold(f32::MAX, f32::min);
+    // Positive offset = one side, negative = the other (sign is arbitrary, tied to the caller's
+    // own convention, not "left"/"right" in the viewer's own frame).
+    let side_a_extent = max_offset.max(0.0);
+    let side_b_extent = (-min_offset).max(0.0);
+    let crosses = side_a_extent > 0.5 && side_b_extent > 0.5;
+    let symmetry_ratio = if side_a_extent.max(side_b_extent) > 1e-6 {
+        side_a_extent.min(side_b_extent) / side_a_extent.max(side_b_extent)
+    } else {
+        0.0
+    };
+    println!(
+        "{crossing_name} symmetry ({name}): side_a_extent={side_a_extent:.2} deg, \
+         side_b_extent={side_b_extent:.2} deg, crosses={crosses}, \
+         symmetry_ratio={symmetry_ratio:.2} (1.0 = perfectly symmetric both-side swing, \
+         0.0 = confined entirely to one side)"
+    );
+}
+
+/// `print_crossing_symmetry` specialized for the drum's vertical low point (180 deg in the
+/// `to_vertical_degrees` convention -- ball or fluid centroid). Uses the *raw* (not cumulatively
+/// unwrapped) per-sample signed offset from 180 deg, since this is about instantaneous position
+/// relative to the physical bottom of the drum, not cumulative drift.
+fn print_vertical_crossing_symmetry(name: &str, angles: impl Iterator<Item = f32>) {
+    print_crossing_symmetry(
+        name,
+        "vertical-crossing",
+        angles
+            // `deg` is already confined to a single [0, 360) period (`to_vertical_degrees` ends
+            // in `.rem_euclid(360.0)`), so the naive difference from the 180 deg reference is
+            // already the shortest signed angular distance -- no further wrapping needed (and
+            // wrapping it again, an earlier bug here, corrupted small negative offsets like -14.9
+            // into +165.1).
+            .map(|deg| deg - 180.0), // in [-180, 180)
+    );
+}
+
 fn mean_std(x: &[f32]) -> (f32, f32) {
     let n = x.len() as f32;
     let mean = x.iter().sum::<f32>() / n;
@@ -377,7 +597,7 @@ fn report(args: &Args, samples: &[Sample]) {
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
     });
 
-    match (trough, rebound) {
+    let detected_period_s: Option<f32> = match (trough, rebound) {
         (Some((trough_lag, &trough_val)), Some((rebound_lag, &rebound_val)))
             if trough_val <= -0.3 && rebound_val >= 0.3 =>
         {
@@ -390,6 +610,7 @@ fn report(args: &Args, samples: &[Sample]) {
             println!(
                 "=> periodic signal DETECTED, dominant period ~= {period_s:.3} s (trough<=-0.3 and rebound>=0.3)"
             );
+            Some(period_s)
         }
         (Some((trough_lag, &trough_val)), rebound) => {
             let rebound_desc = rebound
@@ -399,8 +620,48 @@ fn report(args: &Args, samples: &[Sample]) {
                 "detrended-rate autocorr: trough {trough_val:.3} at lag {trough_lag}, best rebound {rebound_desc}"
             );
             println!("=> no clear periodic signal (trough/rebound below the +-0.3 threshold)");
+            None
         }
-        _ => println!("=> no clear periodic signal (autocorrelation too flat to assess)"),
+        _ => {
+            println!("=> no clear periodic signal (autocorrelation too flat to assess)");
+            None
+        }
+    };
+
+    // Amplitude: median peak-to-peak swing of the (linearly detrended) *raw* centroid angle,
+    // measured per detected oscillation period -- distinct from `centroid_p2p` above, which is a
+    // single global peak-to-peak over the whole measurement window and can be inflated by settle-in
+    // drift or a single outlier swing. Chopping into windows of the detected period and taking the
+    // median is more robust to both of those, and gives a number that maps directly to "how big is
+    // one typical surge swing", which is what a large-amplitude-surging search cares about.
+    match detected_period_s {
+        Some(period_s) if period_s > 0.0 => {
+            let detrended_centroid = linear_detrend(&centroid);
+            let window_len = (period_s * 60.0).round() as usize;
+            if let Some(n_windows) = detrended_centroid.len().checked_div(window_len) {
+                if n_windows < 2 {
+                    println!("amplitude: n/a (no periodic signal / too few periods)");
+                } else {
+                    let mut swings: Vec<f32> = (0..n_windows)
+                        .map(|w| {
+                            let chunk = &detrended_centroid[w * window_len..(w + 1) * window_len];
+                            chunk.iter().cloned().fold(f32::MIN, f32::max)
+                                - chunk.iter().cloned().fold(f32::MAX, f32::min)
+                        })
+                        .collect();
+                    swings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let median = if swings.len() % 2 == 1 {
+                        swings[swings.len() / 2]
+                    } else {
+                        (swings[swings.len() / 2 - 1] + swings[swings.len() / 2]) / 2.0
+                    };
+                    println!("amplitude (median swing per period): {median:.2} deg");
+                }
+            } else {
+                println!("amplitude: n/a (no periodic signal / too few periods)");
+            }
+        }
+        _ => println!("amplitude: n/a (no periodic signal / too few periods)"),
     }
 
     // Sanity check against a physical-pendulum estimate: if the observed period tracks
@@ -420,6 +681,26 @@ fn report(args: &Args, samples: &[Sample]) {
             "pendulum sanity check: mean centroid radius={radius_mean:.3} m => 2*pi*sqrt(R/g) = {pendulum_period_s:.3} s"
         );
     }
+
+    // Symmetry about the drum's vertical low point (180 deg in this convention -- see
+    // `to_vertical_degrees`'s doc comment): a genuine pendulum-style "rocks through the bottom and
+    // back" surge should spend time on *both* sides of 180 deg with comparable extents, not just
+    // wobble within one side while sitting at a rotation-carried steady-state offset (the ordinary
+    // cascading toe/shoulder asymmetry).
+    print_vertical_crossing_symmetry("ball centroid", samples.iter().map(|s| s.centroid_deg));
+    print_vertical_crossing_symmetry(
+        "fluid centroid",
+        samples.iter().map(|s| s.fluid_centroid_deg),
+    );
+    // The free surface's own tilt (a "wave crest" indicator, distinct from the mass-weighted
+    // fluid centroid above -- see `Sample::fluid_surface_tilt_deg`'s doc comment) is already
+    // expressed as a signed offset from horizontal (0 deg), not from 180 deg, so this uses the
+    // generic `print_crossing_symmetry` directly rather than the vertical-specific wrapper.
+    print_crossing_symmetry(
+        "fluid free surface",
+        "tilt-crossing",
+        samples.iter().map(|s| s.fluid_surface_tilt_deg),
+    );
 
     let toe_count = samples.iter().filter(|s| s.toe_deg.is_some()).count();
     println!(

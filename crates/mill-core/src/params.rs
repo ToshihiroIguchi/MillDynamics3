@@ -59,10 +59,11 @@ pub struct MillParams {
 impl Default for MillParams {
     fn default() -> Self {
         Self {
-            diameter_m: 1.0,
+            diameter_m: 0.063,
             speed_mode: SpeedMode::Rpm,
-            // ~70% Nc for the default 1.0 m drum (Nc = 42.3 rpm), expressed directly in rpm.
-            speed_value: 30.0,
+            // ~70% Nc for the default 63 mm drum (Nc = 42.3 / sqrt(0.063) = 168.5 rpm), expressed
+            // directly in rpm.
+            speed_value: 118.0,
             direction: Direction::CounterClockwise,
         }
     }
@@ -140,27 +141,71 @@ pub struct MediaParams {
     pub density_kg_m3: f32,
     pub restitution_ball_ball: f32,
     pub restitution_ball_wall: f32,
+    /// Kinetic (sliding) Coulomb friction coefficient. The contact's friction cone limit at high
+    /// relative tangential speed -- see `friction_ball_ball_static`'s doc comment for how this
+    /// blends with the static coefficient.
     pub friction_ball_ball: f32,
+    /// Kinetic (sliding) Coulomb friction coefficient; see `friction_ball_wall_static`.
     pub friction_ball_wall: f32,
+    /// Static (stick) Coulomb friction coefficient, contact-point tangential speed -> 0. Must be
+    /// `>= friction_ball_ball`: physically, static friction is never lower than kinetic friction
+    /// (a resting contact grips at least as well as a sliding one). Defaults equal to
+    /// `friction_ball_ball` (no stick/slip distinction) so an older client's JSON, which predates
+    /// this field, still deserializes to the exact prior single-coefficient behaviour -- see
+    /// `dem.rs`'s `effective_friction` for how the two blend continuously with relative speed
+    /// (2026-09-28's large-amplitude-surging investigation, docs/PHYSICS.md ss9: a hard
+    /// static/kinetic switch was considered and rejected in favour of this smooth blend, which
+    /// avoids introducing a velocity discontinuity into a fixed-substep solver).
+    #[serde(default = "default_friction_ball_ball")]
+    pub friction_ball_ball_static: f32,
+    /// Static (stick) Coulomb friction coefficient; see `friction_ball_ball_static`'s doc comment
+    /// (same rationale, `friction_ball_wall`'s wall-contact counterpart).
+    #[serde(default = "default_friction_ball_wall")]
+    pub friction_ball_wall_static: f32,
+    /// Relative tangential contact-point speed (m/s) at which the effective friction coefficient
+    /// has decayed roughly halfway from `*_static` toward its paired kinetic coefficient (see
+    /// `dem.rs`'s `effective_friction`). Small relative to a typical wall speed
+    /// (`drum.radius_m * omega`, of order 0.1-2 m/s across this project's speed range) so the
+    /// blend is sharp enough to still produce a stick/slip-like grip-then-release cycle, but never
+    /// introduces an actual discontinuity.
+    #[serde(default = "default_friction_velocity_scale_m_s")]
+    pub friction_velocity_scale_m_s: f32,
     /// Rolling-resistance coefficient (dimensionless torque coefficient).
     pub rolling_friction: f32,
+}
+
+/// `#[serde(default = ...)]` target for [`MediaParams::friction_ball_ball_static`] -- must match
+/// `MediaParams::default()`'s own `friction_ball_ball` value, not an arbitrary constant, so an
+/// older client's JSON (predating this field) deserializes to the exact prior no-stick-distinction
+/// behaviour rather than some other static/kinetic split it never asked for.
+fn default_friction_ball_ball() -> f32 {
+    0.25
+}
+
+/// `#[serde(default = ...)]` target for [`MediaParams::friction_ball_wall_static`]; see
+/// `default_friction_ball_ball`'s doc comment for why this must track `friction_ball_wall`'s own
+/// default rather than being an arbitrary constant.
+fn default_friction_ball_wall() -> f32 {
+    0.35
+}
+
+/// `#[serde(default = ...)]` target for [`MediaParams::friction_velocity_scale_m_s`].
+fn default_friction_velocity_scale_m_s() -> f32 {
+    0.02
 }
 
 impl Default for MediaParams {
     // Defaults model yttria-stabilized zirconia (ZrO2) grinding media, a common ceramic ball-mill
     // charge: density ~6.0 g/cm^3, harder and more elastic (higher restitution, lower friction)
-    // than the steel media this used to default to. 63 mm is a standard forged/ceramic
-    // tumbling-mill ball size, chosen (over a smaller lab/bench size like the former 10 mm
-    // default) so that `Params::true_ball_count` stays under every shipped
-    // `simulation.max_balls` tier (web/src/params/presets.ts's smallest is 150) at this struct's
-    // own `fill_fraction`/`packing_fraction_2d` defaults and the default 1 m mill -- i.e. the
-    // shipped configuration needs no coarse-graining (`Params::effective_media`'s `scale_factor ==
-    // 1.0`) out of the box, so the grinding-diagnostics group (collision rate, impact-energy
-    // histogram) reads genuine per-impact statistics rather than being hidden behind the
-    // coarse-graining banner.
+    // than the steel media this used to default to. The 2 mm ball in a 63 mm drum is a lab-scale
+    // (bench mill) configuration: `Params::true_ball_count` is ~244 at this struct's own
+    // `fill_fraction`/`packing_fraction_2d` defaults, which stays under every shipped
+    // `simulation.max_balls` tier (web/src/params/presets.ts's smallest is 300), so the shipped
+    // configuration needs no coarse-graining (`Params::effective_media`'s `scale_factor == 1.0`)
+    // out of the box and the grinding-diagnostics group reads genuine per-impact statistics.
     fn default() -> Self {
         Self {
-            ball_diameter_m: 0.063,
+            ball_diameter_m: 0.002,
             fill_fraction: 0.30,
             packing_fraction_2d: 0.82,
             density_kg_m3: 6000.0,
@@ -168,6 +213,11 @@ impl Default for MediaParams {
             restitution_ball_wall: 0.5,
             friction_ball_ball: 0.25,
             friction_ball_wall: 0.35,
+            // Equal to the kinetic coefficients above: no stick/slip distinction by default, exact
+            // prior single-coefficient behaviour (see `friction_ball_ball_static`'s doc comment).
+            friction_ball_ball_static: default_friction_ball_ball(),
+            friction_ball_wall_static: default_friction_ball_wall(),
+            friction_velocity_scale_m_s: default_friction_velocity_scale_m_s(),
             rolling_friction: 0.01,
         }
     }
@@ -198,11 +248,27 @@ impl MediaParams {
         for (name, mu) in [
             ("friction_ball_ball", self.friction_ball_ball),
             ("friction_ball_wall", self.friction_ball_wall),
+            ("friction_ball_ball_static", self.friction_ball_ball_static),
+            ("friction_ball_wall_static", self.friction_ball_wall_static),
             ("rolling_friction", self.rolling_friction),
         ] {
             if !(mu >= 0.0 && mu.is_finite()) {
                 return Err(format!("media.{name} must be >= 0"));
             }
+        }
+        if self.friction_ball_ball_static < self.friction_ball_ball {
+            return Err(
+                "media.friction_ball_ball_static must be >= media.friction_ball_ball".into(),
+            );
+        }
+        if self.friction_ball_wall_static < self.friction_ball_wall {
+            return Err(
+                "media.friction_ball_wall_static must be >= media.friction_ball_wall".into(),
+            );
+        }
+        if !(self.friction_velocity_scale_m_s > 0.0 && self.friction_velocity_scale_m_s.is_finite())
+        {
+            return Err("media.friction_velocity_scale_m_s must be > 0".into());
         }
         Ok(())
     }
@@ -763,6 +829,12 @@ mod tests {
         // `shipped_defaults_need_no_coarse_graining` below), J = 0.30 => several thousand true
         // discs, above max_balls (600), so coarse-graining must kick in.
         let params = Params {
+            // Legacy 1 m / 30 rpm drum (the shipped default is now a 63 mm bench drum).
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_value: 30.0,
+                ..MillParams::default()
+            },
             media: MediaParams {
                 ball_diameter_m: 0.010,
                 ..MediaParams::default()
@@ -789,6 +861,12 @@ mod tests {
         // stay 1 and `N_sim` must equal the true (uncapped) count, even though that exceeds
         // `max_balls`.
         let params = Params {
+            // Legacy 1 m / 30 rpm drum (the shipped default is now a 63 mm bench drum).
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_value: 30.0,
+                ..MillParams::default()
+            },
             media: MediaParams {
                 ball_diameter_m: 0.010,
                 ..MediaParams::default()
@@ -847,21 +925,21 @@ mod tests {
 
     #[test]
     fn shipped_defaults_need_no_coarse_graining() {
-        // The point of the 10 mm -> 63 mm default ball diameter change: at the default 1 m mill /
-        // J = 0.30 / packing 0.82, N_true ~= 62, comfortably under every shipped
-        // web/src/params/presets.ts quality tier's `max_balls` (150/300/600), including the
-        // browser's actual boot default (Realtime, 150) which `crate::coupling::tests::
+        // The point of the 2 mm ball / 63 mm drum default: at J = 0.30 / packing 0.82,
+        // N_true ~= 244, under every shipped
+        // web/src/params/presets.ts quality tier's `max_balls` (300/300/600), including the
+        // browser's actual boot default (Realtime, 300) which `crate::coupling::tests::
         // coupled_charge_never_gains_more_energy_than_the_wall_supplies`'s own comment notes this
         // crate's `Params::default()` (max_balls = 600) does not itself match. So this asserts
-        // across all three tiers, not just `Params::default()`'s own 600.
-        for max_balls in [150u32, 300, 600] {
+        // across every tier, not just `Params::default()`'s own 600.
+        for max_balls in [300u32, 600] {
             let mut params = Params::default();
             params.simulation.max_balls = max_balls;
             let n_true = params.true_ball_count();
             assert!(
                 n_true <= max_balls as f32,
                 "N_true={n_true} should not exceed max_balls={max_balls} at the shipped default \
-                 63 mm ball diameter"
+                 2 mm ball / 63 mm drum"
             );
             let eff = params.effective_media();
             assert_eq!(
@@ -922,10 +1000,11 @@ mod tests {
 
     #[test]
     fn effective_fluid_resolution_matches_requested_when_already_fine_enough() {
-        // Params::default() (max_balls = 600, resolution = 40, 63 mm ball diameter, no
+        // Params::default() (max_balls = 600, resolution = 40, 2 mm ball in a 63 mm drum, no
         // coarse-graining -- see `shipped_defaults_need_no_coarse_graining` above) sits
-        // comfortably under the "fluid spacing vs ball diameter" warning (dx = 12.5 mm vs a 63 mm
-        // effective diameter, ratio ~0.20), so the auto-raise should be a no-op here.
+        // comfortably under the "fluid spacing vs ball diameter" warning (dx = 1.6 mm vs a 2 mm
+        // effective diameter, ratio ~0.39 by the panel's h/(2d) convention), so the auto-raise
+        // should be a no-op here.
         let params = Params::default();
         assert_eq!(
             params.effective_fluid_resolution(),
@@ -944,6 +1023,12 @@ mod tests {
         // ball diameter to push N_true back above max_balls, same as
         // `effective_media_coarse_grains_when_true_count_is_large` above.
         let mut params = Params {
+            // Legacy 1 m / 30 rpm drum (the shipped default is now a 63 mm bench drum).
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_value: 30.0,
+                ..MillParams::default()
+            },
             media: MediaParams {
                 ball_diameter_m: 0.010,
                 ..MediaParams::default()
@@ -975,20 +1060,28 @@ mod tests {
     }
 
     #[test]
-    fn effective_substeps_matches_requested_at_every_quality_preset() {
-        // web/src/params/presets.ts's three (max_balls, resolution) tiers at the default 0.30 fill
-        // fraction, plus this crate's own `Params::default()` (max_balls = 600) -- none of these
-        // should trigger the auto-raise (docs/PHYSICS.md §9's max_balls = 1500 follow-up is the one
-        // that does, see the test below).
-        for max_balls in [150u32, 300, 600] {
+    fn effective_substeps_is_capped_at_every_quality_preset_at_the_shipped_default() {
+        // The shipped 2 mm ball in a 63 mm drum has D / d = 31.5 (the old 63 mm ball in a 1 m drum
+        // had 15.9), so `v_ref * dt <= 0.5 * d_eff` needs ~19 sub-steps: every quality tier runs
+        // at the validated cap (16), independent of `max_balls` because none coarse-grains.
+        for max_balls in [300u32, 600] {
             let mut params = Params::default();
             params.simulation.max_balls = max_balls;
             assert_eq!(
                 params.effective_substeps(),
-                params.simulation.substeps,
-                "unexpected auto-raise at max_balls={max_balls}"
+                16,
+                "unexpected sub-step count at max_balls={max_balls}"
             );
         }
+    }
+
+    #[test]
+    fn effective_substeps_matches_requested_for_the_legacy_1m_drum() {
+        // The former 63 mm ball / 1 m drum default never triggered the auto-raise.
+        let mut params = Params::default();
+        params.mill.diameter_m = 1.0;
+        params.media.ball_diameter_m = 0.063;
+        assert_eq!(params.effective_substeps(), params.simulation.substeps);
     }
 
     #[test]
@@ -999,6 +1092,12 @@ mod tests {
         // Same explicit 10 mm ball diameter override as that test, for the same reason (the
         // shipped 63 mm default no longer coarse-grains at max_balls = 1500).
         let mut params = Params {
+            // Legacy 1 m / 30 rpm drum (the shipped default is now a 63 mm bench drum).
+            mill: MillParams {
+                diameter_m: 1.0,
+                speed_value: 30.0,
+                ..MillParams::default()
+            },
             media: MediaParams {
                 ball_diameter_m: 0.010,
                 ..MediaParams::default()

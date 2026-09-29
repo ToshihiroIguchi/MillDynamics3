@@ -432,6 +432,8 @@ mod tests {
     #[test]
     fn fixed_sub_dt_matches_60hz_over_substeps() {
         let mut params = Params::default();
+        // Legacy 1 m drum: at the shipped 2 mm / 63 mm default `effective_substeps` raises to 16.
+        params.mill.diameter_m = 1.0;
         params.simulation.substeps = 8;
         let sim = Simulation::new(params).unwrap();
         assert!((sim.fixed_sub_dt() - 1.0 / 480.0).abs() < 1e-9);
@@ -844,6 +846,9 @@ mod tests {
         // explicit 10 mm ball diameter override -- the shipped 63 mm default needs no
         // coarse-graining at all (`params::tests::shipped_defaults_need_no_coarse_graining`).
         let mut params = Params::default();
+        // Legacy 1 m drum / 30 rpm (the shipped default is now a 63 mm bench drum).
+        params.mill.diameter_m = 1.0;
+        params.mill.speed_value = 30.0;
         params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 150;
         let mut sim = Simulation::new(params).unwrap();
@@ -909,6 +914,9 @@ mod tests {
         // `params::tests::effective_fluid_resolution_raises_when_coarse_graining_shrinks_balls_
         // below_lattice_spacing`.
         let mut params = Params::default();
+        // Legacy 1 m drum / 30 rpm (the shipped default is now a 63 mm bench drum).
+        params.mill.diameter_m = 1.0;
+        params.mill.speed_value = 30.0;
         params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 1500;
         params.simulation.resolution = 15;
@@ -972,6 +980,9 @@ mod tests {
         // under 1 by raising the sub-step rate instead. Same explicit 10 mm ball diameter override
         // as that test (the shipped 63 mm default no longer coarse-grains at max_balls = 1500).
         let mut params = Params::default();
+        // Legacy 1 m drum / 30 rpm (the shipped default is now a 63 mm bench drum).
+        params.mill.diameter_m = 1.0;
+        params.mill.speed_value = 30.0;
         params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 1500;
         params.simulation.resolution = 15;

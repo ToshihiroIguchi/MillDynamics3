@@ -41,8 +41,8 @@ Two deliberate omissions, both discussed at length above:
   Coarse-graining (k), Effective diameter* above) -- a config change away for anyone who lowers
   `media.ball_diameter_m` or raises `media.fill_fraction`/`mill.diameter_m` far enough to push
   `N_true` back above `simulation.max_balls`. (The *shipped* default itself needs no
-  coarse-graining, `k = 1` -- `media.ball_diameter_m` was raised from a 10 mm lab/bench size to a
-  standard 63 mm one specifically so `N_true` stays under every quality preset's `max_balls`; see
+  coarse-graining, `k = 1` -- `media.ball_diameter_m` was set to a 2 mm ball in a 63 mm bench
+  drum so `N_true` (~244) stays under every quality preset's `max_balls`; see
   `docs/PARAMETERS.md`.) A key row that can silently read empty depending on unrelated config would
   be worse than leaving it in the Grinding group, whose summary carries a `k = …` chip so the fact
   stays visible without opening it.
@@ -113,10 +113,9 @@ radius)** reads much smaller with no lifters (~1-2%) but **~31-33% with `lifters
 `docs/PHYSICS.md` §3's mass-preserving substitution: when the true physical ball count exceeds
 `simulation.max_balls`, the solver simulates `Simulated balls` fewer, larger discs (`Effective
 diameter`, scaled by `k`) instead. `k = 1` means coarse-graining is inactive. **The shipped
-default needs no coarse-graining** (`k = 1.0` at a 1 m drum / 63 mm balls, under every quality
-preset's `max_balls`, including the smallest, Realtime's 150) -- `media.ball_diameter_m` was
-deliberately raised from an earlier 10 mm lab/bench default to this standard media size for exactly
-this reason. Coarse-graining is still very much a live path, though: dropping to a smaller ball
+default needs no coarse-graining** (`k = 1.0` at a 63 mm drum / 2 mm balls, `N_true` ~244, under every quality
+preset's `max_balls`, including the smallest, 300) -- the default drum/ball sizes were chosen for
+exactly this reason. Coarse-graining is still very much a live path, though: dropping to a smaller ball
 diameter, or raising `media.fill_fraction`/`mill.diameter_m` enough to push `N_true` back above
 `max_balls`, re-triggers it (e.g. 10 mm balls at these same defaults give `N_true ≈ 2460`, `k ≈
 2.0` at `max_balls = 600`).

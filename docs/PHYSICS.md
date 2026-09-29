@@ -1325,6 +1325,173 @@ state after calling `compute`:
     with no lifters, and watch the existing "Toe angle" / "Shoulder angle" metrics-panel sparklines
     (`web/src/metrics/specs.ts`, already `sparkline: true`) -- both already surface the same
     vertical-degree convention `oscillation_probe.rs` samples.
+  - **Large-amplitude recipe (2026-09-28 follow-up, still no code change).** The prior entry only
+    established that a periodic mode *exists*; it did not target amplitude, and the default ball
+    diameter has since moved to 63 mm (no coarse-graining) so period/amplitude numbers needed
+    re-measuring. `oscillation_probe.rs` gained `--rolling-friction`/`--fill`/`--slurry-fill`/
+    `--restitution-wall` flags and a "median swing per detected period" amplitude metric (distinct
+    from the pre-existing whole-window `p2p`, which a single outlier swing or settle-in drift can
+    inflate). A ~50-run sweep (wet, no lifters, default 63 mm balls) found: `slurry.viscosity_pa_s`
+    dominates by far (only <=~7 Pa*s ever shows a periodic swing at all; the 50 Pa*s default is
+    almost always flat), and within the periodic regime raising `media.friction_ball_ball` above its
+    0.25 default consistently increases amplitude (more ball-ball grip makes the charge move more as
+    a rigid block rather than shedding energy through internal rolling), while
+    `media.friction_ball_wall` needs enough headroom above 0.35 to keep the mode from breaking back
+    into non-periodic sloshing at low `%Nc`. Recipe periodic across all 3 tested seeds (1/2/3),
+    amplitude (median swing per period) 6.1-9.5 deg, whole-window centroid p2p 12.2-15.9 deg, period
+    ~1.3-1.6 s: `slurry.viscosity_pa_s = 5`, `mill.speed_value = 20` (`%Nc` mode), `lifters.count =
+    0`, `media.friction_ball_wall = 0.6`, `media.friction_ball_ball = 0.5`,
+    `media.rolling_friction` left at its 0.01 default. Reproduce with:
+    `cargo run -p mill-core --release --example oscillation_probe -- --percent-critical 20 --slurry
+    on --viscosity 5 --friction-ball-wall 0.6 --friction-ball-ball 0.5 --seed <1|2|3>`. The
+    amplitude landscape is narrow and jaggy near its edges -- e.g. `%Nc = 40` with the same
+    frictions gave a larger single-seed amplitude (12.5 deg) but lost periodicity on a third seed --
+    so this `%Nc = 20` combination was chosen over higher-peak alternatives specifically for being
+    periodic on every seed tested, not for the single highest amplitude observed. No
+    `dem.rs`/`pbf.rs`/`params.rs` change was needed to reach this; static-vs-kinetic wall friction
+    (which would add a mechanism for even more pronounced stick-slip and a wider stable parameter
+    band) remains a possible future addition if a wider/more-robust surging band is ever needed, not
+    a blocker for reproducing the effect today.
+  - **Static/kinetic friction split added (2026-09-28), but a symmetric both-side "rocks through
+    the drum's low point" swing was still not reproduced.** A user report described a real wet
+    mill's charge swinging left and right by roughly equal angles (i.e. spending comparable time,
+    and reaching comparable extents, on *both* sides of the drum's vertical low point), distinct
+    from the one-sided wobble measured above (every centroid-angle trace so far sits at a
+    steady-state offset toward the ascending/ "up" side, wobbling *within* that one side, never
+    crossing back past vertical to the other). Two changes followed:
+    1. `MediaParams` gained `friction_ball_ball_static`/`friction_ball_wall_static` (defaulting to
+       their existing kinetic counterparts -- an old client's JSON deserializes to the exact prior
+       single-coefficient behaviour) and `friction_velocity_scale_m_s`. `dem.rs`'s new
+       `effective_friction(mu_kinetic, mu_static, v_t, velocity_scale)` blends the two with
+       `mu_kinetic + (mu_static - mu_kinetic) * exp(-(v_t/velocity_scale)^2)` -- smooth (an even,
+       everywhere-differentiable function of the contact's relative tangential speed `v_t`) rather
+       than a hard Karnopp-style if/else switch, specifically chosen over a hard switch (an earlier
+       version of this plan) to avoid injecting a velocity discontinuity into step 5's fixed-
+       substep, per-contact-then-resync solve, which can make a contact chatter between "just
+       stuck" and "just slipping" every sub-step at the switch boundary. Verified bit-exact for
+       every shipped default via `examples/perf_probe.rs`'s hash oracle (identical hashes,
+       `git stash`-compared same-session) -- this is a strictly additive, opt-in capability.
+    2. `oscillation_probe.rs` gained `--friction-ball-wall-static`/`--friction-ball-ball-static`/
+       `--friction-velocity-scale`, `--ball-diameter-mm`/`--drum-diameter-mm` (to test other mill
+       scales), and a "vertical-crossing symmetry" report line (extents of the raw centroid-angle
+       offset from the 180 deg low point on each side, and whether the trace crosses it at all).
+    Swept broadly (all wet, no lifters): `%Nc` 1-80 at the shipped 63 mm ball / 1 m drum scale,
+    `%Nc` 10-50 at a 2 mm ball / 63 mm drum scale (the user's own earlier small-scale experiment --
+    note this scale needs `simulation.resolution` capped low, e.g. 10, or the auto-raised fluid
+    resolution makes a CLI sweep impractically slow), viscosity from thick (50 Pa*s) down to real
+    water's (~0.001 Pa*s), and -- with the new split -- `friction_ball_wall_static` up to 2.0 (a
+    physically extreme value; most real material pairs' static coefficient is below ~0.8) crossed
+    with `friction_ball_ball_static` up to 1.5. In every one of these runs (~100 total), the
+    centroid-angle trace's `side_a_extent`/`side_b_extent` symmetry metric came back one-sided
+    (`crosses_bottom=false`): the mean position always sits 10-35 deg to one side of vertical, and
+    the oscillation on top of that mean stays confined to a 3-15 deg window without ever crossing
+    back through the low point to the other side. The likely reason: a *continuously rotating* wall
+    inherently carries the charge toward the ascending side (that carry is exactly what drives
+    cascading at all), so the charge's time-averaged position cannot sit at vertical -- the
+    static/kinetic split changes how abruptly the charge grips and releases the wall, and how large
+    the resulting wobble is, but doesn't remove that one-sided bias, because the bias's cause (net
+    angular momentum injection from a one-directional wall) is unrelated to which friction law is
+    used. Tested down to `%Nc = 1` (near-zero net rotation) with no different outcome -- the charge
+    just settles into a small, still-one-sided jitter rather than swinging. No default values were
+    changed by this investigation; the static/kinetic friction capability is available for future
+    use (e.g. a UI control, or lifter-driven surging).
+  - **Free-pendulum release tried next (still 2026-09-28): decisively overdamped, no crossing at
+    all.** `oscillation_probe.rs` gained `--stop-after-settle`: runs the usual driven settle phase
+    (lifting the charge up the ascending side as normal), then calls `Simulation::set_params` to
+    set `mill.speed_value = 0` (wall stops dead, mid-run, no reseed) and measures what the charge
+    does purely under gravity + its own momentum from then on -- a genuine release, unlike every
+    other measurement in this section which keeps the wall actively driving the charge throughout.
+    Tried from both a modest initial displacement (settled at 30 `%Nc`, released ~15 deg off
+    vertical) and a large one (settled at 70 `%Nc`, released ~28 deg off vertical), both at real
+    water's viscosity. In both cases the centroid angle **crept monotonically back toward vertical
+    over several seconds and never overshot past it even once** (e.g. the 70 `%Nc` case: released
+    at 152.6 deg, still only at 177.3 deg -- short of 180 -- after a further 8 s) -- not a damped
+    oscillation with decaying overshoot, a plain overdamped relaxation with no overshoot at all.
+    At the project's default friction (0.35 wall / 0.25 ball) this looked like it ruled out "just
+    release it" entirely -- but see the next entry, which isolates *why* and finds this is a
+    friction-magnitude threshold, not a dead end.
+  - **Root cause isolated (still 2026-09-28): kinetic friction alone controls whether a release
+    swing crosses the low point -- and it does, well below this project's shipped defaults.**
+    `oscillation_probe.rs` gained `--release-friction-ball-wall`/`--release-friction-ball-ball`/
+    `--release-rolling-friction`/`--release-restitution-wall`/`--release-restitution-ball`:
+    overrides applied at the same instant as `--stop-after-settle`'s wall stop, so the *settle*
+    phase still uses normal friction (the wall needs real friction to lift/displace the charge at
+    all -- see below) while the *release* itself can use different coefficients, letting the
+    "what displaces the charge" and "what damps its swing" questions be answered independently.
+    Sweeping the release-phase Coulomb friction coefficient (`friction_ball_wall`/
+    `friction_ball_ball`, applied equally, settle phase left at the 0.35/0.25 defaults, `slurry
+    off`, released from ~27 deg at 70 `%Nc`, seed 1) found a clean threshold: **`crosses_bottom =
+    true` for release friction `<= ~0.1`, `false` for `>= ~0.15`-`0.2`** -- e.g. at `mu = 0.05`:
+    `symmetry_ratio = 0.55`, p2p 45 deg, a clear multi-cycle decaying swing (153 -> 186 -> 172 ->
+    198 -> 160 deg ... settling near 180 deg by ~14 s, confirmed by inspecting the raw trace); at
+    `mu = 0.005` (near-frictionless): `symmetry_ratio = 0.88`, amplitude (first-period) 35.7 deg.
+    **Restitution and rolling friction turned out not to matter**: re-running `mu = 0.05` with
+    release restitution swept 0.7 (the project's own default) through 0.99 gave near-identical
+    results every time (`symmetry_ratio` 0.52-0.55 throughout), and leaving `rolling_friction` at
+    its 0.01 default instead of forcing it to 0 changed nothing either -- Coulomb (kinetic) friction
+    is the sole controlling variable for this mode's damping ratio in this solver, confirming the
+    "effective damping ratio `>= 1`" read above was specifically about friction, not restitution.
+    **But this crossing behaviour is release-only, not a driven-rotation phenomenon**: re-running
+    the driven-rotation sweep (no stop, continuously rotating wall) at this same low friction
+    (`mu = 0.05`, `%Nc` 5-15, water viscosity) still came back `crosses_bottom = false` every time
+    -- a continuously rotating wall injects net one-directional angular momentum regardless of how
+    low the friction coefficient is (friction only sets *how efficiently* that momentum couples
+    in, not its direction), so low friction alone cannot turn the driven steady state symmetric --
+    it only unlocks the underdamped free-release mode. **Net picture**: a genuine, large,
+    left-right-symmetric swing through the drum's low point is achievable in this model, but only
+    as a *decaying transient right after the drum stops* (e.g. an operator cutting power, not
+    steady-state running), and only with ball-wall/ball-ball kinetic friction well below this
+    project's ceramic-media defaults (roughly `<= 0.1`, vs. the shipped 0.35/0.25) -- consistent
+    with a much smoother/harder media-and-liner pairing than the default YSZ-on-steel model.
+    Reproduce: `cargo run -p mill-core --release --example oscillation_probe --
+    --percent-critical 70 --slurry off --settle-s 3 --measure-s 10 --stop-after-settle
+    --release-friction-ball-wall 0.05 --release-friction-ball-ball 0.05 --seed 1`.
+  - **User rejected the release-only finding (2026-09-29): needs the crossing swing DURING
+    continuous rotation specifically, not as a stop-transient.** An extensive further search of
+    driven-rotation (never-stopped) mechanisms all failed to produce a robust `crosses_bottom =
+    true`: high static + low kinetic wall friction (the classic "climbs while stuck, breaks free,
+    slides, overshoots" mental model -- still one-sided, and *smaller* amplitude than the Phase-1
+    recipe); low ball-ball friction with normal/high wall friction (a detached avalanche layer
+    flowing freely); fill fraction 0.5-0.7 (rigid-block precession); a 2:1 parametric-resonance
+    check (`%Nc` 55-75, where the rotation period is close to twice the pendulum period -- no
+    resonance effect, bias angle stayed pinned at ~163.5 deg across the whole range); and a
+    combined wall-stick-slip + low-ball-ball-friction avalanche. A structural explanation for why:
+    a continuously rotating wall's "stuck" state ties the ball to the *wall's own nonzero,
+    constantly-refreshed speed*, not to rest -- every time the slip speed re-approaches zero the
+    ball re-locks near wall speed rather than continuing to build independent momentum, capping
+    achievable swing energy near `~(wall speed)^2` regardless of the friction law's shape (this is
+    different from the release case, where `v_t = 0` means the wall itself, and thus the "target"
+    speed to re-lock to, is at rest). Two alternative model extensions were proposed (a
+    torque-limited/compliant-motor dynamic-drum model; an azimuthally wall-friction-textured
+    liner) and both declined by the user as too specialized a modelling assumption.
+  - **Literature search (2026-09-29, WebSearch): the classic single-species "slumping regime" is
+    exactly this model's one-sided result; a genuinely symmetric driven oscillation in the
+    literature needs a second granular fraction this simulator doesn't have.** The rotating-drum
+    granular-physics literature describes the classic low-Froude-number "slumping regime" (e.g.
+    Rajchenbach-style avalanche dynamics) as the free-surface slope oscillating *between the angle
+    of repose and the angle of marginal stability* -- i.e. the same one-sided sawtooth this
+    project's DEM already reproduces (Phase 1's recipe); it is not described as crossing the
+    drum's low point either. A real, literature-documented *symmetric* "self-oscillating"/
+    "auto-excited" pulsation during continuous rotation exists (Deineka et al.,
+    Eastern-European Journal of Enterprise Technologies, "Establishing the rotation speed
+    variation range limits for auto-excitation of self-oscillating grinding in a tumbling mill";
+    "Revealing the mechanism of stability loss of a two-fraction granular flow in a rotating
+    drum"), but its driving mechanism is **dilatancy between two granular fractions** (coarse
+    grinding media + fine ground material/ore), not wall friction at all -- this simulator has no
+    second solid granular phase (only media balls + a continuum SPH liquid). The user's own
+    reference, however, was water + media only (no ore/fines), which this specific mechanism does
+    not explain either. A related, independently-sourced term from wet-milling literature --
+    "sloshing" (the charge moves as a liquid rather than tumbling as a coherent granular mass when
+    slurry solids content is below ~70 wt%) -- prompted a follow-up test: low media fill
+    (0.05-0.15) with high slurry fill (0.6-0.8), tracking the *slurry population's own centroid*
+    (`oscillation_probe.rs`'s new `fluid_centroid`, independent of the sparse ball population).
+    Result: weak and inconsistent (`symmetry_ratio` only 0.07-0.39 across the configs that crossed
+    at all, vs. 0.55-0.88 for the genuine release finding above) -- not a robust phenomenon, though
+    not conclusively ruled out either (only the fluid's mass-weighted centroid was checked, not its
+    free-surface extent, which a real sloshing wave crest might show more clearly). **Status: open,
+    unresolved** -- no driven-rotation mechanism tried so far reproduces a robust symmetric
+    low-point-crossing swing; see the project memory entry for this investigation for the
+    prioritized list of what to try next.
 - **Slurry does not seep into a settled/stationary ball bed, even at low viscosity with the drum
   stopped (2026-09-27 investigation, UI note added, no solver change).** A user report: after
   lowering `slurry.viscosity_pa_s` and setting `mill.speed_value = 0`, the slurry pool visible above
@@ -1366,3 +1533,17 @@ state after calling `compute`:
     consistent, expected behaviour of a coarse-grained 2D model, not a solver defect. A UI note was
     added (`web/src/ui/paramsPanel.ts`'s Slurry group) explaining this so it is not mistaken for a
     bug; no `dem.rs`/`pbf.rs`/`params.rs` change or default-value change was made.
+
+### 2 mm / 63 mm shipped default: measured side effects (2026-09-29)
+
+The default became a 2 mm ball in a 63 mm drum (118 rpm ~ 70% Nc, `N_true` ~ 244, Realtime
+`max_balls` 150 -> 300). Measured consequences, disclosed rather than tuned away:
+
+- `Params::effective_substeps` now returns 16 (the cap) at every quality tier: `D / d = 31.5`
+  needs ~19 sub-steps for the 0.5 displacement-ratio target, so the shipped default costs ~2x the
+  former 8 sub-steps per frame.
+- Transient ball-ball overlap at `dem_iterations = 2` is 0.3-0.5 of a radius (dry and static drum
+  alike, so it is DEM contact resolution of a dense pile); `dem_iterations = 6` gives ~0.12-0.15.
+- Wet: the maximum PBF compression error is 6-12 (sustained over 150 frames, not growing) --
+  single fluid particles pinched between the tiny balls; see the infiltration note above.
+  Energy-invariant tests still pass.
