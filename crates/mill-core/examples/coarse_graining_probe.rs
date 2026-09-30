@@ -56,6 +56,16 @@ struct Args {
     /// Explicit `(k, resolution)` pairs (`--combos 1:50,2:25`); overrides `--ks`/`--resolution`.
     combos: Vec<(f32, u32)>,
     csv: bool,
+    /// Shipped browser defaults (63 mm drum, 2 mm ball, 0.30 fill, 50/60/70 %Nc, slurry on/off,
+    /// presets Realtime/Balanced/Accuracy = res 15/25/40).
+    browser_defaults: bool,
+    /// Reference mode: add a k=1 fine-lattice reference run per condition and print an error map.
+    reference: bool,
+    ref_res: u32,
+    ref_substeps: u32,
+    /// Optional `simulation.substeps` override for the non-reference runs.
+    substeps: Option<u32>,
+    ks_given: bool,
 }
 
 fn parse_list(s: &str) -> Vec<f32> {
@@ -87,14 +97,37 @@ impl Args {
             only_metrics: None,
             combos: Vec::new(),
             csv: false,
+            browser_defaults: false,
+            reference: false,
+            ref_res: 100,
+            ref_substeps: 16,
+            substeps: None,
+            ks_given: false,
         };
+        if env::args().any(|f| f == "--browser-defaults") {
+            let d = Params::default();
+            a.browser_defaults = true;
+            a.drum_mm = d.mill.diameter_m * 1000.0;
+            a.ball_mm = d.media.ball_diameter_m * 1000.0;
+            a.fills = vec![d.media.fill_fraction];
+            a.speeds = vec![50.0, 60.0, 70.0];
+            a.slurry = vec![false, true];
+        }
         let mut args = env::args().skip(1);
         while let Some(flag) = args.next() {
             let mut val = || args.next().expect("flag needs a value");
             match flag.as_str() {
                 "--drum-mm" => a.drum_mm = val().parse().expect("number"),
                 "--ball-mm" => a.ball_mm = val().parse().expect("number"),
-                "--ks" => a.ks = parse_list(&val()),
+                "--ks" => {
+                    a.ks = parse_list(&val());
+                    a.ks_given = true;
+                }
+                "--browser-defaults" => {}
+                "--reference" => a.reference = true,
+                "--ref-res" => a.ref_res = val().parse().expect("number"),
+                "--ref-substeps" => a.ref_substeps = val().parse().expect("number"),
+                "--substeps" => a.substeps = Some(val().parse().expect("number")),
                 "--speeds" => a.speeds = parse_list(&val()),
                 "--fills" => a.fills = parse_list(&val()),
                 "--slurry" => {
@@ -128,7 +161,7 @@ impl Args {
                         "Flags: --drum-mm <f32> --ball-mm <f32> --ks <list> --speeds <list %Nc> \
                          --fills <list> --slurry <on|off|both> --seeds <u32, >=3 recommended> \
                          --settle-revs <f32> --measure-revs <f32> --resolution <u32> \
-                         --threads <usize> --metrics <comma list of names to print>"
+                         --threads <usize> --metrics <comma list of names to print>                          --browser-defaults --reference --ref-res <u32, default 100>                          --ref-substeps <u32, default 16> --substeps <u32> --combos k:res,..."
                     );
                     std::process::exit(0);
                 }
@@ -165,6 +198,8 @@ struct Job {
     k: f32,
     res: u32,
     seed: u64,
+    /// Reference run (k=1, fine lattice): raised sub-steps and a 2x longer measure window.
+    is_ref: bool,
 }
 
 /// Running mean/count of an `Option`-valued or plain sample stream.
@@ -290,13 +325,23 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
     p.simulation.coarse_graining_k = job.k;
     // Manual mode ignores max_balls for k, but keep validation happy with a generous value.
     p.simulation.max_balls = 50_000;
+    if job.is_ref {
+        p.simulation.substeps = args.ref_substeps;
+    } else if let Some(n) = args.substeps {
+        p.simulation.substeps = n;
+    }
     p.validate().expect("invalid params");
 
     let mut sim = Simulation::new(p).expect("failed to build simulation");
     let omega = p.mill.omega();
     let rev_s = 60.0 / p.mill.rpm();
     let settle_frames = (args.settle_revs * rev_s * FPS).round() as u32;
-    let measure_frames = (args.measure_revs * rev_s * FPS).round() as u32;
+    let measure_revs = if job.is_ref {
+        2.0 * args.measure_revs
+    } else {
+        args.measure_revs
+    };
+    let measure_frames = (measure_revs * rev_s * FPS).round() as u32;
 
     for _ in 0..settle_frames {
         sim.step(1.0 / FPS);
@@ -311,6 +356,7 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
     let mut pool_max_deg: Vec<f64> = Vec::new();
     let mut fs_angle_deg: Vec<f64> = Vec::new();
     let mut fluid_centroid_deg: Vec<f64> = Vec::new();
+    let mut overlap_peak = 0.0f64;
     let mut push = |name: &'static str, v: f64| acc.entry(name).or_default().push(v);
 
     for f in 0..measure_frames {
@@ -324,6 +370,7 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
             ke_series.push(m.total_kinetic_energy_j as f64);
             push("mean_shear_rate_per_s", m.mean_shear_rate_per_s as f64);
             push("max_ball_overlap_frac", m.max_ball_overlap_fraction as f64);
+            overlap_peak = overlap_peak.max(m.max_ball_overlap_fraction as f64);
             push(
                 "max_ball_wall_overlap_frac",
                 m.max_ball_wall_overlap_fraction as f64,
@@ -422,6 +469,7 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
     }
 
     let mut out: Vec<(&'static str, f64)> = acc.iter().map(|(k, v)| (*k, v.mean())).collect();
+    out.push(("max_ball_overlap_peak", overlap_peak));
     out.push(("toe_angle_deg", circular_mean_deg(&toe_deg)));
     out.push(("shoulder_angle_deg", circular_mean_deg(&shoulder_deg)));
     out.push(("dynamic_repose_span_deg", {
@@ -471,10 +519,25 @@ fn main() {
     }
 
     let mut args = args;
-    if args.combos.is_empty() {
+    let wall_start = std::time::Instant::now();
+    {
         let a = Arc::get_mut(&mut args).expect("sole owner");
-        a.combos = a.ks.iter().map(|&k| (k, a.resolution)).collect();
+        if a.combos.is_empty() {
+            a.combos = if a.browser_defaults && !a.ks_given {
+                // Shipped presets Realtime / Balanced / Accuracy (web/src/params/presets.ts).
+                vec![(1.0, 15), (1.0, 25), (1.0, 40)]
+            } else {
+                a.ks.iter().map(|&k| (k, a.resolution)).collect()
+            };
+        }
+        if a.reference {
+            let ref_res = a.ref_res;
+            a.combos.retain(|&(k, r)| !(k == 1.0 && r == ref_res));
+            // The reference goes first: the generic table then reports deviations against it.
+            a.combos.insert(0, (1.0, ref_res));
+        }
     }
+    let ref_combo = (1.0f32, args.ref_res);
     let mut jobs: Vec<Job> = Vec::new();
     for &slurry in &args.slurry {
         for &speed in &args.speeds {
@@ -490,6 +553,7 @@ fn main() {
                             k,
                             res,
                             seed: 1 + s as u64,
+                            is_ref: args.reference && (k, res) == ref_combo,
                         });
                     }
                 }
@@ -515,11 +579,22 @@ fn main() {
                 fill,
                 p.true_ball_count(),
                 args.resolution,
-                args.ks
+                args.combos
                     .iter()
-                    .map(|&k| format!("k={k}:{}", (p.true_ball_count() / (k * k)).round()))
+                    .map(|&(k, _)| format!("k={k}:{}", (p.true_ball_count() / (k * k)).round()))
                     .collect::<Vec<_>>()
                     .join(" ")
+            );
+        }
+        if args.reference {
+            println!(
+                "REFERENCE mode: k=1 res={} substeps={} measure window {} revs (2x); \
+                 non-reference substeps: {}",
+                args.ref_res,
+                args.ref_substeps,
+                2.0 * args.measure_revs,
+                args.substeps
+                    .map_or("Params default".to_string(), |n| n.to_string())
             );
         }
         println!(
@@ -652,4 +727,142 @@ fn main() {
     println!(
         "\n('*' = deviation from the first k exceeds 2x combined standard error of the means)"
     );
+    if args.reference {
+        error_map(&args, &results, ref_combo);
+    }
+    println!(
+        "\ntotal wall time: {:.0}s",
+        wall_start.elapsed().as_secs_f32()
+    );
+}
+
+/// Solver diagnostics rather than physical outputs: excluded from the pass / <=10% / fail tally
+/// (still printed in the generic table).
+const DIAGNOSTIC_METRICS: &[&str] = &[
+    "wall_s",
+    "coupling_clamp_hits",
+    "viscosity_iters",
+    "max_substep_disp_over_d",
+    "max_ball_overlap_frac",
+    "max_ball_overlap_peak",
+    "max_ball_wall_overlap_frac",
+    "fluid_max_compression_err",
+    "fluid_mean_compression_err",
+    "toe_defined_fraction",
+];
+
+/// Mean and standard error of the mean of the finite values.
+fn mean_se(v: &[f64]) -> Option<(f64, f64)> {
+    let v: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    let n = v.len() as f64;
+    let m = v.iter().sum::<f64>() / n;
+    let se = if v.len() > 1 {
+        ((v.iter().map(|a| (a - m) * (a - m)).sum::<f64>() / (n - 1.0)) / n).sqrt()
+    } else {
+        f64::NAN
+    };
+    Some((m, se))
+}
+
+type RunResults = [(Job, Vec<(&'static str, f64)>)];
+
+/// Acceptance error map: each non-reference (k, res) against the k=1 fine-lattice reference of the
+/// same condition. Power and torque PASS only if |dev| <= 3% and the deviation is not significant
+/// at 2x combined SE; other physical metrics are classed pass / <=10% / fail.
+fn error_map(args: &Args, results: &RunResults, ref_combo: (f32, u32)) {
+    let values = |cond: Condition, combo: (f32, u32), name: &str| -> Vec<f64> {
+        results
+            .iter()
+            .filter(|(j, _)| j.cond == cond && (j.k, j.res) == combo)
+            .filter_map(|(_, r)| r.iter().find(|(n, _)| *n == name).map(|(_, v)| *v))
+            .collect()
+    };
+    let mut conds: Vec<Condition> = results.iter().map(|(j, _)| j.cond).collect();
+    conds.sort();
+    conds.dedup();
+    println!(
+        "\n================ ERROR MAP vs reference (k=1, res={}) ================",
+        ref_combo.1
+    );
+    println!("PASS = |dev| <= 3% AND deviation <= 2x combined SE.");
+    let mut summary: Vec<String> = Vec::new();
+    for cond in conds {
+        println!("\n--- {} ---", cond.label());
+        if let Some((m, _)) = mean_se(&values(cond, ref_combo, "max_ball_overlap_peak")) {
+            println!(
+                "reference peak ball overlap = {:.1}% of radius (target < 10%): {}",
+                m * 100.0,
+                if m < 0.10 { "OK" } else { "EXCEEDS" }
+            );
+        }
+        let mut names: Vec<&str> = Vec::new();
+        for (_, r) in results.iter().filter(|(j, _)| j.cond == cond) {
+            for (n, _) in r {
+                if !names.contains(n) {
+                    names.push(n);
+                }
+            }
+        }
+        for &combo in args.combos.iter().filter(|&&c| c != ref_combo) {
+            println!("[k={}, res={}]", combo.0, combo.1);
+            let mut head = format!("[k={},res={}] {} ", combo.0, combo.1, cond.label());
+            let (mut n_pass, mut n_le10, mut n_fail, mut n_na) = (0, 0, 0, 0);
+            let mut fails: Vec<String> = Vec::new();
+            for name in &names {
+                if DIAGNOSTIC_METRICS.contains(name) {
+                    continue;
+                }
+                let (Some((rm, rse)), Some((m, se))) = (
+                    mean_se(&values(cond, ref_combo, name)),
+                    mean_se(&values(cond, combo, name)),
+                ) else {
+                    n_na += 1;
+                    continue;
+                };
+                if rm.abs() < 1e-12 {
+                    n_na += 1;
+                    continue;
+                }
+                let dev = (m - rm) / rm.abs() * 100.0;
+                let sig = (m - rm).abs() > 2.0 * (se * se + rse * rse).sqrt();
+                let pass = dev.abs() <= 3.0 && !sig;
+                if *name == "power_draw_w" || *name == "torque_nm" {
+                    let verdict = if pass { "PASS" } else { "FAIL" };
+                    println!(
+                        "  {name:<14} {m:.4e} +/- {se:.1e} (SE)  ref {rm:.4e} +/- {rse:.1e}  \
+                         dev {dev:+.1}%  sig={}  {verdict}",
+                        if sig { "yes" } else { "no" },
+                    );
+                    let short = if *name == "power_draw_w" {
+                        "power"
+                    } else {
+                        "torque"
+                    };
+                    head.push_str(&format!("{short}={dev:+.1}% {verdict} "));
+                } else if pass {
+                    n_pass += 1;
+                } else if dev.abs() <= 10.0 {
+                    n_le10 += 1;
+                } else {
+                    n_fail += 1;
+                    fails.push(format!("{name}{dev:+.0}%"));
+                }
+            }
+            println!("  other metrics: {n_pass} pass, {n_le10} <=10%, {n_fail} fail, {n_na} n/a");
+            if !fails.is_empty() {
+                println!("  failing: {}", fails.join(" "));
+            }
+            head.push_str(&format!(
+                "| other: {n_pass} pass / {n_le10} <=10% / {n_fail} fail"
+            ));
+            summary.push(head);
+        }
+    }
+    println!("\n================ ACCEPTANCE SUMMARY ================");
+    for l in summary {
+        println!("{l}");
+    }
 }
