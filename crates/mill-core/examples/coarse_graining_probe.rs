@@ -65,6 +65,8 @@ struct Args {
     ref_substeps: u32,
     /// Optional `simulation.substeps` override for the non-reference runs.
     substeps: Option<u32>,
+    /// Optional `simulation.pbf_iterations` override (the adaptive floor; validated in 1..=20).
+    pbf_iters: Option<u32>,
     ks_given: bool,
 }
 
@@ -102,6 +104,7 @@ impl Args {
             ref_res: 100,
             ref_substeps: 16,
             substeps: None,
+            pbf_iters: None,
             ks_given: false,
         };
         if env::args().any(|f| f == "--browser-defaults") {
@@ -128,6 +131,7 @@ impl Args {
                 "--ref-res" => a.ref_res = val().parse().expect("number"),
                 "--ref-substeps" => a.ref_substeps = val().parse().expect("number"),
                 "--substeps" => a.substeps = Some(val().parse().expect("number")),
+                "--pbf-iters" => a.pbf_iters = Some(val().parse().expect("number")),
                 "--speeds" => a.speeds = parse_list(&val()),
                 "--fills" => a.fills = parse_list(&val()),
                 "--slurry" => {
@@ -161,7 +165,7 @@ impl Args {
                         "Flags: --drum-mm <f32> --ball-mm <f32> --ks <list> --speeds <list %Nc> \
                          --fills <list> --slurry <on|off|both> --seeds <u32, >=3 recommended> \
                          --settle-revs <f32> --measure-revs <f32> --resolution <u32> \
-                         --threads <usize> --metrics <comma list of names to print>                          --browser-defaults --reference --ref-res <u32, default 100>                          --ref-substeps <u32, default 16> --substeps <u32> --combos k:res,..."
+                         --threads <usize> --metrics <comma list of names to print>                          --browser-defaults --reference --ref-res <u32, default 100>                          --ref-substeps <u32, default 16> --substeps <u32> --pbf-iters <u32, 1..=20> --combos k:res,..."
                     );
                     std::process::exit(0);
                 }
@@ -329,6 +333,9 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
         p.simulation.substeps = args.ref_substeps;
     } else if let Some(n) = args.substeps {
         p.simulation.substeps = n;
+    }
+    if let Some(n) = args.pbf_iters {
+        p.simulation.pbf_iterations = n;
     }
     p.validate().expect("invalid params");
 
