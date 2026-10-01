@@ -16,6 +16,7 @@
 
 pub mod coupling;
 pub mod dem;
+pub mod fluid;
 pub mod geometry;
 pub mod grid;
 pub mod metrics;
