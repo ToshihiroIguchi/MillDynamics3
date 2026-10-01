@@ -38,6 +38,9 @@ fn main() {
     if let Ok(v) = std::env::var("PROBE_WETTABILITY") {
         params.slurry.wettability = v.parse().expect("PROBE_WETTABILITY");
     }
+    if let Ok(v) = std::env::var("PROBE_RESOLUTION") {
+        params.simulation.resolution = v.parse().expect("PROBE_RESOLUTION");
+    }
     if let Ok(v) = std::env::var("PROBE_MAX_BALLS") {
         params.simulation.max_balls = v.parse().expect("PROBE_MAX_BALLS");
     }
