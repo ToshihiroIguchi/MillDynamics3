@@ -965,6 +965,11 @@ state after calling `compute`:
 
 ## 9. Known limitations
 
+> **2026-10-01 correction.** Any statement below that bulk quantities (power, torque) are
+> invariant under coarse-graining or fluid resolution is empirically false for the current PBF
+> solver; see docs/VERIFICATION.md for the measured baseline. A solver rewrite is in progress;
+> this section is rewritten when it lands.
+
 - **Rolling resistance (ss4.2 step 7) damps world `omega` toward zero, not the relative spin at
   each contact.** It applies no reaction torque to a ball-ball contact's partner (so it does not
   conserve angular momentum) and, for a ball-wall contact, targets zero rather than `drum.omega`

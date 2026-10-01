@@ -354,6 +354,7 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
         sim.step(1.0 / FPS);
     }
 
+    sim.reset_energy_budget();
     let mut acc: BTreeMap<&'static str, Acc> = BTreeMap::new();
     let mut centroid_deg: Vec<f64> = Vec::new();
     let mut ke_series: Vec<f64> = Vec::new();
@@ -476,6 +477,36 @@ fn run_one(args: &Args, job: Job) -> Vec<(&'static str, f64)> {
     }
 
     let mut out: Vec<(&'static str, f64)> = acc.iter().map(|(k, v)| (*k, v.mean())).collect();
+    // Window-mean energy budget (unsmoothed), in W = J/s per metre depth.
+    let eb = sim.energy_budget();
+    let el = eb.elapsed_s.max(1e-12);
+    let power_mean_w = eb.shaft_work_j / el;
+    out.push(("power_mean_w", power_mean_w));
+    out.push((
+        "torque_mean_nm",
+        power_mean_w / (omega as f64).abs().max(1e-12),
+    ));
+    out.push(("budget_shaft_work_w", power_mean_w));
+    out.push((
+        "budget_ball_contact_dissipation_w",
+        eb.ball_contact_dissipation_j / el,
+    ));
+    out.push(("budget_fluid_wall_slip_w", eb.fluid_wall_slip_j / el));
+    out.push(("budget_fluid_viscous_w", eb.fluid_viscous_j / el));
+    out.push((
+        "budget_fluid_clamp_removed_w",
+        eb.fluid_clamp_removed_j / el,
+    ));
+    out.push(("budget_interface_created_w", eb.interface_created_j / el));
+    out.push(("budget_unattributed_w", eb.unattributed_j / el));
+    out.push((
+        "unattributed_pct_of_shaft",
+        100.0 * eb.unattributed_j / eb.shaft_work_j,
+    ));
+    out.push((
+        "torque_from_impulse_nm",
+        -eb.fluid_wall_angular_impulse / el,
+    ));
     out.push(("max_ball_overlap_peak", overlap_peak));
     out.push(("toe_angle_deg", circular_mean_deg(&toe_deg)));
     out.push(("shoulder_angle_deg", circular_mean_deg(&shoulder_deg)));
