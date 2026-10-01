@@ -2,7 +2,6 @@
 
 use glam::Vec2;
 
-use super::boundary::Boundary;
 use crate::grid::UniformGrid;
 
 /// CSR neighbour lists: `of(i)` is `nbrs[offsets[i]..offsets[i + 1]]`.
@@ -50,22 +49,21 @@ pub fn build_ff(x: &[Vec2], support: f32) -> Csr {
     Csr::from_edges(x.len(), &edges)
 }
 
-/// Boundary particles within `support` of each fluid particle. `to_local` rotates a world point
-/// into the drum frame the boundary grid lives in; `bw` are the boundary particles' world
-/// positions (distances are measured there).
-pub fn build_fb(x: &[Vec2], to_local: Vec2, boundary: &Boundary, bw: &[Vec2], support: f32) -> Csr {
+/// Boundary particles (world positions `bw`, wall and balls together) within `support` of each
+/// fluid particle.
+pub fn build_fb(x: &[Vec2], bw: &[Vec2], support: f32) -> Csr {
     let n = x.len();
     let mut offsets = vec![0u32; n + 1];
     let mut nbrs: Vec<u32> = Vec::new();
+    let grid = UniformGrid::build(bw, support);
     for i in 0..n {
-        let p_local = to_local.rotate(x[i]);
         let start = nbrs.len();
-        boundary.for_each_near_local(p_local, |b| {
+        grid.for_each_near(x[i], |b| {
             if (x[i] - bw[b as usize]).length_squared() < support * support {
                 nbrs.push(b);
             }
         });
-        // Grid cell order is deterministic; sort for a stable, layout-independent summation order.
+        // Sort for a stable, layout-independent summation order.
         nbrs[start..].sort_unstable();
         offsets[i + 1] = nbrs.len() as u32;
     }

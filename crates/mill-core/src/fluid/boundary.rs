@@ -12,7 +12,6 @@
 use glam::Vec2;
 
 use crate::geometry::Drum;
-use crate::grid::UniformGrid;
 use crate::params::LiftersParams;
 
 /// Number of wall rings; 3 rows span `2.6 dx`, beyond the kernel support `2 dx`.
@@ -23,7 +22,6 @@ pub struct Boundary {
     pub local: Vec<Vec2>,
     /// Per-particle boundary volume (mass-like, kg per metre of depth).
     pub psi: Vec<f32>,
-    grid: UniformGrid,
     radius_m: f32,
     lifters: LiftersParams,
 }
@@ -31,7 +29,7 @@ pub struct Boundary {
 impl Boundary {
     /// `cell_mass` is the mass of one fluid lattice cell (`m`), `dx`/`row_h` the lattice spacings
     /// and `support` the kernel support radius.
-    pub fn build(drum: &Drum, dx: f32, row_h: f32, support: f32, cell_mass: f32) -> Self {
+    pub fn build(drum: &Drum, dx: f32, row_h: f32, cell_mass: f32) -> Self {
         let r = drum.radius_m;
         let mut local: Vec<Vec2> = Vec::new();
         let mut psi: Vec<f32> = Vec::new();
@@ -64,11 +62,9 @@ impl Boundary {
             }
         }
 
-        let grid = UniformGrid::build(&local, support);
         Self {
             local,
             psi,
-            grid,
             radius_m: r,
             lifters: drum.lifters,
         }
@@ -78,8 +74,52 @@ impl Boundary {
     pub fn matches(&self, drum: &Drum) -> bool {
         self.radius_m == drum.radius_m && self.lifters == drum.lifters
     }
+}
 
-    pub fn for_each_near_local<F: FnMut(u32)>(&self, p_local: Vec2, f: F) {
-        self.grid.for_each_near(p_local, f);
+/// Boundary particles of one ball in the ball's own frame: concentric rings inside the ball at
+/// `r - (l + 1/2) row_h` (the mirror image of the wall construction: the ball surface lies halfway
+/// between the last fluid row and the first solid row), at most [`RINGS`] of them (deeper
+/// particles are beyond the kernel support), plus a centre particle for a core the rings leave
+/// uncovered. Each carries its geometric volume `psi = m * cell_area / (dx * row_h)`.
+pub struct BallTemplate {
+    pub radius: f32,
+    pub local: Vec<Vec2>,
+    pub psi: Vec<f32>,
+}
+
+impl BallTemplate {
+    pub fn empty() -> Self {
+        Self {
+            radius: 0.0,
+            local: Vec::new(),
+            psi: Vec::new(),
+        }
+    }
+
+    pub fn build(radius: f32, dx: f32, row_h: f32, cell_mass: f32) -> Self {
+        let mut local = Vec::new();
+        let mut psi = Vec::new();
+        let mut last_ring = radius;
+        for l in 0..RINGS {
+            let rho = radius - (l as f32 + 0.5) * row_h;
+            if rho <= 0.25 * dx {
+                break;
+            }
+            let count = ((std::f32::consts::TAU * rho / dx).round() as usize).max(1);
+            let arc = std::f32::consts::TAU * rho / count as f32;
+            let offset = if l % 2 == 1 { 0.5 } else { 0.0 };
+            for k in 0..count {
+                let a = std::f32::consts::TAU * (k as f32 + offset) / count as f32;
+                local.push(Vec2::new(a.cos(), a.sin()) * rho);
+                psi.push(cell_mass * arc / dx);
+            }
+            last_ring = rho;
+        }
+        // Core left inside the innermost ring (a one-particle ball for very small radii).
+        if last_ring - 0.5 * row_h > 0.5 * dx || local.is_empty() {
+            local.push(Vec2::ZERO);
+            psi.push(cell_mass);
+        }
+        Self { radius, local, psi }
     }
 }

@@ -8,7 +8,7 @@
 
 use glam::Vec2;
 
-use super::{account_wall_pair, kinetic_energy_f64, Fluid, FluidStats, Work};
+use super::{account_boundary_pair, kinetic_energy_f64, Fluid, FluidStats, Work};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
@@ -88,7 +88,7 @@ impl Fluid {
                 }
                 for k in work.fb.range(i) {
                     let b = work.fb.nbrs[k] as usize;
-                    rho_dot += self.boundary.psi[b] * (self.v[i] - work.vb[b]).dot(work.grad_fb[k]);
+                    rho_dot += work.psi[b] * (self.v[i] - work.vb[b]).dot(work.grad_fb[k]);
                 }
                 let e = match mode {
                     Mode::Density | Mode::DensityRefine => work.rho[i] + dt * rho_dot - rho0,
@@ -160,9 +160,9 @@ impl Fluid {
             if ki != 0.0 {
                 for k in work.fb.range(i) {
                     let b = work.fb.nbrs[k] as usize;
-                    let dvib = -(dt * ki * self.boundary.psi[b]) * work.grad_fb[k];
+                    let dvib = -(dt * ki * work.psi[b]) * work.grad_fb[k];
                     dvb += dvib;
-                    account_wall_pair(stats, m * dvib, work.bw[b], work.vb[b], true);
+                    account_boundary_pair(stats, &mut self.ball_acc, work, b, m * dvib, true);
                 }
             }
             *dvi = dt * a + dvb;

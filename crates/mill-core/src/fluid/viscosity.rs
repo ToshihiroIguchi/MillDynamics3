@@ -9,7 +9,7 @@
 
 use glam::Vec2;
 
-use super::{account_wall_pair, kinetic_energy_f64, Fluid, FluidStats, Work};
+use super::{account_boundary_pair, kinetic_energy_f64, Fluid, FluidStats, Work, WALL};
 use crate::params::SlurryParams;
 
 const CG_TOLERANCE: f32 = 1e-5;
@@ -72,7 +72,9 @@ impl Fluid {
         if mu <= 0.0 || self.is_empty() {
             return;
         }
-        let beta = slurry.wall_no_slip.clamp(0.0, 1.0) * WALL_COUPLING_FACTOR;
+        let beta_wall = slurry.wall_no_slip.clamp(0.0, 1.0) * WALL_COUPLING_FACTOR;
+        let beta_ball = slurry.ball_no_slip.clamp(0.0, 1.0) * WALL_COUPLING_FACTOR;
+        let beta = beta_wall.max(beta_ball);
         let n = self.len();
         let m = self.particle_mass;
         let rho0 = self.rest_density;
@@ -104,7 +106,12 @@ impl Fluid {
                     if r <= 1e-9 {
                         continue;
                     }
-                    c_fb[k] = beta * 8.0 * mu * self.boundary.psi[b] / (rho_i * rho0)
+                    let beta_b = if work.owner[b] == WALL {
+                        beta_wall
+                    } else {
+                        beta_ball
+                    };
+                    c_fb[k] = beta_b * 8.0 * mu * work.psi[b] / (rho_i * rho0)
                         * self.kernel.dw_dr(r).abs()
                         * r
                         / (r * r + eta2);
@@ -181,7 +188,7 @@ impl Fluid {
                     let b = work.fb.nbrs[k] as usize;
                     let e = sys.e_fb[k];
                     let j = -(m * dt * sys.c_fb[k]) * e * e.dot(self.v[i] - work.vb[b]);
-                    account_wall_pair(stats, j, work.bw[b], work.vb[b], false);
+                    account_boundary_pair(stats, &mut self.ball_acc, work, b, j, false);
                 }
             }
         }

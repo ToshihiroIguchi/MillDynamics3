@@ -144,3 +144,34 @@ roughly first order in `dx`, extrapolating to ~0.31 W).
 - The old spin-up energy-closure gate had no settle phase and compared a transient against a tiny
   wall work; it was removed. Closure is judged on case 6 (ignored test, numbers above).
 - Cost: DFSPH is 2-6x slower per outer step than PBF at res >= 40 (CG ~100-180 iterations).
+
+## Phase C0: ball boundary particles, Taylor-Couette (2026-10-01) - gate NOT met
+
+`Fluid::step_with_balls` / `Fluid::new_with_balls` (ball boundary rings, prescribed ball motion,
+per-ball impulse and angular impulse out) are in the tree; `Simulation` still runs PBF. Taylor-Couette
+(ball `R1 = R2/2` prescribed at 1 rad/s, full annulus, `R2^2/nu = 0.25 s`, settle 3 tau, measure 1 tau,
+analytic torque 2.969e-2 N m per metre) on the DFSPH solver, `|torque| / analytic - 1`:
+
+| | ball torque | wall torque |
+|---|---|---|
+| res 25 | +6.2 % | +14.1 % |
+| res 50 | +14.9 % | +17.5 % |
+| res 50, dt/2 and dt/4 | +13.2 %, +17.2 % | +15.2 %, +20.2 % |
+| res 25 / 50, wall factor 3 | +2.0 % / +11.2 % | +7.0 % / +13.1 % |
+| res 25 / 50, wall factor 20 | +9.3 % / +11.3 % | +18.4 % / +16.3 % |
+| res 40, gravity switched off | -16.6 % | -17.1 % |
+
+Gate (both within 3 % at res 25 and 50): **failed**. Observations:
+- The error is not the wall-coupling factor (3 to 20 moves it by a few percent only) and does not
+  converge with resolution; ball and wall torque disagree by 2-8 % where they must be equal in steady
+  state.
+- With gravity the bulk velocity profile is 20-25 % below the analytic one at both resolutions; with
+  gravity off it is ~5 % above and the torques are 17 % low, so gravity changes the sign of the error
+  even though a full annulus has no free surface. The seeded lattice does not fill the annulus
+  exactly (voids against the Cartesian lattice, 7 % of the area at res 25 between the lattice and
+  the boundary planes), which introduces a small free surface and non-axisymmetric flow.
+- Applying one viscosity step to the analytic profile changes the bulk by 1 % rms per step (3 % with
+  a 3 dx kernel support), i.e. the discrete viscous operator is not consistent on this curved,
+  disordered configuration at the resolutions used.
+Next step needs a decision (see the Phase C report): the ball-surface viscous layer is not accurate
+enough to build the two-way coupling on without further wall/operator work.

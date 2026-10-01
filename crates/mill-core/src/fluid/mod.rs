@@ -40,13 +40,18 @@ mod viscosity;
 
 use glam::Vec2;
 
+use crate::coupling::CouplingImpulses;
+use crate::dem::Balls;
 use crate::geometry::Drum;
+use crate::grid::UniformGrid;
 use crate::params::{DyePattern, SlurryParams};
-use boundary::Boundary;
+use boundary::{BallTemplate, Boundary};
 use kernel::{cohesion_kernel, Kernel};
 use neighbors::{build_fb, build_ff, Csr};
 
 const GRAVITY: f32 = -9.81;
+/// `owner` of a boundary particle that belongs to the drum wall (otherwise the ball index).
+pub(crate) const WALL: u32 = u32::MAX;
 /// Number of polar-angle bins in [`FluidStats::wall_normal_impulse_by_angle`].
 pub const WALL_IMPULSE_BINS: usize = 32;
 /// Upper bound on internal steps per [`Fluid::step`] call.
@@ -75,8 +80,11 @@ pub struct FluidStats {
     /// Mean / max relative density error (`max(0, rho* - rho0) / rho0`) at the last density solve.
     pub mean_density_error: f32,
     pub max_density_error: f32,
-    /// Particles the hard SDF backstop had to move out of the wall.
+    /// Particles the hard SDF backstop had to move out of the wall / out of a ball.
     pub wall_backstop_hits: u32,
+    pub ball_backstop_hits: u32,
+    /// Work the balls do on the fluid (`sum J . v_b` over ball pairs, mirror of `wall_work_j`).
+    pub ball_work_j: f64,
     /// Wall -> fluid impulse and its angular impulse about the drum centre.
     pub wall_impulse: [f64; 2],
     pub wall_angular_impulse: f64,
@@ -106,11 +114,30 @@ pub(crate) struct Work {
     /// `grad_i W_ij` per directed fluid-fluid edge / `grad_i W_ib` per fluid-boundary edge.
     pub grad_ff: Vec<Vec2>,
     pub grad_fb: Vec<Vec2>,
-    /// Boundary particles' world positions and velocities.
+    /// Boundary particles (wall first, then balls): world positions, velocities, volumes, owner
+    /// (`WALL` or ball index) and, for ball particles, the offset from the ball centre.
     pub bw: Vec<Vec2>,
     pub vb: Vec<Vec2>,
+    pub psi: Vec<f32>,
+    pub owner: Vec<u32>,
+    pub lever: Vec<Vec2>,
     pub rho: Vec<f32>,
     pub inv_d: Vec<f32>,
+}
+
+/// Private copy of the balls' kinematics the fluid sub-cycles with.
+struct Bodies {
+    x: Vec<Vec2>,
+    v: Vec<Vec2>,
+    theta: Vec<f32>,
+    omega: Vec<f32>,
+}
+
+/// Per-ball impulse the fluid delivered to the ball this call (linear, and angular about the
+/// ball centre).
+pub(crate) struct BallAcc {
+    pub impulse: Vec<Vec2>,
+    pub angular: Vec<f32>,
 }
 
 pub struct Fluid {
@@ -131,6 +158,9 @@ pub struct Fluid {
     d_floor: f32,
     /// Drum angle at the end of the last step (for [`Fluid::densities`]).
     angle: f32,
+    bodies: Bodies,
+    ball_template: BallTemplate,
+    pub(crate) ball_acc: BallAcc,
 }
 
 pub(crate) fn kinetic_energy_f64(v: &[Vec2], mass: f32) -> f64 {
@@ -150,6 +180,19 @@ impl Fluid {
     /// the drum's area from the bottom up, keeping at least `row_h / 2` clear of the wall.
     /// `drum_angle` is the drum's current rotation.
     pub fn new(slurry: &SlurryParams, drum: &Drum, drum_angle: f32, resolution: u32) -> Self {
+        Self::new_with_balls(slurry, drum, drum_angle, resolution, &[], 0.0)
+    }
+
+    /// As [`Fluid::new`], skipping lattice sites that overlap a ball (`existing_balls` centres,
+    /// common `ball_radius`).
+    pub fn new_with_balls(
+        slurry: &SlurryParams,
+        drum: &Drum,
+        drum_angle: f32,
+        resolution: u32,
+        existing_balls: &[Vec2],
+        ball_radius: f32,
+    ) -> Self {
         let r = drum.radius_m;
         let dx = r / resolution.max(1) as f32;
         let support = 2.0 * dx;
@@ -187,6 +230,12 @@ impl Fluid {
                     if drum.sdf_world(p, drum_angle).0 < clearance {
                         continue;
                     }
+                    if existing_balls
+                        .iter()
+                        .any(|&b| (p - b).length() < ball_radius + clearance)
+                    {
+                        continue;
+                    }
                     dye.push(dye_value(slurry.dye_pattern, p));
                     x.push(p);
                     if x.len() >= target_count {
@@ -197,7 +246,7 @@ impl Fluid {
         }
 
         let n = x.len();
-        let boundary = Boundary::build(drum, dx, row_h, support, mass);
+        let boundary = Boundary::build(drum, dx, row_h, mass);
         Self {
             x,
             v: vec![Vec2::ZERO; n],
@@ -212,6 +261,17 @@ impl Fluid {
             row_h,
             d_floor,
             angle: drum_angle,
+            bodies: Bodies {
+                x: Vec::new(),
+                v: Vec::new(),
+                theta: Vec::new(),
+                omega: Vec::new(),
+            },
+            ball_template: BallTemplate::empty(),
+            ball_acc: BallAcc {
+                impulse: Vec::new(),
+                angular: Vec::new(),
+            },
         }
     }
 
@@ -230,10 +290,9 @@ impl Fluid {
         if n == 0 {
             return Vec::new();
         }
-        let (bw, _) = self.boundary_world(self.angle, 0.0);
-        let to_local = Vec2::from_angle(-self.angle);
+        let (bw, _, psi, _, _) = self.boundary_world(self.angle, 0.0);
         let ff = build_ff(&self.x, self.h);
-        let fb = build_fb(&self.x, to_local, &self.boundary, &bw, self.h);
+        let fb = build_fb(&self.x, &bw, self.h);
         (0..n)
             .map(|i| {
                 let mut rho = self.particle_mass * self.kernel.w(0.0);
@@ -243,24 +302,56 @@ impl Fluid {
                 }
                 for k in fb.range(i) {
                     let b = fb.nbrs[k] as usize;
-                    rho += self.boundary.psi[b] * self.kernel.w((self.x[i] - bw[b]).length());
+                    rho += psi[b] * self.kernel.w((self.x[i] - bw[b]).length());
                 }
                 rho
             })
             .collect()
     }
 
-    fn boundary_world(&self, angle: f32, omega: f32) -> (Vec<Vec2>, Vec<Vec2>) {
+    /// World positions, velocities, volumes, owners and levers of every boundary particle: the
+    /// wall (static drum-frame set rotated by `angle`, moving at `omega x r`) followed by the
+    /// balls' rings (moving with each ball's rigid-body velocity).
+    #[allow(clippy::type_complexity)]
+    fn boundary_world(
+        &self,
+        angle: f32,
+        omega: f32,
+    ) -> (Vec<Vec2>, Vec<Vec2>, Vec<f32>, Vec<u32>, Vec<Vec2>) {
         let rot = Vec2::from_angle(angle);
-        let bw: Vec<Vec2> = self.boundary.local.iter().map(|&p| rot.rotate(p)).collect();
-        let vb = bw
-            .iter()
-            .map(|p| omega * Vec2::new(-p.y, p.x))
-            .collect::<Vec<_>>();
-        (bw, vb)
+        let cap = self.boundary.local.len() + self.bodies.x.len() * self.ball_template.local.len();
+        let mut bw = Vec::with_capacity(cap);
+        let mut vb = Vec::with_capacity(cap);
+        let mut psi = Vec::with_capacity(cap);
+        let mut owner = Vec::with_capacity(cap);
+        let mut lever = Vec::with_capacity(cap);
+        for (k, &p) in self.boundary.local.iter().enumerate() {
+            let w = rot.rotate(p);
+            bw.push(w);
+            vb.push(omega * Vec2::new(-w.y, w.x));
+            psi.push(self.boundary.psi[k]);
+            owner.push(WALL);
+            lever.push(Vec2::ZERO);
+        }
+        for b in 0..self.bodies.x.len() {
+            if !self.bodies.x[b].is_finite() {
+                continue;
+            }
+            let rb = Vec2::from_angle(self.bodies.theta[b]);
+            for (k, &p) in self.ball_template.local.iter().enumerate() {
+                let l = rb.rotate(p);
+                bw.push(self.bodies.x[b] + l);
+                vb.push(self.bodies.v[b] + self.bodies.omega[b] * Vec2::new(-l.y, l.x));
+                psi.push(self.ball_template.psi[k]);
+                owner.push(b as u32);
+                lever.push(l);
+            }
+        }
+        (bw, vb, psi, owner, lever)
     }
 
-    /// Advances the fluid by `dt` against `drum` (at `drum_angle` at the start of the call).
+    /// Advances the fluid by `dt` against `drum` (at `drum_angle` at the start of the call), with
+    /// no balls.
     pub fn step(
         &mut self,
         drum: &Drum,
@@ -268,14 +359,51 @@ impl Fluid {
         slurry: &SlurryParams,
         dt: f32,
     ) -> FluidStats {
+        self.step_with_balls(drum, drum_angle, slurry, dt, &Balls::empty())
+            .1
+    }
+
+    /// As [`Fluid::step`], with `balls` as moving rigid boundaries. The balls' kinematics are
+    /// copied and sub-cycled with the fluid; the impulse (and angular impulse about the ball
+    /// centre) the fluid delivers to each ball over the call is returned for
+    /// [`crate::dem::DemState::step_with_external_forces`] to apply.
+    pub fn step_with_balls(
+        &mut self,
+        drum: &Drum,
+        drum_angle: f32,
+        slurry: &SlurryParams,
+        dt: f32,
+        balls: &Balls,
+    ) -> (CouplingImpulses, FluidStats) {
         let mut stats = FluidStats::default();
+        let nb = balls.len();
         let n = self.len();
+        self.bodies = Bodies {
+            x: balls.x.clone(),
+            v: balls.v.clone(),
+            theta: balls.theta.clone(),
+            omega: balls.omega.clone(),
+        };
+        if nb > 0 && (self.ball_template.radius - balls.radius).abs() > 1e-9 {
+            self.ball_template =
+                BallTemplate::build(balls.radius, self.dx, self.row_h, self.particle_mass);
+        }
+        self.ball_acc = BallAcc {
+            impulse: vec![Vec2::ZERO; nb],
+            angular: vec![0.0; nb],
+        };
+        let finish = |acc: &BallAcc| CouplingImpulses {
+            impulses: acc.impulse.clone(),
+            angular_impulses: acc.angular.clone(),
+            clamp_hits: 0,
+            fluid_momentum_change: Vec2::ZERO,
+        };
         if n == 0 || dt <= 0.0 {
             self.angle = drum_angle + drum.omega * dt.max(0.0);
-            return stats;
+            return (finish(&self.ball_acc), stats);
         }
         if !self.boundary.matches(drum) {
-            self.boundary = Boundary::build(drum, self.dx, self.row_h, self.h, self.particle_mass);
+            self.boundary = Boundary::build(drum, self.dx, self.row_h, self.particle_mass);
         }
         for (x, v) in self.x.iter_mut().zip(self.v.iter_mut()) {
             if !x.is_finite() || !v.is_finite() {
@@ -284,12 +412,21 @@ impl Fluid {
             }
         }
 
+        let ball_speed = self
+            .bodies
+            .v
+            .iter()
+            .zip(&self.bodies.omega)
+            .map(|(v, w)| v.length() + w.abs() * balls.radius)
+            .filter(|s| s.is_finite())
+            .fold(0.0f32, f32::max);
         let v_max = self
             .v
             .iter()
             .map(|v| v.length())
             .fold(0.0f32, f32::max)
             .max(drum.omega.abs() * drum.radius_m)
+            .max(ball_speed)
             + GRAVITY.abs() * dt;
         let wanted = (dt * v_max / (CFL_FACTOR * self.dx)).ceil().max(1.0) as u32;
         let n_int = if wanted > MAX_INTERNAL_STEPS {
@@ -303,11 +440,11 @@ impl Fluid {
 
         let mut angle = drum_angle;
         for _ in 0..n_int {
-            self.internal_step(drum, angle, slurry, dt_int, &mut stats);
+            self.internal_step(drum, angle, slurry, dt_int, balls.radius, &mut stats);
             angle += drum.omega * dt_int;
         }
         self.angle = angle;
-        stats
+        (finish(&self.ball_acc), stats)
     }
 
     fn internal_step(
@@ -316,6 +453,7 @@ impl Fluid {
         angle: f32,
         slurry: &SlurryParams,
         dt: f32,
+        ball_radius: f32,
         stats: &mut FluidStats,
     ) {
         let work = self.prepare(angle, drum.omega);
@@ -360,7 +498,37 @@ impl Fluid {
                 stats.wall_backstop_hits += 1;
             }
         }
+        // Fluid particles that ended up inside a ball (it moved with its own velocity this
+        // step) are moved back to its surface; the balls then advance (prescribed motion).
+        if !self.bodies.x.is_empty() && ball_radius > 0.0 {
+            let centres: Vec<Vec2> = self.bodies.x.clone();
+            let grid = UniformGrid::build(&centres, (2.0 * ball_radius).max(1e-6));
+            for (x, v) in self.x.iter_mut().zip(self.v.iter_mut()) {
+                grid.for_each_near(*x, |b| {
+                    let b = b as usize;
+                    let delta = *x - centres[b];
+                    let d = delta.length();
+                    if d < ball_radius {
+                        let normal = if d > 1e-9 { delta / d } else { Vec2::X };
+                        *x = centres[b] + normal * ball_radius;
+                        let surface = self.bodies.v[b]
+                            + self.bodies.omega[b] * Vec2::new(-normal.y, normal.x) * ball_radius;
+                        let vn = (*v - surface).dot(normal);
+                        if vn < 0.0 {
+                            *v -= vn * normal;
+                        }
+                        stats.ball_backstop_hits += 1;
+                    }
+                });
+            }
+        }
         stats.ke_delta_backstop_j += kinetic_energy_f64(&self.v, m) - ke_pre;
+        for b in 0..self.bodies.x.len() {
+            let v = self.bodies.v[b];
+            let w = self.bodies.omega[b];
+            self.bodies.x[b] += v * dt;
+            self.bodies.theta[b] += w * dt;
+        }
         let pe1: f64 = self.x.iter().map(|p| p.y as f64).sum();
         stats.pe_delta_j += (pe1 - pe0) * m as f64 * GRAVITY.abs() as f64;
     }
@@ -370,10 +538,9 @@ impl Fluid {
     fn prepare(&self, angle: f32, omega: f32) -> Work {
         let n = self.len();
         let m = self.particle_mass;
-        let (bw, vb) = self.boundary_world(angle, omega);
-        let to_local = Vec2::from_angle(-angle);
+        let (bw, vb, psi_b, owner, lever) = self.boundary_world(angle, omega);
         let ff = build_ff(&self.x, self.h);
-        let fb = build_fb(&self.x, to_local, &self.boundary, &bw, self.h);
+        let fb = build_fb(&self.x, &bw, self.h);
         let mut grad_ff = vec![Vec2::ZERO; ff.nbrs.len()];
         let mut grad_fb = vec![Vec2::ZERO; fb.nbrs.len()];
         let mut rho = vec![0.0f32; n];
@@ -396,7 +563,7 @@ impl Fluid {
                 let b = fb.nbrs[k] as usize;
                 let delta = self.x[i] - bw[b];
                 let r = delta.length();
-                let psi = self.boundary.psi[b];
+                let psi = psi_b[b];
                 rho_i += psi * self.kernel.w(r);
                 let g = self.kernel.grad(delta, r);
                 grad_fb[k] = g;
@@ -412,6 +579,9 @@ impl Fluid {
             grad_fb,
             bw,
             vb,
+            psi: psi_b,
+            owner,
+            lever,
             rho,
             inv_d,
         }
@@ -468,21 +638,34 @@ fn dye_value(pattern: DyePattern, p: Vec2) -> f32 {
     }
 }
 
-/// Accumulates one wall-pair impulse `j` (wall -> fluid) acting at boundary particle `b`.
-pub(crate) fn account_wall_pair(
+/// Accumulates one boundary-pair impulse `j` (boundary -> fluid) acting at boundary particle `b`:
+/// wall pairs into the wall statistics (impulse, angular impulse about the drum centre, work,
+/// pressure profile); ball pairs into the ball's own impulse and angular impulse (Newton's third
+/// law) and `ball_work_j`.
+pub(crate) fn account_boundary_pair(
     stats: &mut FluidStats,
+    balls: &mut BallAcc,
+    work: &Work,
+    b: usize,
     j: Vec2,
-    bw: Vec2,
-    vb: Vec2,
     pressure: bool,
 ) {
+    let owner = work.owner[b];
+    let (bw, vb) = (work.bw[b], work.vb[b]);
+    if owner != WALL {
+        let o = owner as usize;
+        balls.impulse[o] -= j;
+        balls.angular[o] -= work.lever[b].x * j.y - work.lever[b].y * j.x;
+        stats.ball_work_j += j.dot(vb) as f64;
+        return;
+    }
     stats.wall_impulse[0] += j.x as f64;
     stats.wall_impulse[1] += j.y as f64;
     stats.wall_angular_impulse += (bw.x * j.y - bw.y * j.x) as f64;
-    let work = j.dot(vb) as f64;
-    stats.wall_work_j += work;
+    let work_j = j.dot(vb) as f64;
+    stats.wall_work_j += work_j;
     if pressure {
-        stats.wall_pressure_work_j += work;
+        stats.wall_pressure_work_j += work_j;
         let len = bw.length();
         if len > 1e-9 {
             let inward = -bw / len;
@@ -495,7 +678,7 @@ pub(crate) fn account_wall_pair(
     } else {
         stats.wall_viscous_impulse[0] += j.x as f64;
         stats.wall_viscous_impulse[1] += j.y as f64;
-        stats.wall_viscous_work_j += work;
+        stats.wall_viscous_work_j += work_j;
     }
 }
 
