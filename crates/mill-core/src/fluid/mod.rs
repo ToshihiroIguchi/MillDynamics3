@@ -157,6 +157,12 @@ pub struct Fluid {
     /// Multiplier on gravity (1 by default; a verification hook, e.g. to run a Taylor-Couette
     /// case with and without gravity).
     pub gravity_scale: f32,
+    /// Upper bound on the viscous diffusion number `dt nu / dx^2` of one internal step (the
+    /// pressure-viscosity splitting error is first order in it); `f32::INFINITY` (default) leaves
+    /// the step count to the CFL bound alone.
+    pub max_viscous_number: f32,
+    /// Cap on internal steps per call (default [`MAX_INTERNAL_STEPS`]).
+    pub max_internal_steps: u32,
     kernel: Kernel,
     wall: WallModel,
     drum: Drum,
@@ -274,6 +280,8 @@ impl Fluid {
             h: support,
             rest_density: rho0,
             gravity_scale: 1.0,
+            max_viscous_number: f32::INFINITY,
+            max_internal_steps: MAX_INTERNAL_STEPS,
             kernel,
             wall,
             drum: *drum,
@@ -451,10 +459,19 @@ impl Fluid {
             .max(drum.omega.abs() * drum.radius_m)
             .max(ball_speed)
             + GRAVITY.abs() * dt;
-        let wanted = (dt * v_max / (CFL_FACTOR * self.dx)).ceil().max(1.0) as u32;
-        let n_int = if wanted > MAX_INTERNAL_STEPS {
+        let wanted_cfl = (dt * v_max / (CFL_FACTOR * self.dx)).ceil().max(1.0);
+        let nu = slurry.viscosity_pa_s.max(0.0) / self.rest_density;
+        let wanted_visc = if self.max_viscous_number.is_finite() && self.max_viscous_number > 0.0 {
+            (dt * nu / (self.dx * self.dx * self.max_viscous_number))
+                .ceil()
+                .max(1.0)
+        } else {
+            1.0
+        };
+        let wanted = wanted_cfl.max(wanted_visc) as u32;
+        let n_int = if wanted > self.max_internal_steps {
             stats.cfl_cap_hits = 1;
-            MAX_INTERNAL_STEPS
+            self.max_internal_steps
         } else {
             wanted
         };

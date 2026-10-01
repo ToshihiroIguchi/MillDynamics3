@@ -218,3 +218,29 @@ Conclusion: at the production time step the torque error is dominated by a first
 pressure-viscosity splitting error; it can be bought down only by a smaller step (x4 for -3 % at
 res 35, and `dt nu / dx^2 <= ~3` would mean ~25 internal steps at the defaults) or by a monolithic
 pressure-viscosity solve.
+
+## Correction: steady-state Taylor-Couette (2026-10-02) - earlier TC numbers were transients
+
+The Taylor-Couette runs above settled for 3 tau and measured 1 tau. The torque keeps relaxing for
+about 10 tau (slow drift, plus stick-slip bursts of +-10..20 % at small time steps), so those numbers
+were not steady-state values, and the statement "first order in dt" (-18 / -3 / +7 % at dt, dt/4,
+dt/16) was a coincidence of unsteady windows and is **retracted**. Steady-state protocol: settle 8 tau,
+measure 2-4 tau, gravity off, smooth boundary, exact-fill mass, `|torque| / analytic - 1` (ball and
+wall torque agree to 0.1 %):
+
+| | res 15 | 25 | 35 | 50 |
+|---|---|---|---|---|
+| dt nu / dx^2 <= 3, solid coupling x1 | -23.6 % | -25.7 % | -24.0 % | -17.8 % |
+| dt nu / dx^2 <= 3, solid coupling x6 | -12.3 % | - | -14.3 % | -11.2 % |
+| dt nu / dx^2 <= 3, solid coupling x10 | -7.0 % | -1.7 % | -9.0 % | -11.8 % |
+
+res 25, solid coupling x1, versus the viscous number `C = dt nu / dx^2` per internal step: C = 12 / 3 /
+1 / 0.3 gives -26 / -26 / -18 / -20 % (at 0.3 the torque oscillates +-5 % in bursts). Sensitivities at
+res 25: bulk viscous coefficient x1.25 gives -10.6 % (x0.8 gives -38 %), i.e. torque ~ coefficient^0.8.
+
+Conclusions: (1) shrinking the time step moves the steady error by only a few percent, so operator
+splitting is not the main error; (2) the solid viscous coupling is too weak by a large factor (x10
+brings res 25 to -1.7 %), but a single factor does not give a resolution-independent result
+(-7 / -2 / -9 / -12 %), i.e. no calibration reaches +-3 % across resolutions; (3) the bulk
+operator itself is worth +3 % (its 0.965 nu lattice factor). `Fluid::max_viscous_number` and
+`max_internal_steps` stay as hooks (default: off).
