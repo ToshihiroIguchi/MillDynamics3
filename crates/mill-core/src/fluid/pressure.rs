@@ -13,16 +13,24 @@ use super::{account_wall_pair, kinetic_energy_f64, Fluid, FluidStats, Work};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
     Divergence,
+    /// Constant-density solve, warm-started from the stored `kappa`.
     Density,
+    /// A second density solve in the same step (after viscosity): continues from the
+    /// accumulated `kappa` without re-applying it.
+    DensityRefine,
 }
 
 /// Density solve stops once the mean relative error of the pressure-active particles is below
 /// this (0.01 %).
 const DENSITY_TOLERANCE: f32 = 1e-4;
+/// ... and the worst particle below this (0.5 %): a mean criterion alone lets a few wall
+/// particles stay badly over-compressed.
+const DENSITY_MAX_ERROR: f32 = 5e-3;
 const DENSITY_MIN_ITERATIONS: u32 = 2;
 const DENSITY_MAX_ITERATIONS: u32 = 200;
 /// Divergence solve: mean relative density change per internal step.
 const DIVERGENCE_TOLERANCE: f32 = 5e-4;
+const DIVERGENCE_MAX_ERROR: f32 = 5e-3;
 const DIVERGENCE_MIN_ITERATIONS: u32 = 1;
 const DIVERGENCE_MAX_ITERATIONS: u32 = 100;
 /// Jacobi under-relaxation of the per-iteration pressure increment.
@@ -42,21 +50,23 @@ impl Fluid {
         let n = self.len();
         let m = self.particle_mass;
         let rho0 = self.rest_density;
-        let (min_it, max_it, tol) = match mode {
-            Mode::Density => (
+        let (min_it, max_it, tol, tol_max) = match mode {
+            Mode::Density | Mode::DensityRefine => (
                 DENSITY_MIN_ITERATIONS,
                 DENSITY_MAX_ITERATIONS,
                 DENSITY_TOLERANCE,
+                DENSITY_MAX_ERROR,
             ),
             Mode::Divergence => (
                 DIVERGENCE_MIN_ITERATIONS,
                 DIVERGENCE_MAX_ITERATIONS,
                 DIVERGENCE_TOLERANCE,
+                DIVERGENCE_MAX_ERROR,
             ),
         };
         let ke_before = kinetic_energy_f64(&self.v, m);
         let mut kappa = match mode {
-            Mode::Density => std::mem::take(&mut self.kappa),
+            Mode::Density | Mode::DensityRefine => std::mem::take(&mut self.kappa),
             Mode::Divergence => vec![0.0f32; n],
         };
         let mut kinc = vec![0.0f32; n];
@@ -81,7 +91,7 @@ impl Fluid {
                     rho_dot += self.boundary.psi[b] * (self.v[i] - work.vb[b]).dot(work.grad_fb[k]);
                 }
                 let e = match mode {
-                    Mode::Density => work.rho[i] + dt * rho_dot - rho0,
+                    Mode::Density | Mode::DensityRefine => work.rho[i] + dt * rho_dot - rho0,
                     Mode::Divergence => {
                         if work.rho[i] >= DIVERGENCE_MIN_DENSITY_RATIO * rho0 {
                             dt * rho_dot
@@ -103,16 +113,16 @@ impl Fluid {
                 err_max = err_max.max(rel);
             }
             let err_mean = (err_sum / n as f64) as f32;
-            if mode == Mode::Density {
+            if mode != Mode::Divergence {
                 stats.mean_density_error = err_mean;
                 stats.max_density_error = err_max;
             }
-            if iters >= min_it && err_mean <= tol {
+            if iters >= min_it && err_mean <= tol && err_max <= tol_max {
                 break;
             }
             if iters >= max_it {
                 match mode {
-                    Mode::Density => stats.density_cap_hits += 1,
+                    Mode::Density | Mode::DensityRefine => stats.density_cap_hits += 1,
                     Mode::Divergence => stats.divergence_cap_hits += 1,
                 }
                 break;
@@ -125,7 +135,7 @@ impl Fluid {
         }
 
         match mode {
-            Mode::Density => {
+            Mode::Density | Mode::DensityRefine => {
                 stats.density_iterations += iters;
                 self.kappa = kappa;
             }

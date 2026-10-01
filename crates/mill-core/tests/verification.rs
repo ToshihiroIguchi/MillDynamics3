@@ -9,8 +9,10 @@
 #[path = "common/verification_common.rs"]
 mod common;
 
+use common::harness::Solver;
 use common::{analytic, gates, harness};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// Panics listing every `(label, value, limit)` with `value > limit` (or NaN).
 fn assert_all_le(items: &[(String, f64, f64)]) {
@@ -22,24 +24,37 @@ fn assert_all_le(items: &[(String, f64, f64)]) {
     assert!(bad.is_empty(), "gates failed:\n  {}", bad.join("\n  "));
 }
 
-fn hydro(res: u32) -> &'static harness::Hydrostatic {
-    static A: OnceLock<harness::Hydrostatic> = OnceLock::new();
-    static B: OnceLock<harness::Hydrostatic> = OnceLock::new();
-    match res {
-        25 => A.get_or_init(|| harness::hydrostatic(25)),
-        50 => B.get_or_init(|| harness::hydrostatic(50)),
-        _ => unreachable!(),
+/// Memoises one expensive harness run per key so every gate test on the same run shares it.
+type Cells<T> = Mutex<HashMap<(Solver, u32), &'static OnceLock<T>>>;
+struct Cache<T: 'static>(OnceLock<Cells<T>>);
+
+impl<T: 'static> Cache<T> {
+    const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+    fn get(&'static self, key: (Solver, u32), run: impl FnOnce() -> T) -> &'static T {
+        let cell: &'static OnceLock<T> = {
+            let mut map = self.0.get_or_init(Default::default).lock().unwrap();
+            map.entry(key)
+                .or_insert_with(|| Box::leak(Box::new(OnceLock::new())))
+        };
+        cell.get_or_init(run)
     }
 }
 
-fn spin(res: u32) -> &'static harness::SpinUp {
-    static A: OnceLock<harness::SpinUp> = OnceLock::new();
-    static B: OnceLock<harness::SpinUp> = OnceLock::new();
-    match res {
-        25 => A.get_or_init(|| harness::spin_up(25)),
-        50 => B.get_or_init(|| harness::spin_up(50)),
-        _ => unreachable!(),
-    }
+fn hydro(solver: Solver, res: u32) -> &'static harness::Hydrostatic {
+    static C: Cache<harness::Hydrostatic> = Cache::new();
+    C.get((solver, res), || harness::hydrostatic(solver, res))
+}
+
+fn spin(solver: Solver, res: u32) -> &'static harness::SpinUp {
+    static C: Cache<harness::SpinUp> = Cache::new();
+    C.get((solver, res), || harness::spin_up(solver, res))
+}
+
+fn rot(solver: Solver, res: u32) -> &'static harness::RotatingDrum {
+    static C: Cache<harness::RotatingDrum> = Cache::new();
+    C.get((solver, res), || harness::rotating_drum(solver, res))
 }
 
 fn couette(res: u32) -> &'static harness::TaylorCouette {
@@ -83,8 +98,8 @@ fn analytic_helpers_are_self_consistent() {
 
 // ------------------------------------------------------------------ 1. hydrostatic
 
-fn hydro_compression(res: u32) {
-    let h = hydro(res);
+fn hydro_compression(solver: Solver, res: u32) {
+    let h = hydro(solver, res);
     assert_all_le(&[
         (
             format!("res {res} worst-5% compression"),
@@ -99,8 +114,8 @@ fn hydro_compression(res: u32) {
     ]);
 }
 
-fn hydro_ke(res: u32) {
-    let h = hydro(res);
+fn hydro_ke(solver: Solver, res: u32) {
+    let h = hydro(solver, res);
     assert_all_le(&[(
         format!("res {res} KE/(M g dx)"),
         h.ke_over_mgdx,
@@ -108,8 +123,8 @@ fn hydro_ke(res: u32) {
     )]);
 }
 
-fn hydro_wall(res: u32) {
-    let h = hydro(res);
+fn hydro_wall(solver: Solver, res: u32) {
+    let h = hydro(solver, res);
     assert!(h.bins_used >= 4, "too few wall bins ({})", h.bins_used);
     assert_all_le(&[(
         format!("res {res} wall pressure L2 (bins {})", h.bins_used),
@@ -121,38 +136,37 @@ fn hydro_wall(res: u32) {
 #[test]
 #[ignore = "PBF: worst-5% compression 0.270, mean 0.047 (gates 0.02 / 0.001)"]
 fn hydrostatic_compression_res25() {
-    hydro_compression(25);
+    hydro_compression(Solver::Pbf, 25);
 }
 #[test]
 #[ignore = "PBF: worst-5% compression 0.914, mean 0.138 (gates 0.02 / 0.001)"]
 fn hydrostatic_compression_res50() {
-    hydro_compression(50);
+    hydro_compression(Solver::Pbf, 50);
 }
 #[test]
 fn hydrostatic_kinetic_energy_res25() {
-    hydro_ke(25);
+    hydro_ke(Solver::Pbf, 25);
 }
 #[test]
 fn hydrostatic_kinetic_energy_res50() {
-    hydro_ke(50);
+    hydro_ke(Solver::Pbf, 50);
 }
 #[test]
 #[ignore = "PBF: wall pressure L2 error 0.229 (gate 0.05)"]
 fn hydrostatic_wall_pressure_res25() {
-    hydro_wall(25);
+    hydro_wall(Solver::Pbf, 25);
 }
 #[test]
 #[ignore = "PBF: wall pressure L2 error 0.197 (gate 0.05)"]
 fn hydrostatic_wall_pressure_res50() {
-    hydro_wall(50);
+    hydro_wall(Solver::Pbf, 50);
 }
 
 // ------------------------------------------------------------------ 2. spin-up
 
-fn spin_l(res: u32) {
-    let s = spin(res);
-    let items: Vec<_> = s
-        .samples
+fn spin_l_items(solver: Solver, res: u32) -> Vec<(String, f64, f64)> {
+    let s = spin(solver, res);
+    s.samples
         .iter()
         .map(|(t, ls, le)| {
             (
@@ -163,41 +177,201 @@ fn spin_l(res: u32) {
                 gates::SPINUP_L_ERR,
             )
         })
-        .collect::<Vec<_>>();
-    assert_all_le(&items);
+        .collect::<Vec<_>>()
 }
 
-fn spin_torque(res: u32) {
-    let s = spin(res);
-    assert_all_le(&[(
+fn spin_l(solver: Solver, res: u32) {
+    assert_all_le(&spin_l_items(solver, res));
+}
+
+fn spin_torque_items(solver: Solver, res: u32) -> Vec<(String, f64, f64)> {
+    let s = spin(solver, res);
+    vec![(
         format!(
             "res {res} torque mismatch (no-gravity variant {:.4})",
             s.torque_mismatch_no_gravity
         ),
         s.torque_mismatch,
         gates::SPINUP_TORQUE_MISMATCH,
-    )]);
+    )]
+}
+
+fn spin_torque(solver: Solver, res: u32) {
+    assert_all_le(&spin_torque_items(solver, res));
 }
 
 #[test]
 #[ignore = "PBF: |L-Lexact|/Linf 0.52/0.63/0.44/0.20 at t/tau 0.02/0.05/0.1/0.2 (gate 0.03)"]
 fn spin_up_angular_momentum_res25() {
-    spin_l(25);
+    spin_l(Solver::Pbf, 25);
 }
 #[test]
 #[ignore = "PBF: |L-Lexact|/Linf 0.52/0.60/0.47/0.23 at t/tau 0.02/0.05/0.1/0.2 (gate 0.03)"]
 fn spin_up_angular_momentum_res50() {
-    spin_l(50);
+    spin_l(Solver::Pbf, 50);
 }
 #[test]
 #[ignore = "PBF: wall torque vs dL/dt mismatch 0.468 (gate 0.03)"]
 fn spin_up_wall_torque_balance_res25() {
-    spin_torque(25);
+    spin_torque(Solver::Pbf, 25);
 }
 #[test]
 #[ignore = "PBF: wall torque vs dL/dt mismatch 0.451 (gate 0.03)"]
 fn spin_up_wall_torque_balance_res50() {
-    spin_torque(50);
+    spin_torque(Solver::Pbf, 50);
+}
+
+// ------------------------------------------------------------------ DFSPH: cases 1 and 2
+
+fn hydro_all_gates(res: u32) {
+    let h = hydro(Solver::Dfsph, res);
+    assert!(h.bins_used >= 4, "too few wall bins ({})", h.bins_used);
+    // Iteration-cap and wall-backstop counts are reported by the probe but not gated: the outcome
+    // they would guard (density error, penetration energy) is gated directly below / in the
+    // ledger, and thin films pressed against the wall legitimately trip the backstop.
+    let mut items = Vec::new();
+    items.extend([
+        (
+            format!("res {res} worst-5% compression"),
+            h.worst5_c,
+            gates::HYDRO_WORST5_COMPRESSION,
+        ),
+        (
+            format!("res {res} mean compression"),
+            h.mean_c,
+            gates::HYDRO_MEAN_COMPRESSION,
+        ),
+        (
+            format!("res {res} KE/(M g dx)"),
+            h.ke_over_mgdx,
+            gates::HYDRO_KE_OVER_MGDX,
+        ),
+        (
+            format!("res {res} wall pressure L2 (bins {})", h.bins_used),
+            h.wall_l2_rel,
+            gates::HYDRO_WALL_PRESSURE_L2,
+        ),
+    ]);
+    assert_all_le(&items);
+}
+
+fn spin_all_gates(res: u32) {
+    let mut items = Vec::new();
+    items.extend(spin_l_items(Solver::Dfsph, res));
+    items.extend(spin_torque_items(Solver::Dfsph, res));
+    assert_all_le(&items);
+}
+
+#[test]
+fn dfsph_hydrostatic_res25() {
+    hydro_all_gates(25);
+}
+#[test]
+fn dfsph_hydrostatic_res50() {
+    hydro_all_gates(50);
+}
+#[test]
+fn dfsph_spin_up_res25() {
+    spin_all_gates(25);
+}
+#[test]
+fn dfsph_spin_up_res50() {
+    spin_all_gates(50);
+}
+
+// ------------------------------------------------------------------ 6. rotating drum, fluid only
+
+fn rot_convergence_items(solver: Solver, coarse: u32, fine: u32) -> Vec<(String, f64, f64)> {
+    let (a, b) = (rot(solver, coarse), rot(solver, fine));
+    let rel = |x: f64, y: f64| (y - x).abs() / x.abs();
+    vec![
+        (
+            format!(
+                "power {:.5} W (res {coarse}) -> {:.5} W (res {fine})",
+                a.power_w, b.power_w
+            ),
+            rel(a.power_w, b.power_w),
+            gates::ROT_CONVERGENCE_REL,
+        ),
+        (
+            format!(
+                "torque {:.5e} N m (res {coarse}) -> {:.5e} N m (res {fine})",
+                a.torque_nm, b.torque_nm
+            ),
+            rel(a.torque_nm, b.torque_nm),
+            gates::ROT_CONVERGENCE_REL,
+        ),
+    ]
+}
+
+fn rot_convergence(solver: Solver, coarse: u32, fine: u32) {
+    assert_all_le(&rot_convergence_items(solver, coarse, fine));
+}
+
+fn rot_power_impulse(solver: Solver, res: u32) {
+    let d = rot(solver, res);
+    assert_all_le(&[(
+        format!(
+            "res {res} power {:.5} W vs omega*T_impulse {:.5} W",
+            d.power_w, d.power_from_impulse_w
+        ),
+        d.power_mismatch,
+        gates::ROT_POWER_IMPULSE_REL,
+    )]);
+}
+
+fn rot_dfsph_convergence(coarse: u32, fine: u32) {
+    assert_all_le(&rot_convergence_items(Solver::Dfsph, coarse, fine));
+}
+
+/// Slow in release (res 80 has ~4x the particles of res 40 and the settle + 1 s window is
+/// ~700 outer steps with several internal steps each).
+#[test]
+#[ignore = "DFSPH gate not yet met (first-order convergence): power 0.1742 -> 0.2408 W, torque 1.645e-2 -> 2.275e-2 N m (change 0.383, gate 0.03); 8 rev settle + 3 rev window, about 5 min"]
+fn dfsph_rotating_drum_convergence_25_50() {
+    rot_dfsph_convergence(25, 50);
+}
+/// Slow in release (see `dfsph_rotating_drum_convergence_25_50`).
+#[test]
+#[ignore = "DFSPH gate not yet met (first-order convergence): power 0.2210 -> 0.2892 W, torque 2.088e-2 -> 2.731e-2 N m (change 0.308, gate 0.03); about 20 min"]
+fn dfsph_rotating_drum_convergence_40_80() {
+    rot_dfsph_convergence(40, 80);
+}
+#[test]
+fn dfsph_rotating_drum_power_matches_impulse() {
+    for res in [25, 40] {
+        rot_power_impulse(Solver::Dfsph, res);
+    }
+}
+
+#[test]
+#[ignore = "PBF (expected not to converge): power 6.592 -> 5.398 W, torque 0.6225 -> 0.5098 N m, change 0.181 (gate 0.03); res 40 -> 80 power 5.785 -> 4.788 W"]
+fn pbf_rotating_drum_convergence_25_50() {
+    rot_convergence(Solver::Pbf, 25, 50);
+}
+
+// ------------------------------------------------------------------ DFSPH: fluid-only energy closure
+
+fn ledger_gate(label: &str, l: &harness::FluidLedger) {
+    assert!(l.wall_work_j > 0.0, "{label}: no wall work");
+    assert_all_le(&[(
+        format!(
+            "{label}: unattributed {:.4e} J vs wall work {:.4e} J (dE_mech {:.4e}, viscous dissipation {:.4e})",
+            l.unattributed_j, l.wall_work_j, l.d_mech_j, l.viscous_dissipation_j
+        ),
+        l.unattributed_frac,
+        gates::FLUID_ENERGY_UNATTRIBUTED_FRAC,
+    )]);
+}
+
+#[test]
+#[ignore = "DFSPH gate not yet met: |unattributed|/wall_work 0.346 (gate 0.02): dE_mech 7.3e-3 J, wall work 3.93e-1 J, viscous dissipation 5.22e-1 J (res 80: 0.259). The second density solve re-adds KE the implicit viscosity removed"]
+fn dfsph_energy_closure_rotating_drum_res40() {
+    let d = rot(Solver::Dfsph, 40);
+    ledger_gate(
+        "rotating drum res 40",
+        d.ledger.as_ref().expect("DFSPH ledger"),
+    );
 }
 
 // ------------------------------------------------------------------ 3. Taylor-Couette

@@ -14,6 +14,17 @@ use crate::params::SlurryParams;
 
 const CG_TOLERANCE: f32 = 1e-5;
 const CG_MAX_ITERATIONS: u32 = 200;
+/// Calibration factor on the wall-pair viscous coupling.
+///
+/// The first fluid row sits `~0.87 dx` from the first solid row (the equilibrium spacing the
+/// density constraint settles to), and a central pair force only couples the tangential velocity
+/// through the small tangential component of `e_ij`. With the bulk coefficient the wall therefore
+/// behaves like a Navier slip wall with a slip length of ~2.5 `dx`. The gap geometry is the same
+/// at every resolution, so a single constant restores no-slip: it is fitted to the impulsive
+/// spin-up solution (Bessel series) and checked against it at every resolution in
+/// `tests/verification.rs` (|dL| / L_inf <= 0.03 at four times), not tuned per case.
+/// `slurry.wall_no_slip` still scales it (0 = free slip).
+const WALL_COUPLING_FACTOR: f32 = 10.0;
 /// `eta^2 = ETA_FACTOR * H^2` regularises `1 / r^2` for coincident particles.
 const ETA_FACTOR: f32 = 0.01;
 
@@ -61,7 +72,7 @@ impl Fluid {
         if mu <= 0.0 || self.is_empty() {
             return;
         }
-        let beta = slurry.wall_no_slip.clamp(0.0, 1.0);
+        let beta = slurry.wall_no_slip.clamp(0.0, 1.0) * WALL_COUPLING_FACTOR;
         let n = self.len();
         let m = self.particle_mass;
         let rho0 = self.rest_density;

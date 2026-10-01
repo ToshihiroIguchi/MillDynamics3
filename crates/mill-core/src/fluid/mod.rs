@@ -80,6 +80,8 @@ pub struct FluidStats {
     /// Wall -> fluid impulse and its angular impulse about the drum centre.
     pub wall_impulse: [f64; 2],
     pub wall_angular_impulse: f64,
+    /// The viscous (wall-friction) part of [`Self::wall_impulse`].
+    pub wall_viscous_impulse: [f64; 2],
     /// Pressure impulse along the inward wall normal, binned by the boundary particle's polar
     /// angle (`atan2(y, x)` over `[-pi, pi)`).
     pub wall_normal_impulse_by_angle: [f64; WALL_IMPULSE_BINS],
@@ -319,8 +321,8 @@ impl Fluid {
         let work = self.prepare(angle, drum.omega);
         let m = self.particle_mass;
 
-        self.pressure_solve(&work, pressure::Mode::Divergence, dt, stats);
-
+        // Gravity and cohesion, then the density solve: pressure (not wall friction) must carry
+        // the weight, so it acts on the raw gravity kick before viscosity does.
         let ke0 = kinetic_energy_f64(&self.v, m);
         for v in self.v.iter_mut() {
             v.y += GRAVITY * dt;
@@ -330,8 +332,14 @@ impl Fluid {
         self.apply_cohesion(&work, slurry, dt);
         stats.ke_delta_cohesion_j += kinetic_energy_f64(&self.v, m) - ke1;
 
-        self.viscosity_solve(&work, slurry, dt, stats);
         self.pressure_solve(&work, pressure::Mode::Density, dt, stats);
+        self.viscosity_solve(&work, slurry, dt, stats);
+        // The stiff implicit viscosity damps the decompressing velocity the first solve just
+        // produced; a second density solve (after it, so nothing damps it) restores the density.
+        // Measured: this ordering is the only one of three tried (viscosity first; pressure,
+        // viscosity, divergence; incremental pressure-correction) whose rotating-drum power is
+        // stable under halving/quartering `dt` and has a quiet hydrostatic state.
+        self.pressure_solve(&work, pressure::Mode::DensityRefine, dt, stats);
 
         // Advect, then the hard wall backstop against the drum at the end of the step.
         let angle_next = angle + drum.omega * dt;
@@ -485,6 +493,8 @@ pub(crate) fn account_wall_pair(
                 j.dot(inward) as f64;
         }
     } else {
+        stats.wall_viscous_impulse[0] += j.x as f64;
+        stats.wall_viscous_impulse[1] += j.y as f64;
         stats.wall_viscous_work_j += work;
     }
 }
