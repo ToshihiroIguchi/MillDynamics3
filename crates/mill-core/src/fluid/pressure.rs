@@ -142,6 +142,7 @@ impl Fluid {
             Mode::Divergence => stats.divergence_iterations += iters,
         }
         stats.ke_delta_pressure_j += kinetic_energy_f64(&self.v, m) - ke_before;
+        self.apply_ball_impulses();
     }
 
     /// Applies the pressure acceleration for the per-particle pressure variable `kinc` (Jacobi: all

@@ -163,6 +163,16 @@ pub struct Fluid {
     pub max_viscous_number: f32,
     /// Cap on internal steps per call (default [`MAX_INTERNAL_STEPS`]).
     pub max_internal_steps: u32,
+    /// Treat the balls' velocities as prescribed (they act like the wall); otherwise they are
+    /// unknowns of the implicit viscous solve and receive the pressure impulses.
+    pub bodies_prescribed: bool,
+    /// Lattice correction of the fluid-fluid viscous coefficient (1 / the lattice's effective
+    /// viscosity ratio on a quadratic profile).
+    pub(crate) viscosity_norm: f32,
+    ball_mass: f32,
+    ball_inertia: f32,
+    /// Ball impulses already folded into the ball copy's velocities.
+    applied: BallAcc,
     kernel: Kernel,
     wall: WallModel,
     drum: Drum,
@@ -282,6 +292,14 @@ impl Fluid {
             gravity_scale: 1.0,
             max_viscous_number: f32::INFINITY,
             max_internal_steps: MAX_INTERNAL_STEPS,
+            bodies_prescribed: false,
+            viscosity_norm: lattice_viscosity_norm(&kernel, dx, row_h, mass, rho0),
+            ball_mass: 0.0,
+            ball_inertia: 0.0,
+            applied: BallAcc {
+                impulse: Vec::new(),
+                angular: Vec::new(),
+            },
             kernel,
             wall,
             drum: *drum,
@@ -422,6 +440,12 @@ impl Fluid {
             impulse: vec![Vec2::ZERO; nb],
             angular: vec![0.0; nb],
         };
+        self.applied = BallAcc {
+            impulse: vec![Vec2::ZERO; nb],
+            angular: vec![0.0; nb],
+        };
+        self.ball_mass = balls.mass;
+        self.ball_inertia = balls.inertia;
         let finish = |acc: &BallAcc| CouplingImpulses {
             impulses: acc.impulse.clone(),
             angular_impulses: acc.angular.clone(),
@@ -615,6 +639,28 @@ impl Fluid {
         }
     }
 
+    /// Folds ball impulses accumulated since the last sync (the pressure stages') into the ball
+    /// copy's velocities; a no-op for prescribed balls.
+    pub(super) fn apply_ball_impulses(&mut self) {
+        if self.bodies_prescribed || self.ball_mass <= 0.0 {
+            return;
+        }
+        for b in 0..self.bodies.x.len() {
+            let dp = self.ball_acc.impulse[b] - self.applied.impulse[b];
+            let dl = self.ball_acc.angular[b] - self.applied.angular[b];
+            self.bodies.v[b] += dp / self.ball_mass;
+            if self.ball_inertia > 0.0 {
+                self.bodies.omega[b] += dl / self.ball_inertia;
+            }
+        }
+        self.mark_ball_impulses_applied();
+    }
+
+    pub(super) fn mark_ball_impulses_applied(&mut self) {
+        self.applied.impulse.copy_from_slice(&self.ball_acc.impulse);
+        self.applied.angular.copy_from_slice(&self.ball_acc.angular);
+    }
+
     /// Akinci fluid-fluid cohesion as an explicit velocity kick (pairwise central, so momentum is
     /// conserved).
     fn apply_cohesion(&mut self, work: &Work, slurry: &SlurryParams, dt: f32) {
@@ -643,6 +689,34 @@ impl Fluid {
         for (v, d) in self.v.iter_mut().zip(&dv) {
             *v += *d;
         }
+    }
+}
+
+/// `1 / (effective viscosity / nu)` of the pairwise-central operator on the seeded hex lattice
+/// for a quadratic velocity profile (0.965 for the shipped kernel: the `eta^2` regularisation and
+/// the finite sum), applied to the fluid-fluid coefficient so the bulk reproduces `mu`.
+fn lattice_viscosity_norm(kernel: &Kernel, dx: f32, row_h: f32, mass: f32, rho0: f32) -> f32 {
+    let eta2 = solid::ETA_FACTOR * kernel.support * kernel.support;
+    let mut acc_x = 0.0f32;
+    for row in -5i32..=5 {
+        let off = if row.rem_euclid(2) == 0 { 0.0 } else { 0.5 };
+        for col in -5i32..=5 {
+            let pj = Vec2::new((col as f32 + off) * dx, row as f32 * row_h);
+            let r = pj.length();
+            if r < 1e-9 || r >= kernel.support {
+                continue;
+            }
+            let e = -pj / r;
+            // u = (y^2 / 2, 0): u_i - u_j at the origin is -pj.y^2 / 2
+            let c = 8.0 * mass / (rho0 * rho0) * kernel.dw_dr(r).abs() * r / (r * r + eta2) * rho0;
+            acc_x += -c * e.x * e.x * (-0.5 * pj.y * pj.y) * 1.0;
+        }
+    }
+    // acc_x is `a_x / nu` for `mu = rho0 nu`; exact is 1.
+    if acc_x > 0.1 {
+        1.0 / acc_x
+    } else {
+        1.0
     }
 }
 
