@@ -168,6 +168,10 @@ pub struct DemStepStats {
     /// could in principle miss a collision along the way. Diagnostic only in this pass; a
     /// continuous (swept) collision guard is future work.
     pub max_substep_displacement_over_diameter: f32,
+    /// Mechanical energy (J) the fluid coupling impulses delivered to the balls in the predict
+    /// step: translational plus rotational KE after applying `external`, minus before. Read-only
+    /// accounting (docs/VERIFICATION.md); zero when no coupling is applied.
+    pub coupling_work_j: f32,
 }
 
 /// Mass of one ball, modelled as a **unit-depth disc** (kg per metre of mill length):
@@ -206,6 +210,18 @@ pub(crate) fn mechanical_energy_j(balls: &Balls) -> f32 {
         e += 0.5 * balls.mass * balls.v[i].length_squared();
         e += 0.5 * balls.inertia * balls.omega[i] * balls.omega[i];
         e += balls.mass * GRAVITY.abs() * balls.x[i].y;
+    }
+    e
+}
+
+/// [`mechanical_energy_j`] accumulated in f64, for long-window energy budgets
+/// ([`crate::EnergyBudget`]) where f32 summation error would swamp the small terms.
+pub(crate) fn mechanical_energy_f64(balls: &Balls) -> f64 {
+    let mut e = 0.0f64;
+    for i in 0..balls.len() {
+        e += 0.5 * balls.mass as f64 * balls.v[i].length_squared() as f64;
+        e += 0.5 * balls.inertia as f64 * (balls.omega[i] * balls.omega[i]) as f64;
+        e += balls.mass as f64 * GRAVITY.abs() as f64 * balls.x[i].y as f64;
     }
     e
 }
@@ -483,11 +499,17 @@ impl DemState {
         let x0: Vec<Vec2> = balls.x.clone();
         let theta0: Vec<f32> = balls.theta.clone();
         let v_pre: Vec<Vec2> = balls.v.clone();
+        let mut coupling_work_j = 0.0f64;
         for i in 0..n {
             balls.v[i].y += GRAVITY * dt;
             if let Some(ext) = external {
+                let ke_before = 0.5 * balls.mass as f64 * balls.v[i].length_squared() as f64
+                    + 0.5 * balls.inertia as f64 * (balls.omega[i] * balls.omega[i]) as f64;
                 balls.v[i] += ext.impulses[i] * w;
                 balls.omega[i] += ext.angular_impulses[i] * w_rot;
+                let ke_after = 0.5 * balls.mass as f64 * balls.v[i].length_squared() as f64
+                    + 0.5 * balls.inertia as f64 * (balls.omega[i] * balls.omega[i]) as f64;
+                coupling_work_j += ke_after - ke_before;
             }
             balls.x[i] += balls.v[i] * dt;
             balls.theta[i] += balls.omega[i] * dt;
@@ -937,6 +959,7 @@ impl DemState {
             impact_energy_histogram,
             dissipated_energy_j: e_after_predict + wall_work_j - e_final,
             max_substep_displacement_over_diameter,
+            coupling_work_j: coupling_work_j as f32,
         }
     }
 }

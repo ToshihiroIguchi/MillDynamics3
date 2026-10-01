@@ -511,6 +511,38 @@ pub struct FluidStepStats {
     /// fluid (the ordinary case while the drum turns); zero at `omega = 0` or `slurry.wall_no_slip
     /// = 0`.
     pub wall_work_j: f32,
+    // --- Read-only energy/momentum accounting (docs/VERIFICATION.md). Nothing below feeds back
+    // into the solver; every field is summed from quantities the step already computed.
+    /// Impulse (N*s per metre of depth) the drum wall delivered to the fluid this sub-step: step 4's
+    /// boundary-projection push (`m * correction / dt`) plus step 6's no-slip velocity change.
+    pub wall_impulse: Vec2,
+    /// Angular impulse (N*m*s per metre of depth, about the drum centre) matching
+    /// [`Self::wall_impulse`]. For a smooth drum, `-wall_angular_impulse / dt` is the torque the
+    /// fluid exerts on the drum shaft.
+    pub wall_angular_impulse: f32,
+    /// Step 4's inward-normal wall impulse (N*s per metre) binned by the particle's polar angle
+    /// (`atan2(y, x)` over `[-pi, pi)`, [`WALL_IMPULSE_BINS`] bins) -- the wall pressure profile.
+    pub wall_normal_impulse_by_angle: [f32; WALL_IMPULSE_BINS],
+    /// Fluid kinetic-energy change (J) across step 6's no-slip blend. `wall_work_j` minus this is
+    /// the energy dissipated by wall slip.
+    pub ke_delta_noslip_j: f32,
+    /// Fluid kinetic-energy change (J) across step 6.5 (ball drag), fluid side only.
+    pub ke_delta_drag_j: f32,
+    /// Fluid kinetic-energy change (J) across step 6.6 (buoyancy reaction), fluid side only.
+    pub ke_delta_buoyancy_j: f32,
+    /// Fluid kinetic-energy change (J) across step 7 (implicit viscosity); negative = dissipation.
+    pub ke_delta_viscosity_j: f32,
+    /// Fluid kinetic-energy change (J) across step 7.5's speed clamp (<= 0).
+    pub ke_delta_clamp_j: f32,
+}
+
+/// Number of polar-angle bins in [`FluidStepStats::wall_normal_impulse_by_angle`] (32 so the array
+/// keeps its `Default` impl).
+pub const WALL_IMPULSE_BINS: usize = 32;
+
+/// Fluid kinetic energy `0.5 * m * sum |v|^2` (J per metre of depth), accumulated in f64.
+fn kinetic_energy_f64(v: &[Vec2], mass: f32) -> f64 {
+    0.5 * mass as f64 * v.iter().map(|v| v.length_squared() as f64).sum::<f64>()
 }
 
 /// Clamp magnitude for the coupling impulse applied to a ball over one sub-step (docs/PLAN.md
@@ -722,6 +754,15 @@ impl FluidParticles {
             density[ju] += self.particle_mass * w;
         });
         density
+    }
+
+    /// Fluid mechanical energy (J per metre of depth): kinetic plus gravitational potential
+    /// (`m g y`, same datum as [`crate::dem`]'s ball energy). Read-only accounting helper.
+    pub fn mechanical_energy_j(&self) -> f64 {
+        let potential: f64 = self.x.iter().map(|p| p.y as f64).sum::<f64>()
+            * self.particle_mass as f64
+            * GRAVITY.abs() as f64;
+        kinetic_energy_f64(&self.v, self.particle_mass) + potential
     }
 
     /// Advances the fluid by one fixed sub-step `dt`, against the given (already positioned at
@@ -1184,11 +1225,22 @@ impl FluidParticles {
 
         // --- 4. Boundary projection (position only; velocity is reconciled below) ----------
         let mut touched_wall = vec![false; n];
+        let mut acct_wall_impulse = [0.0f64; 2];
+        let mut acct_wall_angular = 0.0f64;
+        let mut acct_wall_bins = [0.0f32; WALL_IMPULSE_BINS];
         for (x, touched) in self.x.iter_mut().zip(&mut touched_wall) {
             let (d, normal) = drum.sdf_world(*x, drum_angle_next);
             if d < 0.0 {
                 *x += -d * normal;
                 *touched = true;
+                let push = mass * (-d * normal) / dt;
+                acct_wall_impulse[0] += push.x as f64;
+                acct_wall_impulse[1] += push.y as f64;
+                acct_wall_angular += cross2(*x, push) as f64;
+                let angle = x.y.atan2(x.x);
+                let bin = (((angle + std::f32::consts::PI) / std::f32::consts::TAU)
+                    * WALL_IMPULSE_BINS as f32) as usize;
+                acct_wall_bins[bin.min(WALL_IMPULSE_BINS - 1)] += mass * -d / dt;
             }
         }
 
@@ -1216,6 +1268,7 @@ impl FluidParticles {
         // --- 6. No-slip wall velocity blending -------------------------------------------------
         let beta = slurry.wall_no_slip.clamp(0.0, 1.0);
         let mut wall_work_j = 0.0f32;
+        let acct_ke_before_noslip = kinetic_energy_f64(&self.v, mass);
         if beta > 0.0 {
             for ((v, &touched), &x) in self.v.iter_mut().zip(&touched_wall).zip(&self.x) {
                 if touched {
@@ -1229,9 +1282,14 @@ impl FluidParticles {
                     // ball-wall friction -- see [`FluidStepStats::wall_work_j`]'s doc comment.
                     let dv = *v - v_old;
                     wall_work_j += mass * dv.dot(v_wall);
+                    acct_wall_impulse[0] += (mass * dv.x) as f64;
+                    acct_wall_impulse[1] += (mass * dv.y) as f64;
+                    acct_wall_angular += cross2(x, mass * dv) as f64;
                 }
             }
         }
+        let mut acct_ke_mark = kinetic_energy_f64(&self.v, mass);
+        let acct_ke_delta_noslip = acct_ke_mark - acct_ke_before_noslip;
 
         // --- 6.5 Ball drag, Stokes + form (docs/PLAN.md ss3.4 step 2, docs/PHYSICS.md ss6.2):
         // each ball relaxes toward its locally-entrained fluid mass via a relaxation time that
@@ -1539,6 +1597,10 @@ impl FluidParticles {
             }
         }
 
+        let acct_ke_after_drag = kinetic_energy_f64(&self.v, mass);
+        let acct_ke_delta_drag = acct_ke_after_drag - acct_ke_mark;
+        acct_ke_mark = acct_ke_after_drag;
+
         // --- 6.6 Buoyancy (docs/PLAN.md ss3.4 step 3): balls are typically sub-resolution
         // relative to the fluid spacing and do not contribute to the density-constraint sum
         // (step 3), so buoyancy is not an emergent effect here -- it is modelled directly. Each
@@ -1644,6 +1706,10 @@ impl FluidParticles {
             }
         }
 
+        let acct_ke_after_buoyancy = kinetic_energy_f64(&self.v, mass);
+        let acct_ke_delta_buoyancy = acct_ke_after_buoyancy - acct_ke_mark;
+        acct_ke_mark = acct_ke_after_buoyancy;
+
         // --- 7. Implicit Newtonian viscosity (see module doc comment) -----------------------
         let mu = slurry.viscosity_pa_s.max(0.0);
         let mut viscosity_iterations = 0u32;
@@ -1667,6 +1733,9 @@ impl FluidParticles {
         let mean_shear_rate_per_s =
             mean_shear_rate(&self.x, &self.v, &neighbors, &density, mass, h);
 
+        let acct_ke_after_viscosity = kinetic_energy_f64(&self.v, mass);
+        let acct_ke_delta_viscosity = acct_ke_after_viscosity - acct_ke_mark;
+
         // --- 7.5 Fluid speed clamp (stability backstop) --------------------------------------
         // Step 5 reconstructs `v = (x - x0) / dt` from *position* corrections, so a particle
         // persistently squeezed -- e.g. trapped between a centrifuged ball layer and the wall
@@ -1679,6 +1748,7 @@ impl FluidParticles {
         // conservation violation confined to states that are already unphysical, the right
         // trade for an operation that must never itself inject energy.
         clamp_fluid_speed(&mut self.v, fluid_speed_clamp_v_max(drum));
+        let acct_ke_delta_clamp = kinetic_energy_f64(&self.v, mass) - acct_ke_after_viscosity;
 
         // --- 8. Clamp accumulated coupling impulses for stability (docs/PLAN.md ss3.4) --------
         // Note: the fluid side of every upstream mechanism (3.5/3.6/6.5/6.6) already applied its
@@ -1710,6 +1780,14 @@ impl FluidParticles {
                 mean_shear_rate_per_s,
                 coupling_clamp_hits,
                 wall_work_j,
+                wall_impulse: Vec2::new(acct_wall_impulse[0] as f32, acct_wall_impulse[1] as f32),
+                wall_angular_impulse: acct_wall_angular as f32,
+                wall_normal_impulse_by_angle: acct_wall_bins,
+                ke_delta_noslip_j: acct_ke_delta_noslip as f32,
+                ke_delta_drag_j: acct_ke_delta_drag as f32,
+                ke_delta_buoyancy_j: acct_ke_delta_buoyancy as f32,
+                ke_delta_viscosity_j: acct_ke_delta_viscosity as f32,
+                ke_delta_clamp_j: acct_ke_delta_clamp as f32,
             },
         )
     }

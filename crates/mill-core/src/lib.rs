@@ -41,6 +41,36 @@ pub const FIXED_DT: f32 = 1.0 / 240.0;
 /// within about a second.
 const GRINDING_STATS_EMA_TAU_S: f32 = 1.0;
 
+/// Cumulative, read-only mechanical-energy budget of the whole system over a window
+/// ([`Simulation::energy_budget`]; docs/VERIFICATION.md). All energies are J per metre of mill
+/// depth. Sign convention: `shaft_work_j` is energy in; the `*_dissipation_j`/`*_removed_j` terms
+/// are energy lost (positive = lost); `interface_created_j` is net energy *created* at the
+/// ball-fluid interface (physically <= 0, i.e. drag dissipates).
+///
+/// `unattributed_j = delta_mechanical_j - (shaft_work_j - ball_contact_dissipation_j -
+/// fluid_wall_slip_j - fluid_viscous_j - fluid_clamp_removed_j + interface_created_j)`: the net
+/// energy change no instrumented term explains (for PBF, position-projection numerical
+/// dissipation and the unmetered cohesion/overlap-push steps). Zero in a perfectly closed budget.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnergyBudget {
+    pub elapsed_s: f64,
+    pub shaft_work_j: f64,
+    /// The ball-wall part of `shaft_work_j`.
+    pub dem_wall_work_j: f64,
+    /// The fluid-wall (no-slip) part of `shaft_work_j`.
+    pub fluid_wall_work_j: f64,
+    pub ball_contact_dissipation_j: f64,
+    pub fluid_wall_slip_j: f64,
+    pub fluid_viscous_j: f64,
+    pub fluid_clamp_removed_j: f64,
+    pub interface_created_j: f64,
+    pub delta_mechanical_j: f64,
+    pub unattributed_j: f64,
+    /// Time-integrated fluid wall angular impulse (N*m*s per metre); `-this / elapsed_s` is the
+    /// mean torque the fluid exerts on the drum from the projection + no-slip impulses.
+    pub fluid_wall_angular_impulse: f64,
+}
+
 /// The simulation instance. This is the single type the `mill-wasm` wrapper (and, indirectly, the
 /// web worker's fixed-step accumulator, docs/PLAN.md ss4.1) drives via [`Simulation::step`].
 pub struct Simulation {
@@ -72,6 +102,11 @@ pub struct Simulation {
     /// [`coupling::CouplingImpulses::clamp_hits`]'s doc comment for why this is meant to read as
     /// "did this happen at all just now", not a smoothed rate).
     coupling_clamp_hits: u32,
+    /// Accumulated terms of [`EnergyBudget`] since the last [`Simulation::reset_energy_budget`]
+    /// (`delta_mechanical_j`/`unattributed_j` are filled in on read).
+    energy_budget: EnergyBudget,
+    /// Total mechanical energy at the last budget reset.
+    energy_budget_e0: f64,
 }
 
 impl Simulation {
@@ -108,6 +143,7 @@ impl Simulation {
                 0.0,
             )
         };
+        let energy_budget_e0 = dem::mechanical_energy_f64(&dem.balls) + fluid.mechanical_energy_j();
         Ok(Self {
             params,
             drum_angle: 0.0,
@@ -122,7 +158,34 @@ impl Simulation {
             impact_energy_counts_per_s: [0.0; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
             max_substep_displacement_over_diameter: 0.0,
             coupling_clamp_hits: 0,
+            energy_budget: EnergyBudget::default(),
+            energy_budget_e0,
         })
+    }
+
+    fn total_mechanical_energy_j(&self) -> f64 {
+        dem::mechanical_energy_f64(&self.dem.balls) + self.fluid.mechanical_energy_j()
+    }
+
+    /// Restarts the cumulative [`EnergyBudget`] window at the current state.
+    pub fn reset_energy_budget(&mut self) {
+        self.energy_budget = EnergyBudget::default();
+        self.energy_budget_e0 = self.total_mechanical_energy_j();
+    }
+
+    /// The cumulative [`EnergyBudget`] since construction or the last
+    /// [`Simulation::reset_energy_budget`]. Read-only diagnostics; not part of [`metrics::Metrics`].
+    pub fn energy_budget(&self) -> EnergyBudget {
+        let mut b = self.energy_budget;
+        b.delta_mechanical_j = self.total_mechanical_energy_j() - self.energy_budget_e0;
+        let explained = b.shaft_work_j
+            - b.ball_contact_dissipation_j
+            - b.fluid_wall_slip_j
+            - b.fluid_viscous_j
+            - b.fluid_clamp_removed_j
+            + b.interface_created_j;
+        b.unattributed_j = b.delta_mechanical_j - explained;
+        b
     }
 
     pub fn params(&self) -> &Params {
@@ -357,6 +420,19 @@ impl Simulation {
             sub_dt,
         );
         self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
+        let b = &mut self.energy_budget;
+        b.elapsed_s += sub_dt as f64;
+        b.dem_wall_work_j += dem_stats.wall_work_j as f64;
+        b.fluid_wall_work_j += fluid_stats.wall_work_j as f64;
+        b.shaft_work_j += (dem_stats.wall_work_j + fluid_stats.wall_work_j) as f64;
+        b.ball_contact_dissipation_j += dem_stats.dissipated_energy_j as f64;
+        b.fluid_wall_slip_j += (fluid_stats.wall_work_j - fluid_stats.ke_delta_noslip_j) as f64;
+        b.fluid_viscous_j -= fluid_stats.ke_delta_viscosity_j as f64;
+        b.fluid_clamp_removed_j -= fluid_stats.ke_delta_clamp_j as f64;
+        b.interface_created_j += (dem_stats.coupling_work_j
+            + fluid_stats.ke_delta_drag_j
+            + fluid_stats.ke_delta_buoyancy_j) as f64;
+        b.fluid_wall_angular_impulse += fluid_stats.wall_angular_impulse as f64;
         self.update_grinding_stats(&dem_stats, fluid_stats.wall_work_j, sub_dt, omega);
         self.fluid_stats = fluid_stats;
         self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
@@ -1008,6 +1084,51 @@ mod tests {
             worst_ratio < 1.0,
             "max_substep_displacement_over_diameter should stay under the XPBD stability \
              criterion once substeps are auto-raised: worst_ratio={worst_ratio}"
+        );
+    }
+
+    #[test]
+    fn energy_budget_is_finite_and_the_two_torque_readings_agree() {
+        // Browser-default wet case (smooth drum, no lifters), short run: the budget terms must be
+        // finite, the fluid-wall work must equal omega times the wall angular impulse (two
+        // independent readings of the same torque: step 6's `m dv . v_wall` vs `r x m dv`), and a
+        // reset must restart the window.
+        let mut params = Params::default();
+        params.simulation.resolution = 15;
+        params.simulation.max_balls = 100;
+        params.validate().unwrap();
+        let omega = params.mill.omega() as f64;
+        let mut sim = Simulation::new(params).unwrap();
+        for _ in 0..30 {
+            sim.step(1.0 / 60.0);
+        }
+        sim.reset_energy_budget();
+        for _ in 0..60 {
+            sim.step(1.0 / 60.0);
+        }
+        let b = sim.energy_budget();
+        for v in [
+            b.shaft_work_j,
+            b.ball_contact_dissipation_j,
+            b.fluid_wall_slip_j,
+            b.fluid_viscous_j,
+            b.fluid_clamp_removed_j,
+            b.interface_created_j,
+            b.delta_mechanical_j,
+            b.unattributed_j,
+        ] {
+            assert!(v.is_finite(), "non-finite budget term: {b:?}");
+        }
+        assert!(
+            (b.elapsed_s - 1.0).abs() < 1e-3,
+            "elapsed_s={}",
+            b.elapsed_s
+        );
+        let from_impulse = omega * b.fluid_wall_angular_impulse;
+        assert!(
+            (b.fluid_wall_work_j - from_impulse).abs() <= 0.01 * b.fluid_wall_work_j.abs() + 1e-9,
+            "fluid wall work {} != omega * angular impulse {from_impulse}",
+            b.fluid_wall_work_j
         );
     }
 }
