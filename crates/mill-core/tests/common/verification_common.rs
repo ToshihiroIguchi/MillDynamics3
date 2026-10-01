@@ -577,6 +577,11 @@ pub mod harness {
         let mut l = vec![0.0f64; n_steps + 1];
         let mut cum_wall = vec![0.0f64; n_steps + 1];
         let mut cum_grav = vec![0.0f64; n_steps + 1];
+        // Second moment `sum |x|^2` at every step: the lattice relaxes (and expands against the
+        // wall) after seeding, so rigid rotation's angular momentum is `omega0 m sum |x|^2` of the
+        // *current* particle positions, not of the seeded ones.
+        let mut i_sum = vec![0.0f64; n_steps + 1];
+        i_sum[0] = l_inf / (omega0 as f64 * m);
         let mut angle = 0.0f32;
         let mut acc = LedgerAcc::start(&f);
         let (mut backstop, mut caps) = (0u64, 0u64);
@@ -592,6 +597,7 @@ pub mod harness {
             cum_wall[k] = cum_wall[k - 1] + st.wall_angular_impulse;
             let sum_x: f64 = f.x().iter().map(|p| p.x as f64).sum();
             cum_grav[k] = cum_grav[k - 1] - m * G * sum_x * dt as f64;
+            i_sum[k] = f.x().iter().map(|p| p.length_squared() as f64).sum::<f64>();
             l[k] = f
                 .x()
                 .iter()
@@ -608,7 +614,7 @@ pub mod harness {
                 let t_nu = k as f64 * dt as f64 / TAU_S;
                 (
                     t_nu,
-                    l[k] / l_inf,
+                    l[k] / (omega0 as f64 * m * i_sum[k]),
                     analytic::spinup_angular_momentum_fraction(t_nu),
                 )
             })

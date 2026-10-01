@@ -48,24 +48,3 @@ pub fn build_ff(x: &[Vec2], support: f32) -> Csr {
     });
     Csr::from_edges(x.len(), &edges)
 }
-
-/// Boundary particles (world positions `bw`, wall and balls together) within `support` of each
-/// fluid particle.
-pub fn build_fb(x: &[Vec2], bw: &[Vec2], support: f32) -> Csr {
-    let n = x.len();
-    let mut offsets = vec![0u32; n + 1];
-    let mut nbrs: Vec<u32> = Vec::new();
-    let grid = UniformGrid::build(bw, support);
-    for i in 0..n {
-        let start = nbrs.len();
-        grid.for_each_near(x[i], |b| {
-            if (x[i] - bw[b as usize]).length_squared() < support * support {
-                nbrs.push(b);
-            }
-        });
-        // Sort for a stable, layout-independent summation order.
-        nbrs[start..].sort_unstable();
-        offsets[i + 1] = nbrs.len() as u32;
-    }
-    Csr { offsets, nbrs }
-}

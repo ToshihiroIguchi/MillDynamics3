@@ -175,3 +175,46 @@ Gate (both within 3 % at res 25 and 50): **failed**. Observations:
   disordered configuration at the resolutions used.
 Next step needs a decision (see the Phase C report): the ball-surface viscous layer is not accurate
 enough to build the two-way coupling on without further wall/operator work.
+
+## Smooth solid boundary (2026-10-01, replaces the boundary-particle layer) - gate still NOT met
+
+Diagnosis behind the change (all measured): the bulk viscous operator is accurate (pure-bulk residual
+0.7-1.4 % on the analytic Taylor-Couette profile; effective viscosity on the hex lattice 0.965 nu,
+isotropic to 4 digits over orientation); the pressure part of the ball torque is 1e-4..1e-3 N m
+against 3e-2 total (pressure roughness is not the problem); but the viscous torque depends on
+how the boundary layer is represented (discrete rows, 0.87 dx gap, density at the boundary) far more
+than 3 % allows, and a mass that is ~1 % too large for the available space pushes particles into the
+boundary and inflates the torque (+23 % at res 25, +69 % at res 50).
+The wall and balls are now smooth solids (`fluid/solid.rs`): tabulated kernel integrals `Gamma`
+(volume fraction) and `T` (viscous coupling tensor) per body radius, `grad Gamma` normal to the
+surface (no pressure torque on a ball, exact buoyancy), no calibration factor. The particle mass is
+`rho0 * fill * area / N` exactly.
+
+Taylor-Couette (ball R1 = R2/2 at 1 rad/s, fill 0.75 so the fluid mass equals the annulus, settle
+3 tau, measure 1 tau, `|torque| / analytic - 1`, gravity off, dt = 1/480 unless noted):
+
+| res | 15 | 25 | 28 | 35 | 50 |
+|---|---|---|---|---|---|
+| ball torque | -16.6 % | -13.7 % | -20.2 % | -18.3 % | -14.7 % |
+| wall torque | -16.6 % | -14.6 % | -20.8 % | -19.0 % | -15.3 % |
+
+res 35 vs time step: dt = 1/480 -18.3 %, dt/4 -3.1 %, dt/16 +6.9 % (first order in dt: the
+pressure-viscosity operator splitting, since `dt nu / dx^2 ~ 6-20`). Other orderings at res 35:
+without the second density solve -8.9 %, without the first -24 %, incremental pressure correction
+(previous kappa before viscosity) -13.4 % (dt) / -11.6 % (dt/4). With gravity (res 25 / 50) the
+torque is +1.6 / +66 % before the exact-mass rule and ~-14 % after. Radial velocity noise is 5 % of
+the tangential velocity and does not explain it (eddy diffusion ~1e-7 against nu 4e-3).
+
+Phase B gates on the smooth boundary without any calibration factor (previously met with the
+calibrated particle boundary): hydrostatic wall-pressure L2 0.104 / 0.060 (res 25 / 50, gate 0.05);
+spin-up `|dL|/L_inf` at t/tau 0.02 / 0.05 / 0.1 / 0.2: 0.057 / 0.037 / 0.014 / 0.012 (res 25),
+0.042 / 0.021 / 0.003 / 0.024 (res 50) with the angular momentum normalised by the *current* second
+moment (the lattice relaxes after seeding; the old seeded-moment normalisation was biased by up to
+3 %). The error at early times falls with resolution (0.080 / 0.057 / 0.047 / 0.042 at res 15 / 25 /
+40 / 60) but is above 0.03; the DFSPH hydrostatic and spin-up tests are `#[ignore]`d with these
+numbers.
+
+Conclusion: at the production time step the torque error is dominated by a first-order
+pressure-viscosity splitting error; it can be bought down only by a smaller step (x4 for -3 % at
+res 35, and `dt nu / dx^2 <= ~3` would mean ~25 internal steps at the defaults) or by a monolithic
+pressure-viscosity solve.

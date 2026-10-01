@@ -8,7 +8,7 @@
 
 use glam::Vec2;
 
-use super::{account_boundary_pair, kinetic_energy_f64, Fluid, FluidStats, Work};
+use super::{account_solid, kinetic_energy_f64, Fluid, FluidStats, Work};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Mode {
@@ -86,9 +86,9 @@ impl Fluid {
                     let j = work.ff.nbrs[k] as usize;
                     rho_dot += m * (self.v[i] - self.v[j]).dot(work.grad_ff[k]);
                 }
-                for k in work.fb.range(i) {
-                    let b = work.fb.nbrs[k] as usize;
-                    rho_dot += work.psi[b] * (self.v[i] - work.vb[b]).dot(work.grad_fb[k]);
+                for idx in work.solids_of(i) {
+                    let sol = &work.solids[idx];
+                    rho_dot += rho0 * (self.v[i] - sol.vel).dot(sol.grad);
                 }
                 let e = match mode {
                     Mode::Density | Mode::DensityRefine => work.rho[i] + dt * rho_dot - rho0,
@@ -148,9 +148,11 @@ impl Fluid {
     /// accelerations from the same `kinc`, then added) and accounts the wall reaction.
     fn apply_kappa(&mut self, work: &Work, kinc: &[f32], dt: f32, stats: &mut FluidStats) {
         let m = self.particle_mass;
+        let rho0 = self.rest_density;
         let mut dv = vec![Vec2::ZERO; self.len()];
         for (i, dvi) in dv.iter_mut().enumerate() {
             let ki = kinc[i];
+            let xi = self.x[i];
             let mut a = Vec2::ZERO;
             for k in work.ff.range(i) {
                 let j = work.ff.nbrs[k] as usize;
@@ -158,11 +160,11 @@ impl Fluid {
             }
             let mut dvb = Vec2::ZERO;
             if ki != 0.0 {
-                for k in work.fb.range(i) {
-                    let b = work.fb.nbrs[k] as usize;
-                    let dvib = -(dt * ki * work.psi[b]) * work.grad_fb[k];
+                for idx in work.solids_of(i) {
+                    let sol = &work.solids[idx];
+                    let dvib = -(dt * ki * rho0) * sol.grad;
                     dvb += dvib;
-                    account_boundary_pair(stats, &mut self.ball_acc, work, b, m * dvib, true);
+                    account_solid(stats, &mut self.ball_acc, xi, sol, m * dvib, true);
                 }
             }
             *dvi = dt * a + dvb;

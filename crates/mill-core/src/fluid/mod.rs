@@ -1,41 +1,45 @@
-//! DFSPH (divergence-free SPH) slurry solver with Akinci boundary particles for the drum wall.
+//! DFSPH (divergence-free SPH) slurry solver with smooth solid boundaries.
 //!
 //! Replaces the PBF solver ([`crate::pbf`]) in the planned rebuild (docs/VERIFICATION.md): PBF has no
 //! solid wall density (particles pile up at the wall), reconstructs velocity from position
 //! projection (creates and destroys energy) and applies no-slip only to wall-touching particles.
-//! This module is fluid + drum wall only; balls are added in a later phase.
 //!
-//! # Algorithm (one internal step; Bender & Koschier 2015/2017 ordering)
-//! 1. Neighbour search (fluid-fluid and fluid-boundary), density `rho_i = sum_j m W_ij + sum_b
-//!    psi_b W_ib`, and the pressure-solver denominator `D_i = |sum_j m grad W_ij + sum_b psi_b
-//!    grad W_ib|^2 + sum_j m^2 |grad W_ij|^2`.
-//! 2. Divergence-free solve on `v` (removes positive volume change rate for particles with a full
-//!    neighbourhood).
-//! 3. Gravity and Akinci cohesion (surface tension), explicit.
-//! 4. Implicit viscosity, `(I + dt L) v = v*` by conjugate gradient. `L` is built from the
-//!    pairwise-central Monaghan/Cleary form (`f_ij = -C_ij e_ij e_ij . (v_i - v_j)`, `C_ij = 8 mu m^2
-//!    / (rho_i rho_j) |W'| r / (r^2 + eta^2)`), so linear and angular momentum are conserved
-//!    exactly and a rigid rotation feels no viscous force. The wall enters the same system as
-//!    boundary pairs moving with `omega x r`, scaled by `slurry.wall_no_slip`.
-//! 5. Constant-density solve (`rho*_i = rho_i + dt * d rho_i / dt` driven to `rest_density`,
+//! # Solid boundaries
+//! The drum wall, lifters and balls are not particle sets but smooth solids ([`solid`]): the kernel
+//! integrals of the solid region, `Gamma` (volume fraction) and `T` (viscous coupling tensor), are
+//! tabulated once per body radius. A discrete boundary-particle layer was tried first and failed
+//! the Taylor-Couette torque gate (docs/VERIFICATION.md): its rows, gap to the first fluid row and
+//! staggering enter the viscous coupling at O(1) and do not converge cleanly.
+//!
+//! # Algorithm (one internal step)
+//! 1. Neighbour search (fluid-fluid), solid samples per particle, density `rho_i = m sum_j W_ij +
+//!    rho0 sum_S Gamma_S`, and the pressure denominator `D_i = |sum_j m grad W_ij + rho0 sum_S
+//!    grad Gamma_S|^2 + sum_j m^2 |grad W_ij|^2`.
+//! 2. Gravity and Akinci cohesion (surface tension), explicit.
+//! 3. Constant-density solve (`rho*_i = rho_i + dt * d rho_i / dt` driven to `rest_density`,
 //!    pressure `>= 0`, so a free surface exerts no suction), `kappa` accumulated and warm-started
-//!    from the previous step. Pressure is mirrored onto the boundary particles (exact reaction).
-//! 6. Advect; a hard SDF backstop catches any particle that crosses the wall (counted).
+//!    from the previous step; pressure acts on the solids with exact reaction.
+//! 4. Implicit viscosity, `(I + dt L) v = v*` by conjugate gradient, `L` from the pairwise-central
+//!    Monaghan/Cleary form (`f_ij = -C_ij e e . (v_i - v_j)`, `C_ij = 8 mu m^2 / (rho_i rho_j)
+//!    |W'| r / (r^2 + eta^2)`): momentum and angular momentum are conserved exactly and a rigid
+//!    rotation feels no viscous force. Solids enter as `-(8 mu / rho_i) T (v_i - v_S)`.
+//! 5. A second density solve (viscosity damps the decompressing velocity of the first; the
+//!    ordering was chosen by measurement, see [`Fluid::internal_step`]).
+//! 6. Advect; hard backstops catch any particle that crosses the wall or enters a ball (counted).
 //!
 //! Each call to [`Fluid::step`] is split into `n` equal internal steps chosen from a CFL bound
 //! evaluated from the state at the start of the call (deterministic, bounded by
 //! [`MAX_INTERNAL_STEPS`]).
 //!
-//! # Wall accounting
-//! Every pressure and viscous interaction with the wall is a central pair force, so the impulse
-//! the wall delivers to the fluid is summed per boundary particle; `wall_work_j = sum J . v_b`
-//! equals `omega * wall_angular_impulse` and fluid angular momentum changes by exactly that
-//! angular impulse plus gravity's torque.
+//! # Accounting
+//! Every pressure and viscous interaction with a solid is a central force, so the impulse a solid
+//! delivers to the fluid is summed per (particle, solid) sample; `wall_work_j = sum J . v_S`
+//! equals `omega * wall_angular_impulse`, and a ball receives `-J` with torque `-cross(x_i - x_B, J)`.
 
-mod boundary;
 mod kernel;
 mod neighbors;
 mod pressure;
+mod solid;
 mod viscosity;
 
 use glam::Vec2;
@@ -45,13 +49,11 @@ use crate::dem::Balls;
 use crate::geometry::Drum;
 use crate::grid::UniformGrid;
 use crate::params::{DyePattern, SlurryParams};
-use boundary::{BallTemplate, Boundary};
 use kernel::{cohesion_kernel, Kernel};
-use neighbors::{build_fb, build_ff, Csr};
+use neighbors::{build_ff, Csr};
+use solid::{BallModel, SolidSample, WallModel, WALL};
 
 const GRAVITY: f32 = -9.81;
-/// `owner` of a boundary particle that belongs to the drum wall (otherwise the ball index).
-pub(crate) const WALL: u32 = u32::MAX;
 /// Number of polar-angle bins in [`FluidStats::wall_normal_impulse_by_angle`].
 pub const WALL_IMPULSE_BINS: usize = 32;
 /// Upper bound on internal steps per [`Fluid::step`] call.
@@ -85,6 +87,7 @@ pub struct FluidStats {
     pub ball_backstop_hits: u32,
     /// Work the balls do on the fluid (`sum J . v_b` over ball pairs, mirror of `wall_work_j`).
     pub ball_work_j: f64,
+
     /// Wall -> fluid impulse and its angular impulse about the drum centre.
     pub wall_impulse: [f64; 2],
     pub wall_angular_impulse: f64,
@@ -107,22 +110,23 @@ pub struct FluidStats {
     pub pe_delta_j: f64,
 }
 
-/// Per-internal-step working data (neighbours, kernel gradients, density, denominators).
+/// Per-internal-step working data (neighbours, kernel gradients, density, denominators, solids).
 pub(crate) struct Work {
     pub ff: Csr,
-    pub fb: Csr,
-    /// `grad_i W_ij` per directed fluid-fluid edge / `grad_i W_ib` per fluid-boundary edge.
+    /// `grad_i W_ij` per directed fluid-fluid edge.
     pub grad_ff: Vec<Vec2>,
-    pub grad_fb: Vec<Vec2>,
-    /// Boundary particles (wall first, then balls): world positions, velocities, volumes, owner
-    /// (`WALL` or ball index) and, for ball particles, the offset from the ball centre.
-    pub bw: Vec<Vec2>,
-    pub vb: Vec<Vec2>,
-    pub psi: Vec<f32>,
-    pub owner: Vec<u32>,
-    pub lever: Vec<Vec2>,
+    /// Solid samples of particle `i`: `solids[solid_off[i]..solid_off[i + 1]]`.
+    pub solid_off: Vec<u32>,
+    pub solids: Vec<SolidSample>,
     pub rho: Vec<f32>,
     pub inv_d: Vec<f32>,
+}
+
+impl Work {
+    #[inline]
+    pub fn solids_of(&self, i: usize) -> std::ops::Range<usize> {
+        self.solid_off[i] as usize..self.solid_off[i + 1] as usize
+    }
 }
 
 /// Private copy of the balls' kinematics the fluid sub-cycles with.
@@ -150,16 +154,19 @@ pub struct Fluid {
     /// Kernel support radius `H = 2 dx`.
     pub h: f32,
     pub rest_density: f32,
+    /// Multiplier on gravity (1 by default; a verification hook, e.g. to run a Taylor-Couette
+    /// case with and without gravity).
+    pub gravity_scale: f32,
     kernel: Kernel,
-    boundary: Boundary,
+    wall: WallModel,
+    drum: Drum,
     /// Accumulated density-solve pressure variable `kappa = p / rho^2` (warm start).
     kappa: Vec<f32>,
-    row_h: f32,
     d_floor: f32,
     /// Drum angle at the end of the last step (for [`Fluid::densities`]).
     angle: f32,
     bodies: Bodies,
-    ball_template: BallTemplate,
+    ball_model: BallModel,
     pub(crate) ball_acc: BallAcc,
 }
 
@@ -245,8 +252,19 @@ impl Fluid {
             }
         }
 
+        // The particle mass is fixed by the requested fluid volume, not by the lattice cell: the
+        // fluid mass must be `rho0 * fill * area` exactly. A mass even ~1 % too large for the
+        // space available makes the density solve push particles into the solid's kernel layer
+        // (the smooth boundary has no discrete rows to stop them), shrinking the effective gap and
+        // inflating every viscous torque; the count of lattice sites is only commensurate with the
+        // domain by accident, so the mass absorbs the mismatch (a few percent at most).
+        let mass = if !x.is_empty() {
+            rho0 * target_area / x.len() as f32
+        } else {
+            mass
+        };
         let n = x.len();
-        let boundary = Boundary::build(drum, dx, row_h, mass);
+        let wall = WallModel::build(drum, &kernel);
         Self {
             x,
             v: vec![Vec2::ZERO; n],
@@ -255,10 +273,11 @@ impl Fluid {
             dx,
             h: support,
             rest_density: rho0,
+            gravity_scale: 1.0,
             kernel,
-            boundary,
+            wall,
+            drum: *drum,
             kappa: vec![0.0; n],
-            row_h,
             d_floor,
             angle: drum_angle,
             bodies: Bodies {
@@ -267,7 +286,7 @@ impl Fluid {
                 theta: Vec::new(),
                 omega: Vec::new(),
             },
-            ball_template: BallTemplate::empty(),
+            ball_model: BallModel::empty(),
             ball_acc: BallAcc {
                 impulse: Vec::new(),
                 angular: Vec::new(),
@@ -290,9 +309,8 @@ impl Fluid {
         if n == 0 {
             return Vec::new();
         }
-        let (bw, _, psi, _, _) = self.boundary_world(self.angle, 0.0);
+        let (soff, solids) = self.sample_solids(&self.drum, self.angle);
         let ff = build_ff(&self.x, self.h);
-        let fb = build_fb(&self.x, &bw, self.h);
         (0..n)
             .map(|i| {
                 let mut rho = self.particle_mass * self.kernel.w(0.0);
@@ -300,54 +318,59 @@ impl Fluid {
                     let j = ff.nbrs[k] as usize;
                     rho += self.particle_mass * self.kernel.w((self.x[i] - self.x[j]).length());
                 }
-                for k in fb.range(i) {
-                    let b = fb.nbrs[k] as usize;
-                    rho += psi[b] * self.kernel.w((self.x[i] - bw[b]).length());
+                for s in &solids[soff[i] as usize..soff[i + 1] as usize] {
+                    rho += self.rest_density * s.gamma;
                 }
                 rho
             })
             .collect()
     }
 
-    /// World positions, velocities, volumes, owners and levers of every boundary particle: the
-    /// wall (static drum-frame set rotated by `angle`, moving at `omega x r`) followed by the
-    /// balls' rings (moving with each ball's rigid-body velocity).
-    #[allow(clippy::type_complexity)]
-    fn boundary_world(
-        &self,
-        angle: f32,
-        omega: f32,
-    ) -> (Vec<Vec2>, Vec<Vec2>, Vec<f32>, Vec<u32>, Vec<Vec2>) {
-        let rot = Vec2::from_angle(angle);
-        let cap = self.boundary.local.len() + self.bodies.x.len() * self.ball_template.local.len();
-        let mut bw = Vec::with_capacity(cap);
-        let mut vb = Vec::with_capacity(cap);
-        let mut psi = Vec::with_capacity(cap);
-        let mut owner = Vec::with_capacity(cap);
-        let mut lever = Vec::with_capacity(cap);
-        for (k, &p) in self.boundary.local.iter().enumerate() {
-            let w = rot.rotate(p);
-            bw.push(w);
-            vb.push(omega * Vec2::new(-w.y, w.x));
-            psi.push(self.boundary.psi[k]);
-            owner.push(WALL);
-            lever.push(Vec2::ZERO);
-        }
-        for b in 0..self.bodies.x.len() {
-            if !self.bodies.x[b].is_finite() {
-                continue;
+    /// Solid samples (wall first, then nearby balls in index order) for every fluid particle.
+    fn sample_solids(&self, drum: &Drum, angle: f32) -> (Vec<u32>, Vec<SolidSample>) {
+        let n = self.x.len();
+        let mut off = Vec::with_capacity(n + 1);
+        off.push(0u32);
+        let mut samples: Vec<SolidSample> = Vec::new();
+        let balls_present = !self.bodies.x.is_empty() && self.ball_model.radius > 0.0;
+        let grid = if balls_present {
+            Some(UniformGrid::build(
+                &self.bodies.x,
+                self.ball_model.reach().max(1e-6),
+            ))
+        } else {
+            None
+        };
+        let mut nearby: Vec<u32> = Vec::new();
+        for i in 0..n {
+            let x = self.x[i];
+            if let Some(s) = self.wall.sample(x, drum, angle) {
+                if s.gamma > 0.0 {
+                    samples.push(s);
+                }
             }
-            let rb = Vec2::from_angle(self.bodies.theta[b]);
-            for (k, &p) in self.ball_template.local.iter().enumerate() {
-                let l = rb.rotate(p);
-                bw.push(self.bodies.x[b] + l);
-                vb.push(self.bodies.v[b] + self.bodies.omega[b] * Vec2::new(-l.y, l.x));
-                psi.push(self.ball_template.psi[k]);
-                owner.push(b as u32);
-                lever.push(l);
+            if let Some(grid) = &grid {
+                nearby.clear();
+                grid.for_each_near(x, |b| nearby.push(b));
+                nearby.sort_unstable();
+                for &b in &nearby {
+                    let b = b as usize;
+                    if let Some(s) = self.ball_model.sample(
+                        b as u32,
+                        x,
+                        self.bodies.x[b],
+                        self.bodies.v[b],
+                        self.bodies.omega[b],
+                    ) {
+                        if s.gamma > 0.0 {
+                            samples.push(s);
+                        }
+                    }
+                }
             }
+            off.push(samples.len() as u32);
         }
-        (bw, vb, psi, owner, lever)
+        (off, samples)
     }
 
     /// Advances the fluid by `dt` against `drum` (at `drum_angle` at the start of the call), with
@@ -384,9 +407,8 @@ impl Fluid {
             theta: balls.theta.clone(),
             omega: balls.omega.clone(),
         };
-        if nb > 0 && (self.ball_template.radius - balls.radius).abs() > 1e-9 {
-            self.ball_template =
-                BallTemplate::build(balls.radius, self.dx, self.row_h, self.particle_mass);
+        if nb > 0 && (self.ball_model.radius - balls.radius).abs() > 1e-9 {
+            self.ball_model = BallModel::build(balls.radius, &self.kernel);
         }
         self.ball_acc = BallAcc {
             impulse: vec![Vec2::ZERO; nb],
@@ -402,9 +424,10 @@ impl Fluid {
             self.angle = drum_angle + drum.omega * dt.max(0.0);
             return (finish(&self.ball_acc), stats);
         }
-        if !self.boundary.matches(drum) {
-            self.boundary = Boundary::build(drum, self.dx, self.row_h, self.particle_mass);
+        if !self.wall.matches(drum) {
+            self.wall = WallModel::build(drum, &self.kernel);
         }
+        self.drum = *drum;
         for (x, v) in self.x.iter_mut().zip(self.v.iter_mut()) {
             if !x.is_finite() || !v.is_finite() {
                 *x = Vec2::ZERO;
@@ -456,14 +479,14 @@ impl Fluid {
         ball_radius: f32,
         stats: &mut FluidStats,
     ) {
-        let work = self.prepare(angle, drum.omega);
+        let work = self.prepare(drum, angle);
         let m = self.particle_mass;
 
         // Gravity and cohesion, then the density solve: pressure (not wall friction) must carry
         // the weight, so it acts on the raw gravity kick before viscosity does.
         let ke0 = kinetic_energy_f64(&self.v, m);
         for v in self.v.iter_mut() {
-            v.y += GRAVITY * dt;
+            v.y += GRAVITY * self.gravity_scale * dt;
         }
         let ke1 = kinetic_energy_f64(&self.v, m);
         stats.ke_delta_gravity_j += ke1 - ke0;
@@ -533,16 +556,15 @@ impl Fluid {
         stats.pe_delta_j += (pe1 - pe0) * m as f64 * GRAVITY.abs() as f64;
     }
 
-    /// Neighbour search, kernel gradients, density and pressure denominators at the current
-    /// positions and drum angle.
-    fn prepare(&self, angle: f32, omega: f32) -> Work {
+    /// Neighbour search, solid samples, kernel gradients, density and pressure denominators at the
+    /// current positions and drum angle.
+    fn prepare(&self, drum: &Drum, angle: f32) -> Work {
         let n = self.len();
         let m = self.particle_mass;
-        let (bw, vb, psi_b, owner, lever) = self.boundary_world(angle, omega);
+        let rho0 = self.rest_density;
+        let (solid_off, solids) = self.sample_solids(drum, angle);
         let ff = build_ff(&self.x, self.h);
-        let fb = build_fb(&self.x, &bw, self.h);
         let mut grad_ff = vec![Vec2::ZERO; ff.nbrs.len()];
-        let mut grad_fb = vec![Vec2::ZERO; fb.nbrs.len()];
         let mut rho = vec![0.0f32; n];
         let mut inv_d = vec![0.0f32; n];
         for i in 0..n {
@@ -559,29 +581,18 @@ impl Fluid {
                 g_sum += m * g;
                 sq += m * m * g.length_squared();
             }
-            for k in fb.range(i) {
-                let b = fb.nbrs[k] as usize;
-                let delta = self.x[i] - bw[b];
-                let r = delta.length();
-                let psi = psi_b[b];
-                rho_i += psi * self.kernel.w(r);
-                let g = self.kernel.grad(delta, r);
-                grad_fb[k] = g;
-                g_sum += psi * g;
+            for s in &solids[solid_off[i] as usize..solid_off[i + 1] as usize] {
+                rho_i += rho0 * s.gamma;
+                g_sum += rho0 * s.grad;
             }
             rho[i] = rho_i;
             inv_d[i] = 1.0 / (g_sum.length_squared() + sq).max(self.d_floor);
         }
         Work {
             ff,
-            fb,
             grad_ff,
-            grad_fb,
-            bw,
-            vb,
-            psi: psi_b,
-            owner,
-            lever,
+            solid_off,
+            solids,
             rho,
             inv_d,
         }
@@ -638,38 +649,36 @@ fn dye_value(pattern: DyePattern, p: Vec2) -> f32 {
     }
 }
 
-/// Accumulates one boundary-pair impulse `j` (boundary -> fluid) acting at boundary particle `b`:
-/// wall pairs into the wall statistics (impulse, angular impulse about the drum centre, work,
-/// pressure profile); ball pairs into the ball's own impulse and angular impulse (Newton's third
-/// law) and `ball_work_j`.
-pub(crate) fn account_boundary_pair(
+/// Accumulates one (particle, solid) impulse `j` (solid -> fluid) on the particle at `x`: wall
+/// samples into the wall statistics (impulse, angular impulse about the drum centre, work, pressure
+/// profile by the particle's polar angle); ball samples into the ball's impulse and angular impulse
+/// about its centre (Newton's third law) and `ball_work_j`.
+pub(crate) fn account_solid(
     stats: &mut FluidStats,
     balls: &mut BallAcc,
-    work: &Work,
-    b: usize,
+    x: Vec2,
+    s: &SolidSample,
     j: Vec2,
     pressure: bool,
 ) {
-    let owner = work.owner[b];
-    let (bw, vb) = (work.bw[b], work.vb[b]);
-    if owner != WALL {
-        let o = owner as usize;
+    if s.owner != WALL {
+        let o = s.owner as usize;
         balls.impulse[o] -= j;
-        balls.angular[o] -= work.lever[b].x * j.y - work.lever[b].y * j.x;
-        stats.ball_work_j += j.dot(vb) as f64;
+        balls.angular[o] -= s.lever.x * j.y - s.lever.y * j.x;
+        stats.ball_work_j += j.dot(s.vel) as f64;
         return;
     }
     stats.wall_impulse[0] += j.x as f64;
     stats.wall_impulse[1] += j.y as f64;
-    stats.wall_angular_impulse += (bw.x * j.y - bw.y * j.x) as f64;
-    let work_j = j.dot(vb) as f64;
+    stats.wall_angular_impulse += (x.x * j.y - x.y * j.x) as f64;
+    let work_j = j.dot(s.vel) as f64;
     stats.wall_work_j += work_j;
     if pressure {
         stats.wall_pressure_work_j += work_j;
-        let len = bw.length();
+        let len = x.length();
         if len > 1e-9 {
-            let inward = -bw / len;
-            let angle = bw.y.atan2(bw.x);
+            let inward = -x / len;
+            let angle = x.y.atan2(x.x);
             let bin = (((angle + std::f32::consts::PI) / std::f32::consts::TAU)
                 * WALL_IMPULSE_BINS as f32) as usize;
             stats.wall_normal_impulse_by_angle[bin.min(WALL_IMPULSE_BINS - 1)] +=

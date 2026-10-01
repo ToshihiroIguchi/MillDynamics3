@@ -1,39 +1,28 @@
 //! Implicit Newtonian viscosity: pairwise-central (Monaghan/Cleary) form, solved by conjugate
-//! gradient, with the moving wall as boundary pairs.
+//! gradient, with the solids (drum wall, balls) as smooth coupling tensors.
 //!
-//! `f_ij = -C_ij e_ij (e_ij . (v_i - v_j))`, `C_ij = 8 mu m_i m_j / (rho_i rho_j) |W'(r)| r /
+//! Fluid pairs: `f_ij = -C_ij e (e . (v_i - v_j))`, `C_ij = 8 mu m_i m_j / (rho_i rho_j) |W'(r)| r /
 //! (r^2 + eta^2)` (`8 = 2 (d + 2)` for `d = 2`; reproduces `mu laplacian(v)` on a quadratic
 //! profile). Central pair forces conserve linear and angular momentum exactly and vanish for a
-//! rigid rotation. Wall pairs use `rho_b = rest_density`, `m_j -> psi_b`, scaled by
-//! `slurry.wall_no_slip`.
+//! rigid rotation. Solids: the same pair form integrated over the solid region, i.e. the force per
+//! unit mass `-(8 mu / rho_i) T (v_i - v_S)` with `T` from [`super::solid`], scaled by
+//! `slurry.wall_no_slip` / `slurry.ball_no_slip`.
 
 use glam::Vec2;
 
-use super::{account_boundary_pair, kinetic_energy_f64, Fluid, FluidStats, Work, WALL};
+use super::solid::{ETA_FACTOR, WALL};
+use super::{account_solid, kinetic_energy_f64, Fluid, FluidStats, Work};
 use crate::params::SlurryParams;
 
 const CG_TOLERANCE: f32 = 1e-5;
 const CG_MAX_ITERATIONS: u32 = 200;
-/// Calibration factor on the wall-pair viscous coupling.
-///
-/// The first fluid row sits `~0.87 dx` from the first solid row (the equilibrium spacing the
-/// density constraint settles to), and a central pair force only couples the tangential velocity
-/// through the small tangential component of `e_ij`. With the bulk coefficient the wall therefore
-/// behaves like a Navier slip wall with a slip length of ~2.5 `dx`. The gap geometry is the same
-/// at every resolution, so a single constant restores no-slip: it is fitted to the impulsive
-/// spin-up solution (Bessel series) and checked against it at every resolution in
-/// `tests/verification.rs` (|dL| / L_inf <= 0.03 at four times), not tuned per case.
-/// `slurry.wall_no_slip` still scales it (0 = free slip).
-const WALL_COUPLING_FACTOR: f32 = 10.0;
-/// `eta^2 = ETA_FACTOR * H^2` regularises `1 / r^2` for coincident particles.
-const ETA_FACTOR: f32 = 0.01;
 
 struct System<'a> {
     work: &'a Work,
     c_ff: Vec<f32>,
     e_ff: Vec<Vec2>,
-    c_fb: Vec<f32>,
-    e_fb: Vec<Vec2>,
+    /// Per solid sample: `8 mu beta / rho_i`.
+    k_solid: Vec<f32>,
     dt: f32,
 }
 
@@ -47,9 +36,8 @@ impl System<'_> {
                 let e = self.e_ff[k];
                 s += self.c_ff[k] * e * e.dot(v[i] - v[j]);
             }
-            for k in self.work.fb.range(i) {
-                let e = self.e_fb[k];
-                s += self.c_fb[k] * e * e.dot(v[i]);
+            for idx in self.work.solids_of(i) {
+                s += self.k_solid[idx] * self.work.solids[idx].apply_t(v[i]);
             }
             out[i] = v[i] + self.dt * s;
         }
@@ -72,18 +60,15 @@ impl Fluid {
         if mu <= 0.0 || self.is_empty() {
             return;
         }
-        let beta_wall = slurry.wall_no_slip.clamp(0.0, 1.0) * WALL_COUPLING_FACTOR;
-        let beta_ball = slurry.ball_no_slip.clamp(0.0, 1.0) * WALL_COUPLING_FACTOR;
-        let beta = beta_wall.max(beta_ball);
+        let beta_wall = slurry.wall_no_slip.clamp(0.0, 1.0);
+        let beta_ball = slurry.ball_no_slip.clamp(0.0, 1.0);
         let n = self.len();
         let m = self.particle_mass;
-        let rho0 = self.rest_density;
         let eta2 = ETA_FACTOR * self.h * self.h;
 
         let mut c_ff = vec![0.0f32; work.ff.nbrs.len()];
         let mut e_ff = vec![Vec2::ZERO; work.ff.nbrs.len()];
-        let mut c_fb = vec![0.0f32; work.fb.nbrs.len()];
-        let mut e_fb = vec![Vec2::ZERO; work.fb.nbrs.len()];
+        let mut k_solid = vec![0.0f32; work.solids.len()];
         for i in 0..n {
             let rho_i = work.rho[i].max(1e-6);
             for k in work.ff.range(i) {
@@ -98,43 +83,29 @@ impl Fluid {
                     / (r * r + eta2);
                 e_ff[k] = delta / r;
             }
-            if beta > 0.0 {
-                for k in work.fb.range(i) {
-                    let b = work.fb.nbrs[k] as usize;
-                    let delta = self.x[i] - work.bw[b];
-                    let r = delta.length();
-                    if r <= 1e-9 {
-                        continue;
-                    }
-                    let beta_b = if work.owner[b] == WALL {
-                        beta_wall
-                    } else {
-                        beta_ball
-                    };
-                    c_fb[k] = beta_b * 8.0 * mu * work.psi[b] / (rho_i * rho0)
-                        * self.kernel.dw_dr(r).abs()
-                        * r
-                        / (r * r + eta2);
-                    e_fb[k] = delta / r;
-                }
+            for idx in work.solids_of(i) {
+                let beta = if work.solids[idx].owner == WALL {
+                    beta_wall
+                } else {
+                    beta_ball
+                };
+                k_solid[idx] = 8.0 * mu * beta / rho_i;
             }
         }
         let sys = System {
             work,
             c_ff,
             e_ff,
-            c_fb,
-            e_fb,
+            k_solid,
             dt,
         };
 
-        // Right-hand side: incoming velocity plus the wall's drag toward its own velocity.
+        // Right-hand side: incoming velocity plus the solids' drag toward their own velocity.
         let mut rhs = self.v.clone();
         for (i, r) in rhs.iter_mut().enumerate() {
-            for k in work.fb.range(i) {
-                let b = work.fb.nbrs[k] as usize;
-                let e = sys.e_fb[k];
-                *r += dt * sys.c_fb[k] * e * e.dot(work.vb[b]);
+            for idx in work.solids_of(i) {
+                let s = &work.solids[idx];
+                *r += dt * sys.k_solid[idx] * s.apply_t(s.vel);
             }
         }
 
@@ -181,15 +152,12 @@ impl Fluid {
         }
         stats.ke_delta_viscosity_j += kinetic_energy_f64(&self.v, m) - ke_before;
 
-        // Wall reaction from the converged velocities: `J_ib = -m dt c_ib e (e . (v_i - v_b))`.
-        if beta > 0.0 {
-            for i in 0..n {
-                for k in work.fb.range(i) {
-                    let b = work.fb.nbrs[k] as usize;
-                    let e = sys.e_fb[k];
-                    let j = -(m * dt * sys.c_fb[k]) * e * e.dot(self.v[i] - work.vb[b]);
-                    account_boundary_pair(stats, &mut self.ball_acc, work, b, j, false);
-                }
+        // Solid reaction from the converged velocities: `J = -m dt k T (v_i - v_S)`.
+        for i in 0..n {
+            for idx in work.solids_of(i) {
+                let s = &work.solids[idx];
+                let j = -(m * dt * sys.k_solid[idx]) * s.apply_t(self.v[i] - s.vel);
+                account_solid(stats, &mut self.ball_acc, self.x[i], s, j, false);
             }
         }
     }

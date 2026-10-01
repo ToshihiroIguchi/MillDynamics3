@@ -162,7 +162,7 @@ fn rigidly_rotating_blob_feels_no_viscous_force() {
     for (v, x) in f.v.iter_mut().zip(&f.x) {
         *v = Vec2::new(-x.y, x.x) * 20.0;
     }
-    let w = f.prepare(0.0, 0.0);
+    let w = f.prepare(&d, 0.0);
     let ke0 = kinetic_energy_f64(&f.v, f.particle_mass);
     let mut stats = FluidStats::default();
     let mut slurry = s;
@@ -179,13 +179,13 @@ fn rigidly_rotating_blob_feels_no_viscous_force() {
 
 #[test]
 fn viscosity_is_a_no_op_at_zero_viscosity() {
-    let (mut f, _d, mut s) = free_blob();
+    let (mut f, d, mut s) = free_blob();
     for (v, x) in f.v.iter_mut().zip(&f.x) {
         *v = Vec2::new(x.y, 0.0) * 10.0;
     }
     s.viscosity_pa_s = 0.0;
     let before = f.v.clone();
-    let w = f.prepare(0.0, 0.0);
+    let w = f.prepare(&d, 0.0);
     let mut stats = FluidStats::default();
     f.viscosity_solve(&w, &s, DT, &mut stats);
     assert_eq!(before, f.v);
