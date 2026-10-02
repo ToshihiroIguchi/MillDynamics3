@@ -20,6 +20,7 @@ pub mod fluid;
 pub mod fluidview;
 pub mod geometry;
 pub mod grid;
+pub mod mac;
 pub mod metrics;
 pub mod params;
 pub mod pbf;
