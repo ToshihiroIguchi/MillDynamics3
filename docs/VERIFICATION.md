@@ -266,3 +266,27 @@ first 150 DEM sub-steps:
 Four tests written against the PBF behaviour are `#[ignore]`d with reasons (three full-system stability
 tests, one compression-error test). Not yet done: C3 measurements (power vs resolution, energy closure,
 ms/frame) because the resolved dense charge is not stable enough to measure.
+
+## Grid-solver track — E0 (infrastructure), 2026-10-03
+
+Decision: replace the particle fluid with a fixed-grid incompressible solver, built as gated
+experiments E0..E9 (module `crates/mill-core/src/mac/`; `grid.rs` is the unrelated spatial hash).
+Scope: water (1e-3 Pa·s) to yield-stress paste. Stop rules and the decisions D1 (water target)
+and D2 (coarse-graining validity) are the user's.
+
+E0 result (`grid_probe --exp E0`, Neumann Poisson `p = cos(pi r^2/R^2)` on a cut-cell disc, face
+apertures exact, volume-weighted L2 error against the analytic field):
+
+| n | L2 error | order | PCG iterations (1e-12) |
+|---|---|---|---|
+| 32 | 2.39e-3 | – | 12 |
+| 64 | 4.52e-4 | 2.41 | 13 |
+| 128 | 1.28e-4 | 1.82 | 15 |
+| 256 | 3.65e-5 | 1.81 | 16 |
+| 512 | 6.36e-6 | 2.52 | 18 |
+
+Projection of a random face field: divergence 1.8 -> 1e-14 (round-off), bit-identical reruns.
+Gate change versus the plan: the multigrid is a piecewise-constant aggregation (exact Galerkin
+coarse operators, over-correction 1.8) used as a CG preconditioner, so "residual reduction per
+V-cycle" is replaced by "PCG iteration count nearly grid independent" (12 -> 18 over 16x cells,
+slow log growth). Gate met; order alternates 1.8..2.5 with the cut-cell geometry.
