@@ -86,6 +86,26 @@ pub fn step(
     (fluid_stats, dem_stats)
 }
 
+/// As [`step`], for the DFSPH solver ([`crate::fluid::Fluid`]): the fluid sub-cycles the balls'
+/// kinematics itself (they are unknowns of its implicit viscous solve) and returns each ball's
+/// impulse; the DEM then applies them in its predict step and advances the balls.
+#[allow(clippy::too_many_arguments)]
+pub fn step_dfsph(
+    dem: &mut DemState,
+    fluid: &mut crate::fluid::Fluid,
+    drum: &Drum,
+    drum_angle: f32,
+    media: &MediaParams,
+    slurry: &SlurryParams,
+    dem_iterations: u32,
+    dt: f32,
+) -> (crate::fluid::FluidStats, crate::dem::DemStepStats) {
+    let (impulses, fluid_stats) = fluid.step_with_balls(drum, drum_angle, slurry, dt, &dem.balls);
+    let dem_stats =
+        dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&impulses));
+    (fluid_stats, dem_stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

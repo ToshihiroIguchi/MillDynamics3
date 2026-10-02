@@ -19,8 +19,8 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
+use crate::fluidview::FluidView;
 use crate::geometry::Drum;
-use crate::pbf::FluidParticles;
 
 /// Grid points per axis (docs/PLAN.md ss3.5: "G = 128"); the grid spans `[-R, R]` on each axis
 /// with `(GRID_SIZE - 1)` marching-squares cells per axis.
@@ -46,9 +46,9 @@ fn splat_kernel(r2: f32, radius: f32) -> f32 {
 }
 
 /// Splat kernel radius used to build the occupancy field for `fluid`: `SPLAT_RADIUS_FACTOR *
-/// fluid.h`.
-fn splat_radius_of(fluid: &FluidParticles) -> f32 {
-    SPLAT_RADIUS_FACTOR * fluid.h
+/// fluid.kernel_h()`.
+fn splat_radius_of(fluid: &impl FluidView) -> f32 {
+    SPLAT_RADIUS_FACTOR * fluid.kernel_h()
 }
 
 /// Analytically computes `phi_full`, the continuum-average occupancy-field value deep in a
@@ -57,7 +57,7 @@ fn splat_radius_of(fluid: &FluidParticles) -> f32 {
 /// For a uniform number density `n` of particles each splatted with [`splat_kernel`] of radius
 /// `splat_radius`, the field value far from any edge is `n * integral(K dA)`. `n = rest_density /
 /// particle_mass` is exact at the relaxed equilibrium the PBF density constraint targets, whatever
-/// the seeded lattice's actual per-particle mass is ([`FluidParticles::seed_lattice`] seeds a
+/// the seeded lattice's actual per-particle mass is ([`FluidView::seed_lattice`] seeds a
 /// **hexagonal** lattice, `particle_mass = rest_density * dx * row_h` with `row_h = dx *
 /// sqrt(3)/2`, i.e. `n = 1 / (dx * row_h)`, not the square-lattice `dx * dx`/`1 / dx^2` an earlier
 /// version of this comment stated) -- deriving `n` from mass/density directly (rather than
@@ -68,8 +68,8 @@ fn splat_radius_of(fluid: &FluidParticles) -> f32 {
 /// substituting `u = r^2 / splat_radius^2` into `integral_0^splat_radius (1 - r^2 /
 /// splat_radius^2)^3 * 2*pi*r dr` gives `pi * splat_radius^2 * integral_0^1 (1 - u)^3 du = pi *
 /// splat_radius^2 / 4`.
-fn analytic_phi_full(fluid: &FluidParticles, splat_radius: f32) -> f32 {
-    let number_density = fluid.rest_density / fluid.particle_mass.max(1e-12);
+fn analytic_phi_full(fluid: &impl FluidView, splat_radius: f32) -> f32 {
+    let number_density = fluid.rest_density() / fluid.particle_mass().max(1e-12);
     number_density * (std::f32::consts::PI * splat_radius * splat_radius / 4.0)
 }
 
@@ -82,7 +82,7 @@ fn analytic_phi_full(fluid: &FluidParticles, splat_radius: f32) -> f32 {
 /// [`extract_surface`] for the second (contour-point) pass that mops up the remaining sub-cell
 /// overshoot.
 fn build_field(
-    fluid: &FluidParticles,
+    fluid: &impl FluidView,
     drum: &Drum,
     drum_angle: f32,
     splat_radius: f32,
@@ -94,7 +94,7 @@ fn build_field(
     }
     let cell_size = 2.0 * drum_radius_m / (GRID_SIZE as f32 - 1.0);
 
-    for &p in &fluid.x {
+    for &p in fluid.positions() {
         // Grid-index bounding box of this particle's splat footprint.
         let gi_min = grid_index(p.x - splat_radius, drum_radius_m, cell_size);
         let gi_max = grid_index(p.x + splat_radius, drum_radius_m, cell_size);
@@ -218,7 +218,7 @@ fn cell_edge_id(cell_i: usize, cell_j: usize, edge_side: u8) -> EdgeId {
 }
 
 /// Extracts the free-surface contour(s) of `fluid` as closed (or, rarely, open) polylines, in the
-/// same world frame as `fluid.x`, against `drum` at its current `drum_angle`. See the module doc
+/// same world frame as `fluid.positions()`, against `drum` at its current `drum_angle`. See the module doc
 /// comment for the algorithm, including the wall-SDF field mask and the final contour-point
 /// projection that together keep every returned point on or inside the wall (and outside any
 /// lifter bar).
@@ -230,7 +230,7 @@ fn cell_edge_id(cell_i: usize, cell_j: usize, edge_side: u8) -> EdgeId {
 /// no contour at all -- a degenerate case, e.g. a field the analytic reference doesn't describe
 /// well -- extraction retries once using the grid's measured peak value as the threshold
 /// reference instead (today's original behaviour), as a graceful fallback.
-pub fn extract_surface(fluid: &FluidParticles, drum: &Drum, drum_angle: f32) -> Vec<Polygon> {
+pub fn extract_surface(fluid: &impl FluidView, drum: &Drum, drum_angle: f32) -> Vec<Polygon> {
     let drum_radius_m = drum.radius_m;
     if fluid.is_empty() || drum_radius_m <= 0.0 {
         return Vec::new();
@@ -433,6 +433,7 @@ pub fn flatten_polygons(polys: &[Polygon]) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::params::SlurryParams;
+    use crate::pbf::FluidParticles;
 
     #[test]
     fn splat_kernel_is_zero_outside_radius_and_positive_inside() {
