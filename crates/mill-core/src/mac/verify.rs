@@ -1632,3 +1632,101 @@ pub fn verify_drum_slurry(
         volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
     }
 }
+
+/// Result of the fixed-disc buoyancy test.
+#[derive(Clone, Copy, Debug)]
+pub struct Buoyancy {
+    pub steps: usize,
+    /// Vertical pressure force on the disc over the displaced weight `g pi r^2`, minus one, with
+    /// the cell-centre pressure used as is.
+    pub force_err_plain: f64,
+    /// Same with the pressure moved to the wall point along the local pressure gradient.
+    pub force_err: f64,
+    /// Horizontal force over the displaced weight.
+    pub side_force: f64,
+    /// Torque about the disc centre over `g r^3`.
+    pub torque: f64,
+    pub spurious: f64,
+}
+
+/// Fixed disc (radius `r`, centre `(0.05, -0.12)`) submerged in a still pool of depth up to
+/// `y = 0.2` inside the drum of radius 0.5: the pressure force on the disc must equal the weight
+/// of the displaced liquid (per unit density, `g pi r^2`) and its torque must vanish.
+pub fn verify_buoyancy(n: usize, r: f64, t_end: f64) -> Buoyancy {
+    let (radius, g, level) = (0.5, 9.81, 0.2);
+    let (cx, cy) = (0.05, -0.12);
+    let sm = StaggeredMesh::new(n, 0.55, move |x, y| {
+        let drum = (x * x + y * y).sqrt() - radius;
+        let ball = r - ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        drum.max(ball)
+    });
+    let mut flow = StaggeredFlow::new(&sm, 1e-3, |_, _| (0.0, 0.0));
+    flow.upwind = true;
+    flow.weno = true;
+    let ls = FsLevelSet::new(n, 0.55, move |_, y| y - level);
+    flow.enable_free_surface(ls, (0.0, -g));
+    let dx = sm.dx();
+    let dt0 = 0.3 * dx / (g * 2.0 * radius).sqrt();
+    let steps = (t_end / dt0).ceil() as usize;
+    let dt = t_end / steps as f64;
+    for _ in 0..steps {
+        flow.step(dt);
+    }
+    let mut vmax = 0.0f64;
+    for c in 0..n * n {
+        if flow.liq.active_u[c] {
+            vmax = vmax.max(flow.u[c].abs());
+        }
+        if flow.liq.active_v[c] {
+            vmax = vmax.max(flow.v[c].abs());
+        }
+    }
+    let centre =
+        |i: usize, j: usize| (-0.55 + (i as f64 + 0.5) * dx, -0.55 + (j as f64 + 0.5) * dx);
+    let (mut fx, mut fy, mut tq) = (0.0, 0.0, 0.0);
+    let mut fy0 = 0.0;
+    for j in 1..n - 1 {
+        for i in 1..n - 1 {
+            let c = i + n * j;
+            if !flow.liq.cell[c] {
+                continue;
+            }
+            let (x, y) = centre(i, j);
+            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            if (d - r).abs() > 1.5 * dx {
+                continue;
+            }
+            // Force on the fluid from the solid is p (a_r - a_l, a_t - a_b) dx; the disc feels the
+            // opposite.
+            let (ax, ay) = (
+                (sm.au[c + 1] - sm.au[c]) * dx,
+                (sm.av[c + n] - sm.av[c]) * dx,
+            );
+            let grad = |lo: usize, hi: usize| -> f64 {
+                match (flow.liq.cell[lo], flow.liq.cell[hi]) {
+                    (true, true) => (flow.p[hi] - flow.p[lo]) / (2.0 * dx),
+                    (true, false) => (flow.p[c] - flow.p[lo]) / dx,
+                    (false, true) => (flow.p[hi] - flow.p[c]) / dx,
+                    _ => 0.0,
+                }
+            };
+            let (gx, gy) = (grad(c - 1, c + 1), grad(c - n, c + n));
+            let (sx, sy) = (cx + r * (x - cx) / d, cy + r * (y - cy) / d);
+            let pw = flow.p[c] + gx * (sx - x) + gy * (sy - y);
+            fy0 -= flow.p[c] * ay;
+            let (px, py) = (-pw * ax, -pw * ay);
+            fx += px;
+            fy += py;
+            tq += (sx - cx) * py - (sy - cy) * px;
+        }
+    }
+    let weight = g * PI * r * r;
+    Buoyancy {
+        steps,
+        force_err_plain: fy0 / weight - 1.0,
+        force_err: fy / weight - 1.0,
+        side_force: fx / weight,
+        torque: tq / (g * r * r * r),
+        spurious: vmax / (g * 2.0 * radius).sqrt(),
+    }
+}

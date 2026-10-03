@@ -509,3 +509,17 @@ Probe: `grid_probe --exp E3s --re <list> --n <list> --fill f`. Drum R = 0.5, Fr 
 - Steady film thickness h(phi) at phi = 2.5, 32.5, ... deg (n = 64 / 128 / 256), e.g. phi = 242.5 deg:
   0.0389 / 0.0465 / 0.0427; 212.5 deg: 0.0387 / 0.0449 / 0.0405. Differences of +-8 % that are not monotone in n
   (n = 128 is the outlier), i.e. the film (5-10 cells thick) is not converged and the centroid torque inherits +-7 %.
+
+## E4a — fixed disc in a still pool (2026-10-03, PASSED)
+
+Disc r = 0.1 at (0.05, -0.12) in the drum (R = 0.5), flat pool at y = 0.2, ghost-fluid free surface, 0.2 s. Pressure force on
+the disc = `-sum p (a_r - a_l, a_t - a_b) dx` over the cut cells, with the cell pressure moved to the wall point along the local
+gradient (`grid_probe --exp E4a`):
+
+| n | d/dx | F_y/(g pi r^2) - 1 (plain / corrected) | F_x | torque/(g r^3) | spurious |
+|---|---|---|---|---|---|
+| 64 | 11.6 | -1.10 % / -0.12 % | -5e-5 | 2e-4 | 1.8e-5 |
+| 128 | 23.3 | 0.03 % / -0.03 % | -4e-5 | -3e-4 | 4e-6 |
+| 256 | 46.5 | 0.15 % / 0.00 % | -8e-6 | 1e-6 | 2e-6 |
+
+Gate (<= 0.5 %, zero torque): met. The cell-centre pressure alone is not enough at d/dx ~ 12 (1.1 %).

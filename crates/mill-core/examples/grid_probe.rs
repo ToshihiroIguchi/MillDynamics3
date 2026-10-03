@@ -2,11 +2,11 @@
 //! grid_probe -- --exp E0`.
 
 use mill_core::mac::verify::{
-    diagnose_couette_mac, track_sheet_growth, verify_couette_mac_scheme, verify_couette_ns,
-    verify_couette_stokes, verify_dam_break, verify_drum_slurry, verify_levelset_rotation,
-    verify_manufactured, verify_rigid_ring, verify_rimming, verify_sloshing_circle,
-    verify_sloshing_rect, verify_spinup, verify_spinup_mac, verify_still_pool, verify_translation,
-    verify_wall_impact,
+    diagnose_couette_mac, track_sheet_growth, verify_buoyancy, verify_couette_mac_scheme,
+    verify_couette_ns, verify_couette_stokes, verify_dam_break, verify_drum_slurry,
+    verify_levelset_rotation, verify_manufactured, verify_rigid_ring, verify_rimming,
+    verify_sloshing_circle, verify_sloshing_rect, verify_spinup, verify_spinup_mac,
+    verify_still_pool, verify_translation, verify_wall_impact,
 };
 use std::time::Instant;
 
@@ -36,6 +36,7 @@ fn main() {
         "E2d" => e2d(),
         "E2r" => e2r(),
         "E3s" => e3s(),
+        "E4a" => e4a(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -514,5 +515,28 @@ fn e3s() {
                 .collect();
             println!("       film(phi=2.5deg step 30deg) {}", line.join(" "));
         }
+    }
+}
+
+fn e4a() {
+    println!(
+        "E4a fixed disc r = 0.1 in a still pool (level 0.2): pressure force vs displaced weight"
+    );
+    println!(
+        "{:>5} {:>6} {:>6} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "n", "d/dx", "steps", "F_y plain", "F_y", "F_x", "torque", "spurious"
+    );
+    for n in [64usize, 128, 256] {
+        let r = verify_buoyancy(n, 0.1, 0.2);
+        println!(
+            "{n:>5} {:>6.1} {:>6} {:>9.3}% {:>9.3}% {:>10.2e} {:>10.2e} {:>10.2e}",
+            0.2 / (1.1 / n as f64),
+            r.steps,
+            100.0 * r.force_err_plain,
+            100.0 * r.force_err,
+            r.side_force,
+            r.torque,
+            r.spurious
+        );
     }
 }
