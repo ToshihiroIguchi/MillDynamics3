@@ -418,3 +418,82 @@ pub fn diagnose_couette_mac(n: usize, nu: f64, cfl: f64, at: &[usize]) -> Vec<(u
     }
     out
 }
+
+/// Impulsive spin-up of a circular wall with the full staggered Navier-Stokes stepper (the flow
+/// is azimuthal, so the Stokes Bessel solution is exact for NS too). Same checkpoints and
+/// metrics as [`verify_spinup`]; the first step is covered by `START_SUBSTEPS` equal substeps.
+pub fn verify_spinup_mac(n: usize, dt_nu: f64, checkpoints: &[f64]) -> Vec<SpinUpPoint> {
+    let (radius, omega, nu) = (0.5, 1.0, 1.0);
+    let sm = StaggeredMesh::new(n, radius * 1.1, |x, y| (x * x + y * y).sqrt() - radius);
+    let dt = dt_nu * radius * radius / nu;
+    let mut flow = StaggeredFlow::new(&sm, nu, |x, y| (-omega * y, omega * x));
+    let zeros = j1_zeros(400);
+    let dx2 = sm.dx() * sm.dx();
+    let moment = |f: &dyn Fn(f64, f64, usize) -> f64| {
+        let mut s = 0.0;
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                if sm.gu.fluid[c] {
+                    let (x, y) = sm.gu.centre(i, j);
+                    s += -y * f(x, y, c);
+                }
+                if sm.gv.fluid[c] {
+                    let (x, y) = sm.gv.centre(i, j);
+                    s += x * f(x, y, c + n * n);
+                }
+            }
+        }
+        s * dx2
+    };
+    // L_rigid: u = -omega y, v = omega x.
+    let l_rigid = moment(&|x, y, c| if c < n * n { -omega * y } else { omega * x });
+    let area = PI * radius * radius;
+    let t_end = checkpoints.iter().cloned().fold(0.0, f64::max) * radius * radius / nu;
+    let mut out = Vec::new();
+    let mut t = 0.0;
+    let mut first = true;
+    while t < t_end - 1e-12 {
+        let (steps, h) = if first {
+            (START_SUBSTEPS, dt / START_SUBSTEPS as f64)
+        } else {
+            (1, dt)
+        };
+        first = false;
+        for _ in 0..steps {
+            flow.step(h);
+            t += h;
+        }
+        let tn = nu * t / (radius * radius);
+        if let Some(&cp) = checkpoints
+            .iter()
+            .find(|&&c| (c - tn).abs() < 0.5 * dt_nu * 0.999)
+        {
+            let l_exact = 1.0
+                - 8.0
+                    * zeros
+                        .iter()
+                        .map(|l| (-l * l * tn).exp() / (l * l))
+                        .sum::<f64>();
+            let dl_exact = l_rigid
+                * (nu / (radius * radius))
+                * 8.0
+                * zeros.iter().map(|l| (-l * l * tn).exp()).sum::<f64>();
+            let l = moment(&|_, _, c| {
+                if c < n * n {
+                    flow.u[c]
+                } else {
+                    flow.v[c - n * n]
+                }
+            });
+            let load = flow.wall_load(|_, _| 0, 1)[0];
+            let tq = load.torque + rigid_wall_torque_correction(nu, omega, area, true);
+            out.push(SpinUpPoint {
+                t_nu: cp,
+                l_err: l / l_rigid / l_exact - 1.0,
+                torque_err: tq / dl_exact - 1.0,
+            });
+        }
+    }
+    out
+}

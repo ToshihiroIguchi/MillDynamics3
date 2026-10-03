@@ -372,3 +372,17 @@ n = 128, still far inside 1 %; (b) the NS spin-up rerun on the staggered stepper
 (the Stokes operator case is unchanged); (c) cost is dominated by rebuilding the multigrid
 hierarchies every step (88-153 ms/step at n = 256) and must be cached before E3; (d) advection is
 plain central, adequate for this smooth test but a robust scheme is still needed for water.
+
+**R2 follow-up: spin-up rerun on the staggered NS stepper** (`grid_probe --exp R2s`; azimuthal flow, so
+the Stokes Bessel solution is exact for NS). Angular momentum `L(t)` error: n = 256, dt = 0.005 nu/R^2:
+-1.0 % (T = 0.02, dt-limited start-up), -0.10 % (0.05), -0.02 % (0.1), 0.003 % (0.3), at least as
+good as the cell-centred E1a stepper. Wall torque error: 2.5 / 0.22 / 1.07 % at T = 0.02 / 0.05 / 0.1
+(E1a: -10.5 / -1.4 / -0.55 % at the same dt). Late-time torque ratios are meaningless
+(dL/dt -> 0, relative error blows up); in absolute terms the rigid-rotation residual converges
+fast (0.40 -> 6.6e-3 -> 6e-4 for n = 64/128/256, against the 2 mu Omega A = 1.57 scale), but the
+transient torque at T = 0.3 has an absolute error ~6e-3 (0.4 % of that scale) that does not
+shrink between n = 128 and 256 (cut-cell jitter). Judged acceptable for the gate; revisit in E4.
+
+Solver tolerances for the staggered stepper were relaxed 1e-12 -> 1e-9 (relative residual) with
+identical errors and projected divergence <= 8e-15; Helmholtz hierarchies are cached per sigma.
+Cost at n = 128: 15-19 ms/step (was 20-30).

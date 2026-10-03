@@ -18,7 +18,7 @@
 
 use super::flow::Mesh;
 use super::multigrid::PoissonSolver;
-use super::viscous::{FluidGrid, Link};
+use super::viscous::{FluidGrid, Helmholtz, Link};
 
 /// Geometry of the staggered discretisation.
 pub struct StaggeredMesh {
@@ -206,6 +206,10 @@ pub fn extend(q: &mut [f64], layer: &[u8], n: usize) {
     }
 }
 
+/// Relative residual targets of the pressure and viscous solves.
+const TOL_PROJECT: f64 = 1e-9;
+const TOL_VISCOUS: f64 = 1e-9;
+
 type WallVelocity<'a> = Box<dyn Fn(f64, f64) -> (f64, f64) + 'a>;
 
 struct Prev {
@@ -233,6 +237,8 @@ pub struct StaggeredFlow<'a> {
     /// projection so that it stays exact.
     cu: Vec<f64>,
     cv: Vec<f64>,
+    /// Helmholtz solvers for the last `sigma` (rebuilt only when `sigma` changes).
+    helm: Option<(f64, Helmholtz<'a>, Helmholtz<'a>)>,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -261,6 +267,7 @@ impl<'a> StaggeredFlow<'a> {
             projected_divergence: 0.0,
             cu: vec![0.0; n * n],
             cv: vec![0.0; n * n],
+            helm: None,
         }
     }
 
@@ -336,7 +343,7 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         let mut phi = vec![0.0; n * n];
-        self.poisson.solve(&rhs, &mut phi, 1e-12, 300);
+        self.poisson.solve(&rhs, &mut phi, TOL_PROJECT, 300);
         let k = dt_eff / dx;
         for j in 0..n {
             for i in 1..n {
@@ -485,13 +492,14 @@ impl<'a> StaggeredFlow<'a> {
             av,
             dt,
         };
+        if !matches!(&self.helm, Some((s, _, _)) if (s - sigma).abs() <= 1e-12 * sigma) {
+            self.helm = Some((sigma, sm.gu.helmholtz(sigma), sm.gv.helmholtz(sigma)));
+        }
         let wv = &self.wall_velocity;
-        sm.gu
-            .helmholtz(sigma)
-            .solve(&mut xu, Some(&su), |x, y| wv(x, y).0, 1e-12);
-        sm.gv
-            .helmholtz(sigma)
-            .solve(&mut xv, Some(&sv), |x, y| wv(x, y).1, 1e-12);
+        if let Some((_, hu, hv)) = &self.helm {
+            hu.solve(&mut xu, Some(&su), |x, y| wv(x, y).0, TOL_VISCOUS);
+            hv.solve(&mut xv, Some(&sv), |x, y| wv(x, y).1, TOL_VISCOUS);
+        }
         extend(&mut xu, &sm.layer_u, n);
         extend(&mut xv, &sm.layer_v, n);
         self.u = xu;

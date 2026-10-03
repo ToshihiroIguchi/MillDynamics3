@@ -3,7 +3,7 @@
 
 use mill_core::mac::verify::{
     diagnose_couette_mac, verify_couette_mac, verify_couette_ns, verify_couette_stokes,
-    verify_manufactured, verify_spinup,
+    verify_manufactured, verify_spinup, verify_spinup_mac,
 };
 use std::time::Instant;
 
@@ -20,6 +20,7 @@ fn main() {
         "R0" => r0(),
         "R2" => r2(),
         "R2d" => r2d(),
+        "R2s" => r2s(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -173,5 +174,23 @@ fn r2d() {
                 println!("n={n:<4} Re={re:<5} step {s:<4} fluid {a:.3e} ghost {b:.3e}");
             }
         }
+    }
+}
+
+fn r2s() {
+    println!("R2s spin-up of a disc, staggered NS stepper; errors of L(t) and wall torque");
+    let cps = [0.02, 0.05, 0.1, 0.3, 1.0];
+    for (n, dt) in [(64usize, 0.01), (128, 0.01), (128, 0.005), (256, 0.005)] {
+        let pts = verify_spinup_mac(n, dt, &cps);
+        print!("n={n:<4} dt={dt:<7}");
+        for p in &pts {
+            print!(
+                " | T={:<4} L{:>7.3}% Q{:>7.3}%",
+                p.t_nu,
+                100.0 * p.l_err,
+                100.0 * p.torque_err
+            );
+        }
+        println!();
     }
 }
