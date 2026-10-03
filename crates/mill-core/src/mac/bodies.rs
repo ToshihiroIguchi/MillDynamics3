@@ -509,8 +509,7 @@ impl BodyFlow {
                 })
                 .collect();
             let (raw, div, state, mesh) = self.trial_many(&discs, dt);
-            let mut forces: Vec<(f64, f64)> = raw.iter().map(|l| (l.0, l.1)).collect();
-            super::lubrication::remove_grid_normal(&mut forces, &lk);
+            let forces: Vec<(f64, f64)> = raw.iter().map(|l| (l.0, l.1)).collect();
             let total: Vec<(f64, f64, f64)> = (0..nb)
                 .map(|i| {
                     (

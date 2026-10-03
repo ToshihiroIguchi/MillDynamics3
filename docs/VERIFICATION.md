@@ -721,3 +721,31 @@ velocity error 0.7 %, speed in the plug 1.5e-6 m/s (was 2e-4).
 Gate (d) (<= 1e-5 m/s with a free surface) is still not met: 3.3e-5 bulk, interface spikes. Cost is
 the open issue: 5-20 passes of 200-400 CG iterations per step (the preconditioner ignores the yield
 operator), minutes per simulated second at n = 64.
+
+## E7 — ball size versus grid (2026-10-04): decision D2 input
+
+E7a, one disc (a = 0.05) translating in the drum, Stokes, 8 sub-cell positions per resolution, drag over the exact
+eccentric solution (`grid_probe --exp E7a`):
+
+| d/dx | 32 | 16 | 8 | 4 | 2 | 1 |
+|---|---|---|---|---|---|---|
+| mean error | -0.5 % | -0.6 % | -1.2 % | -3.6 % | -8 % | -26 % |
+| worst case over positions | -0.6 % | -1.2 % | -1.8 % | -6.1 % | -15 % | -36 % |
+
+A single resolved disc stays within 3 % down to d/dx = 8.
+
+E7b, 20 discs (hexagonal cluster, gap 0.4 a, rho_s = 2) settling in Stokes flow, same geometry at every grid
+(`grid_probe --exp E7b --n N`), mean speed at t = 0.1 relative to the d/dx = 32 run (0.07095):
+
+| d/dx | 32 | 16 | 8 | 4 | 2 |
+|---|---|---|---|---|---|
+| speed error | reference | -2.0 % | -9.9 % | -24.9 % | diverged |
+
+Finding: the E5 normal-lubrication blend removed the whole resolved normal force on every linked disc, including
+the common-mode drag, so a dense cluster fell 7 x too fast. Fixed: the sub-grid force is now additive,
+`-(1 - resolved_ratio(gap/dx)) c u_rel,n`, with the resolved fraction tabulated from E5 (`lubrication::resolved_ratio`).
+The static pair/wall E5 accuracy drops from 0.98-1.00 to about 0.90-1.10 at gaps of 1-2 cells (the resolved fraction
+there scatters with disc size and position). Not done: tangential lubrication, the unresolved (porosity + drag) model.
+
+D2 so far: resolved coupling is within 3 % only for d/dx >= 8 (isolated) and d/dx >= 16 (dense, gap < a/2);
+below d/dx ~ 4 it fails. n = 440 with 20 discs costs about 700 s for 0.1 s.

@@ -47,6 +47,32 @@ pub fn model_weight(h: f64, dx: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Fraction of the exact squeeze-film coefficient that the resolved flow delivers at a gap of
+/// `h_cells` cells (measured on the wall and pair references, n = 128 and 256, E5a/E5e): about 1
+/// down to 4 cells, 0.9 at 2, 0.25 at 1 and zero for touching surfaces (the values at 1 - 2 cells
+/// scatter by +-0.05 with the disc size and position relative to the grid).
+pub fn resolved_ratio(h_cells: f64) -> f64 {
+    const TABLE: [(f64, f64); 6] = [
+        (0.0, 0.0),
+        (0.5, 0.06),
+        (1.0, 0.25),
+        (2.0, 0.90),
+        (4.0, 0.99),
+        (8.0, 1.0),
+    ];
+    if h_cells >= 8.0 {
+        return 1.0;
+    }
+    let h = h_cells.max(0.0);
+    for w in TABLE.windows(2) {
+        if h <= w[1].0 {
+            let t = (h - w[0].0) / (w[1].0 - w[0].0);
+            return w[0].1 + t * (w[1].1 - w[0].1);
+        }
+    }
+    1.0
+}
+
 /// Normal force opposing the approach after the blend: `grid_normal` is the resolved component,
 /// `u_n` the approach speed (relative, positive when the gap closes).
 #[allow(clippy::too_many_arguments)]
@@ -104,7 +130,9 @@ pub fn wall_adjusted_load(
 
 /// One lubricated contact: disc `i` against disc `j`, or against the drum wall (`j = None`).
 /// `n` is the unit vector from `i` towards the partner (outward for the wall), `weight` the model
-/// weight of the blend and `c` the squeeze coefficient (force per unit approach speed).
+/// weight of the correction and `c` the squeeze coefficient (force per unit approach speed).
+/// `weight = 1 - resolved_ratio(gap / dx)`: the sub-grid force `-weight c u_rel,n` is *added* to
+/// the resolved load, which keeps the common-mode (non-squeezing) part of the resolved force.
 #[derive(Clone, Copy, Debug)]
 pub struct Link {
     pub i: usize,
@@ -132,7 +160,7 @@ pub fn links(centres: &[(f64, f64)], radii: &[f64], drum: f64, dx: f64, nu: f64)
                 i,
                 j: Some(j),
                 n: (ex / dist, ey / dist),
-                weight: model_weight(gap, dx),
+                weight: 1.0 - resolved_ratio(gap / dx),
                 c: squeeze_coefficient(disc_curvature(radii[i]), disc_curvature(radii[j]), h, nu),
                 gap,
             });
@@ -146,7 +174,7 @@ pub fn links(centres: &[(f64, f64)], radii: &[f64], drum: f64, dx: f64, nu: f64)
                 i,
                 j: None,
                 n: (cx / dist, cy / dist),
-                weight: model_weight(gap, dx),
+                weight: 1.0 - resolved_ratio(gap / dx),
                 c: squeeze_coefficient(disc_curvature(radii[i]), wall_curvature(drum), h, nu),
                 gap,
             });

@@ -56,6 +56,8 @@ fn main() {
         "E5e" => e5e(),
         "E5f" => e5f(),
         "E5g" => e5g(),
+        "E7a" => e7a(),
+        "E7b" => e7b(),
         "E6a" => e6a(),
         "E6d" => e6d(),
         "E6s" => e6s(),
@@ -1105,7 +1107,7 @@ fn e5d() {
 
 fn e5e() {
     use mill_core::mac::bodies::BodyFlow;
-    use mill_core::mac::lubrication::{links, model_forces, remove_grid_normal};
+    use mill_core::mac::lubrication::{links, model_forces};
     use mill_core::mac::staggered::Disc;
     use mill_core::mac::verify::disc_pair_squeeze_force;
     let (a, nu, u) = (0.05, 1.0, 0.01);
@@ -1149,8 +1151,7 @@ fn e5e() {
             }
             let exact = disc_pair_squeeze_force(a, h, u, nu);
             let lk = links(&[(-c, 0.0), (c, 0.0)], &[a, a], 0.5, dx, nu);
-            let mut forces = vec![(fx, 0.0), (-fx, 0.0)];
-            remove_grid_normal(&mut forces, &lk);
+            let forces = vec![(fx, 0.0), (-fx, 0.0)];
             let model = model_forces(&lk, &[(u, 0.0), (-u, 0.0)]);
             let blended = -(forces[0].0 + model[0].0);
             println!(
@@ -1428,4 +1429,135 @@ fn e6s() {
     for (r, v) in ring {
         println!("ring r={r:.3} max|u|={v:.2e}");
     }
+}
+
+/// E7a: resolved drag of one translating disc versus d/dx (exact eccentric Stokes reference),
+/// for several sub-cell positions of the disc.
+fn e7a() {
+    println!(
+        "E7a disc a = 0.05 translating in the drum (R = 0.5), nu = 1, U = 0.01, frozen position"
+    );
+    println!(
+        "{:>5} {:>6} {:>9} {:>9} {:>9} {:>9}",
+        "n", "d/dx", "mean err", "min err", "max err", "spread"
+    );
+    let (a, nu, u0) = (0.05, 1.0, 0.01);
+    for n in [352usize, 176, 88, 44, 22, 11] {
+        let dx = 1.1 / n as f64;
+        let mut errs = Vec::new();
+        for k in 0..8 {
+            let x0 = 0.0123 + (k as f64 / 8.0) * dx;
+            let r = verify_moving_disc(n, a, x0, u0, 0.0, nu, 0.5, 0.01, false);
+            let reference = eccentric_squeeze_force(a, 0.5, x0, u0, nu);
+            errs.push(100.0 * (r.drag_mean / reference - 1.0));
+        }
+        let mean = errs.iter().sum::<f64>() / errs.len() as f64;
+        let lo = errs.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = errs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        println!(
+            "{n:>5} {:>6.1} {mean:>8.2}% {lo:>8.2}% {hi:>8.2}% {:>8.2}%",
+            2.0 * a / dx,
+            hi - lo
+        );
+    }
+}
+
+/// E7b: a cluster of 20 discs settling in Stokes flow (same geometry at every resolution);
+/// `--n` sets the grid, the table gives the cluster speed and spread versus d/dx.
+fn e7b() {
+    use mill_core::mac::bodies::{Body, BodyFlow, BodyStiffness};
+    use mill_core::mac::staggered::Disc;
+    use std::f64::consts::PI;
+    let args: Vec<String> = std::env::args().collect();
+    let get = |key: &str, default: f64| {
+        args.iter()
+            .position(|a| a == key)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let n = get("--n", 110.0) as usize;
+    let nu = get("--nu", 1.0);
+    let t_end = get("--t", 0.3);
+    let (a, rho, g) = (0.04, 2.0, 50.0);
+    let dx = 1.1 / n as f64;
+    // 20 hexagonal-lattice sites closest to the centre, spacing 2.4 a.
+    let pitch = 2.4 * a;
+    let mut sites: Vec<(f64, f64)> = Vec::new();
+    for j in -4i32..=4 {
+        for i in -4i32..=4 {
+            sites.push((
+                pitch * (i as f64 + 0.5 * (j & 1) as f64) + 0.0137,
+                pitch * 0.866_025_4 * j as f64 - 0.0091,
+            ));
+        }
+    }
+    sites.sort_by(|p, q| (p.0 * p.0 + p.1 * p.1).total_cmp(&(q.0 * q.0 + q.1 * q.1)));
+    let count = get("--m", 20.0) as usize;
+    sites.truncate(count);
+    let mass = rho * PI * a * a;
+    let mut bodies: Vec<Body> = sites
+        .iter()
+        .map(|&(x, y)| Body {
+            disc: Disc {
+                cx: x,
+                cy: y,
+                r: a,
+                ux: 0.0,
+                uy: 0.0,
+                omega: 0.0,
+            },
+            mass,
+            inertia: 0.5 * mass * a * a,
+            accel: (0.0, 0.0),
+        })
+        .collect();
+    let force = (rho - 1.0) * PI * a * a * g;
+    let ext = vec![(0.0, -force, 0.0); count];
+    let c0 = mill_core::mac::verify::stokes_annulus_drag(a, 0.5, 1.0, nu);
+    let setup = vec![
+        BodyStiffness {
+            added_mass: PI * a * a,
+            drag_stiffness: c0,
+            spin_stiffness: 4.0 * PI * nu * a * a,
+        };
+        count
+    ];
+    let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
+    let dt = get("--dt", 0.005);
+    println!(
+        "E7b disc cluster a = {a} (d/dx = {:.1}), nu = {nu}, rho_s = {rho}, force {force:.4} each, dt = {dt}",
+        2.0 * a / dx
+    );
+    println!(
+        "{:>7} {:>12} {:>12} {:>9} {:>6}",
+        "t", "mean vy", "mean vx", "spread", "iters"
+    );
+    let start = Instant::now();
+    let steps = (t_end / dt).round() as usize;
+    let report = (steps / 6).max(1);
+    let mut total_iters = 0usize;
+    for s in 1..=steps {
+        let info = bf.step_coupled_many(&mut bodies, &ext, &setup, dt, 1e-3, 40);
+        total_iters += info.iterations;
+        if s % report == 0 || s == steps {
+            let m = bodies.len() as f64;
+            let vy = bodies.iter().map(|b| b.disc.uy).sum::<f64>() / m;
+            let vx = bodies.iter().map(|b| b.disc.ux).sum::<f64>() / m;
+            let sp = (bodies.iter().map(|b| (b.disc.uy - vy).powi(2)).sum::<f64>() / m).sqrt();
+            println!(
+                "{:>7.3} {:>12.5e} {:>12.3e} {:>9.2e} {:>6}",
+                s as f64 * dt,
+                vy,
+                vx,
+                sp,
+                info.iterations
+            );
+        }
+    }
+    println!(
+        "n={n} mean iterations {:.1}, {:.1} s",
+        total_iters as f64 / steps as f64,
+        start.elapsed().as_secs_f64()
+    );
 }
