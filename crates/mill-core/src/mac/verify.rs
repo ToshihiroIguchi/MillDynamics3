@@ -2237,3 +2237,205 @@ pub fn verify_free_spin(
         iters / steps as f64,
     )
 }
+
+use super::rheology::HerschelBulkley;
+
+/// Analytic steady Herschel-Bulkley flow between a rotating inner cylinder `r1` (angular speed
+/// `omega`) and a fixed outer cylinder `r2` (kinematic units): the torque constant
+/// `C = r^2 tau_rtheta` (torque per unit density = `2 pi C`), the yield radius (`r2` if the whole
+/// gap flows) and the angular velocity profile `w(r)` (zero in the plug).
+pub struct HbAnnulus {
+    pub c: f64,
+    pub r_yield: f64,
+    law: HerschelBulkley,
+    r1: f64,
+}
+
+impl HbAnnulus {
+    pub fn new(law: HerschelBulkley, r1: f64, r2: f64, omega: f64) -> Self {
+        let rate = |c: f64, r: f64| ((c / (r * r) - law.tau_y).max(0.0) / law.k).powf(1.0 / law.n);
+        let r_y = |c: f64| {
+            if law.tau_y > 0.0 {
+                (c / law.tau_y).sqrt().min(r2)
+            } else {
+                r2
+            }
+        };
+        let spin = |c: f64| {
+            let top = r_y(c);
+            if top <= r1 {
+                return 0.0;
+            }
+            let m = 4000;
+            let h = (top - r1) / m as f64;
+            let f = |r: f64| rate(c, r) / r;
+            let mut s = f(r1) + f(top);
+            for k in 1..m {
+                s += f(r1 + k as f64 * h) * if k % 2 == 1 { 4.0 } else { 2.0 };
+            }
+            s * h / 3.0
+        };
+        let (mut lo, mut hi) = (law.tau_y * r1 * r1, 1.0);
+        while spin(hi) < omega {
+            hi *= 2.0;
+        }
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if spin(mid) < omega {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let c = 0.5 * (lo + hi);
+        Self {
+            c,
+            r_yield: r_y(c),
+            law,
+            r1,
+        }
+    }
+
+    /// Angular velocity at radius `r`.
+    pub fn angular_velocity(&self, r: f64) -> f64 {
+        if r >= self.r_yield {
+            return 0.0;
+        }
+        let (c, law) = (self.c, self.law);
+        let f = |s: f64| ((c / (s * s) - law.tau_y).max(0.0) / law.k).powf(1.0 / law.n) / s;
+        let m = 2000;
+        let h = (self.r_yield - r) / m as f64;
+        let mut s = f(r) + f(self.r_yield);
+        for k in 1..m {
+            s += f(r + k as f64 * h) * if k % 2 == 1 { 4.0 } else { 2.0 };
+        }
+        let _ = self.r1;
+        s * h / 3.0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CouetteHb {
+    pub steps: usize,
+    /// Reference constant `C = r^2 tau` and yield radius.
+    pub c_exact: f64,
+    pub r_yield_exact: f64,
+    /// Largest velocity error over `omega r1`.
+    pub u_err: f64,
+    /// Mean and largest relative deviation of `r^2 tau_rtheta` (from the multiplier) from `C`
+    /// over the gap, excluding 4 cells at each wall.
+    pub c_mean_err: f64,
+    pub c_max_err: f64,
+    /// Largest speed in the exact plug region.
+    pub plug_speed: f64,
+}
+
+/// Herschel-Bulkley annular Couette flow (inner disc `r1 = 0.25` at 1 rad/s, outer wall
+/// `r2 = 0.5` fixed) with augmentation `r`: starts from the exact profile (`from_rest = false`)
+/// or from rest, integrates to `t_end`, and compares with the analytic solution.
+pub fn verify_couette_hb(
+    n: usize,
+    law: HerschelBulkley,
+    r_aug: f64,
+    t_end: f64,
+    cfl: f64,
+    from_rest: bool,
+) -> CouetteHb {
+    let (r1, r2, omega) = (0.25, 0.5, 1.0);
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        let r = (x * x + y * y).sqrt();
+        (r - r2).max(r1 - r)
+    });
+    let reference = HbAnnulus::new(law, r1, r2, omega);
+    let exact = |x: f64, y: f64| {
+        let r = (x * x + y * y).sqrt();
+        let w = reference.angular_velocity(r);
+        (-w * y, w * x)
+    };
+    let wall = move |x: f64, y: f64| {
+        if (x * x + y * y).sqrt() < 0.5 * (r1 + r2) {
+            (-omega * y, omega * x)
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    let mut flow = StaggeredFlow::new(&sm, 1.0, wall);
+    flow.set_rheology(law, r_aug);
+    flow.stokes = true;
+    if from_rest {
+        flow.set_velocity(|_, _| (0.0, 0.0));
+    } else {
+        flow.set_velocity(exact);
+    }
+    let dx = sm.dx();
+    let dt = cfl * dx / (omega * r1);
+    let steps = (t_end / dt).ceil() as usize;
+    let dt = t_end / steps as f64;
+    for _ in 0..steps {
+        flow.step(dt);
+    }
+    let mut emax = 0.0f64;
+    let mut plug = 0.0f64;
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            if sm.gu.fluid[c] {
+                let (x, y) = sm.gu.centre(i, j);
+                emax = emax.max((flow.u[c] - exact(x, y).0).abs());
+                if (x * x + y * y).sqrt() > reference.r_yield + 2.0 * dx {
+                    plug = plug.max(flow.u[c].abs());
+                }
+            }
+            if sm.gv.fluid[c] {
+                let (x, y) = sm.gv.centre(i, j);
+                emax = emax.max((flow.v[c] - exact(x, y).1).abs());
+            }
+        }
+    }
+    let rh = flow.rheo.as_ref().expect("rheology set");
+    // Ring-averaged torque constant: in a plug the stress is not unique (any self-equilibrated
+    // field is admissible), only its azimuthal mean `r^2 tau_rtheta = C` is fixed.
+    let bins = ((r2 - r1) / dx) as usize;
+    let mut ring = vec![(0.0f64, 0.0f64); bins];
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            if !sm.gu.fluid[c] {
+                continue;
+            }
+            let (x, y) = sm.gu.centre(i, j);
+            let r = (x * x + y * y).sqrt();
+            let b = ((r - r1) / dx) as usize;
+            if r < r1 || b >= bins {
+                continue;
+            }
+            // Stress at the u node: the two adjacent corners (xy) and cells (xx, yy).
+            let xy = 0.5 * (rh.lam_k[c][1] + rh.lam_k[c + n][1]);
+            let xx = 0.5 * (rh.lam_c[c][0] + rh.lam_c[c - 1][0]);
+            let yy = 0.5 * (rh.lam_c[c][2] + rh.lam_c[c - 1][2]);
+            let tau = (-y * x * xx + (x * x - y * y) * xy + x * y * yy) / (r * r);
+            ring[b].0 += -r * r * tau;
+            ring[b].1 += 1.0;
+        }
+    }
+    let (mut sum, mut cnt, mut worst) = (0.0, 0.0, 0.0f64);
+    for (k, &(total, count)) in ring.iter().enumerate() {
+        let r = r1 + (k as f64 + 0.5) * dx;
+        if count == 0.0 || r < r1 + 4.0 * dx || r > r2 - 4.0 * dx {
+            continue;
+        }
+        let err = total / count / reference.c - 1.0;
+        sum += err;
+        cnt += 1.0;
+        worst = worst.max(err.abs());
+    }
+    CouetteHb {
+        steps,
+        c_exact: reference.c,
+        r_yield_exact: reference.r_yield,
+        u_err: emax / (omega * r1),
+        c_mean_err: sum / cnt,
+        c_max_err: worst,
+        plug_speed: plug,
+    }
+}

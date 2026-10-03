@@ -56,6 +56,7 @@ fn main() {
         "E5e" => e5e(),
         "E5f" => e5f(),
         "E5g" => e5g(),
+        "E6a" => e6a(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -1297,6 +1298,65 @@ fn e5g() {
                 lead,
                 -fy / lead
             );
+        }
+    }
+}
+
+fn e6a() {
+    use mill_core::mac::rheology::HerschelBulkley;
+    use mill_core::mac::verify::verify_couette_hb;
+    let t_end: f64 = std::env::args()
+        .skip_while(|a| a != "--t")
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.5);
+    let rest = std::env::args().any(|a| a == "--rest");
+    let only: Option<String> = std::env::args().skip_while(|a| a != "--only").nth(1);
+    let rs: Vec<f64> = std::env::args()
+        .skip_while(|a| a != "--r")
+        .nth(1)
+        .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_else(|| vec![0.02, 0.08]);
+    println!(
+        "E6a annular Couette r1=0.25 (1 rad/s) r2=0.5, from {}, t={t_end}",
+        if rest { "rest" } else { "the exact profile" }
+    );
+    println!(
+        "{:>12} {:>5} {:>6} {:>8} {:>8} {:>9} {:>10} {:>10} {:>10}",
+        "law", "n", "r", "C", "r_yield", "u_err", "C_mean", "C_max", "plug"
+    );
+    let laws = [
+        ("newton", HerschelBulkley::newtonian(0.01)),
+        ("bingham", HerschelBulkley::bingham(0.03, 0.01)),
+        (
+            "powerlaw.6",
+            HerschelBulkley {
+                tau_y: 0.0,
+                k: 0.01,
+                n: 0.6,
+            },
+        ),
+        (
+            "hb.6",
+            HerschelBulkley {
+                tau_y: 0.03,
+                k: 0.01,
+                n: 0.6,
+            },
+        ),
+    ];
+    for (name, law) in laws {
+        if only.as_deref().is_some_and(|o| o != name) {
+            continue;
+        }
+        for n in [64usize, 128] {
+            for &r in &rs {
+                let res = verify_couette_hb(n, law, r, t_end, 0.5, rest);
+                println!(
+                    "{name:>12} {n:>5} {r:>6} {:>8.5} {:>8.4} {:>9.2e} {:>10.2e} {:>10.2e} {:>10.2e}",
+                    res.c_exact, res.r_yield_exact, res.u_err, res.c_mean_err, res.c_max_err, res.plug_speed
+                );
+            }
         }
     }
 }

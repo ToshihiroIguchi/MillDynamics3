@@ -19,6 +19,7 @@
 use super::flow::Mesh;
 use super::levelset::{weno5, LevelSet};
 use super::multigrid::PoissonSolver;
+use super::rheology::{alg2_update, HerschelBulkley, Sym};
 use super::viscous::{FluidGrid, Helmholtz, Link};
 
 /// Geometry of the staggered discretisation.
@@ -614,6 +615,23 @@ pub struct StaggeredFlow<'a> {
     pub robust_surface: bool,
     /// Smagorinsky constant `C_s` of the explicit eddy viscosity (0 = off).
     pub smagorinsky: f64,
+    /// Yield-stress / non-Newtonian fluid (augmented Lagrangian), see [`Self::set_rheology`].
+    pub rheo: Option<Rheo>,
+}
+
+/// Augmented-Lagrangian state of a generalised-Newtonian fluid: the multiplier (the stress) and
+/// the stress excess `S = lam - r d`. Normal components live at the cell centres (`*_c`, entries
+/// `xx` and `yy`), the shear component at the cell corners (`*_k`, entry `xy`; corner `c` is the
+/// lower-left corner of cell `c`), like the compact MAC discretisation of the strain rate.
+#[derive(Clone)]
+pub struct Rheo {
+    pub law: HerschelBulkley,
+    /// Augmentation parameter `r` (the implicit viscosity is `nu = r / 2`).
+    pub r: f64,
+    pub lam_c: Vec<Sym>,
+    pub lam_k: Vec<Sym>,
+    pub s_c: Vec<Sym>,
+    pub s_k: Vec<Sym>,
 }
 
 /// Everything of a [`StaggeredFlow`] except the mesh and the wall-velocity closure: moving
@@ -633,6 +651,7 @@ pub struct FlowState {
     pub stress_free_flux: bool,
     pub robust_surface: bool,
     pub smagorinsky: f64,
+    pub rheo: Option<Rheo>,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -652,6 +671,7 @@ impl<'a> StaggeredFlow<'a> {
             stress_free_flux: self.stress_free_flux,
             robust_surface: self.robust_surface,
             smagorinsky: self.smagorinsky,
+            rheo: self.rheo,
         }
     }
 
@@ -674,6 +694,7 @@ impl<'a> StaggeredFlow<'a> {
         flow.stress_free_flux = state.stress_free_flux;
         flow.robust_surface = state.robust_surface;
         flow.smagorinsky = state.smagorinsky;
+        flow.rheo = state.rheo;
         if let Some(mut surf) = state.surface {
             surf.ls.weight = sm.cell_fraction.clone();
             flow.liq = Liquid::from_level_set(sm, &surf.ls.psi, surf.theta_min);
@@ -783,6 +804,7 @@ impl<'a> StaggeredFlow<'a> {
             stress_free_flux: true,
             robust_surface: false,
             smagorinsky: 0.0,
+            rheo: None,
         }
     }
 
@@ -1315,6 +1337,7 @@ impl<'a> StaggeredFlow<'a> {
             (vec![0.0; nn], vec![0.0; nn])
         };
         let (gpx, gpy) = self.pressure_gradient(&self.p);
+        let (sdu, sdv) = self.stress_divergence();
         let bdf2 = matches!(&self.prev, Some(pv) if (pv.dt - dt).abs() < 1e-14 * dt);
         let sigma = if bdf2 { 1.5 } else { 1.0 } / (self.nu * dt);
         let (gx, gy) = gravity.unwrap_or((0.0, 0.0));
@@ -1330,8 +1353,8 @@ impl<'a> StaggeredFlow<'a> {
                 ),
                 _ => (au[c], av[c], self.u[c], self.v[c]),
             };
-            su[c] = (-eu - gpx[c] + gx + eddy_u[c]) / self.nu;
-            sv[c] = (-ev - gpy[c] + gy + eddy_v[c]) / self.nu;
+            su[c] = (-eu - gpx[c] + gx + eddy_u[c] + sdu[c]) / self.nu;
+            sv[c] = (-ev - gpy[c] + gy + eddy_v[c] + sdv[c]) / self.nu;
             xu[c] = pu;
             xv[c] = pv;
         }
@@ -1373,6 +1396,7 @@ impl<'a> StaggeredFlow<'a> {
         }
         self.prev = Some(old);
         self.time += dt;
+        self.update_rheology();
         if let (Some(surf), Some(v0)) = (&self.surface, start_velocity) {
             let v1 = surf.cell_velocity(&self.u, &self.v);
             let uc: Vec<f64> = v0.0.iter().zip(&v1.0).map(|(a, b)| 0.5 * (a + b)).collect();
@@ -1384,6 +1408,107 @@ impl<'a> StaggeredFlow<'a> {
                 surf.ls.correct_volume(surf.volume0);
             }
         }
+    }
+
+    /// Switches to the generalised-Newtonian fluid `law`, treated by the augmented-Lagrangian
+    /// method with augmentation `r` (kinematic, 1/s * m^2/s... i.e. twice the implicit viscosity):
+    /// the velocity solves use the constant viscosity `r / 2` and the explicit divergence of the
+    /// stress excess `S = lam - r d`; `lam` and `d` are updated once per step from the new
+    /// velocity (time-lagged ALG2, exact at a steady state).
+    pub fn set_rheology(&mut self, law: HerschelBulkley, r: f64) {
+        let nn = self.sm.n() * self.sm.n();
+        self.nu = 0.5 * r;
+        self.helm = None;
+        self.rheo = Some(Rheo {
+            law,
+            r,
+            lam_c: vec![[0.0; 3]; nn],
+            lam_k: vec![[0.0; 3]; nn],
+            s_c: vec![[0.0; 3]; nn],
+            s_k: vec![[0.0; 3]; nn],
+        });
+    }
+
+    /// ALG2 d- and lambda-steps from the current velocity. Strain rates are compact MAC
+    /// differences: `Dxx`, `Dyy` at cell centres, `Dxy` at corners; the missing components of the
+    /// tensor at each location are the averages of the four surrounding values.
+    fn update_rheology(&mut self) {
+        let Some(mut rh) = self.rheo.take() else {
+            return;
+        };
+        let n = self.sm.n();
+        let inv = 1.0 / self.sm.dx();
+        let (u, v) = (&self.u, &self.v);
+        let (lu, lv) = (&self.liq.layer_u, &self.liq.layer_v);
+        let known = |c: usize, cu: &[usize], cv: &[usize]| {
+            cu.iter().all(|&k| lu[c + k] < 255) && cv.iter().all(|&k| lv[c + k] < 255)
+        };
+        let mut dxx = vec![f64::NAN; n * n];
+        let mut dyy = vec![f64::NAN; n * n];
+        let mut dxy = vec![f64::NAN; n * n];
+        for j in 1..n - 1 {
+            for i in 1..n - 1 {
+                let c = i + n * j;
+                if known(c, &[0, 1], &[0, n]) {
+                    dxx[c] = (u[c + 1] - u[c]) * inv;
+                    dyy[c] = (v[c + n] - v[c]) * inv;
+                }
+                if known(c, &[0], &[0]) && lu[c - n] < 255 && lv[c - 1] < 255 {
+                    dxy[c] = 0.5 * ((u[c] - u[c - n]) + (v[c] - v[c - 1])) * inv;
+                }
+            }
+        }
+        let (law, r) = (rh.law, rh.r);
+        for j in 2..n - 2 {
+            for i in 2..n - 2 {
+                let c = i + n * j;
+                // Cell centre: normal components of the cell, shear from the four corners.
+                let cxy = [dxy[c], dxy[c + 1], dxy[c + n], dxy[c + n + 1]];
+                if dxx[c].is_finite() && cxy.iter().all(|x| x.is_finite()) {
+                    let d = [dxx[c], 0.25 * cxy.iter().sum::<f64>(), dyy[c]];
+                    (rh.lam_c[c], rh.s_c[c]) = alg2_update(&law, r, &rh.lam_c[c], &d);
+                }
+                // Corner: shear of the corner, normal components from the four cells around it.
+                let cells = [c - n - 1, c - n, c - 1, c];
+                if dxy[c].is_finite()
+                    && cells
+                        .iter()
+                        .all(|&k| dxx[k].is_finite() && dyy[k].is_finite())
+                {
+                    let mx = 0.25 * cells.iter().map(|&k| dxx[k]).sum::<f64>();
+                    let my = 0.25 * cells.iter().map(|&k| dyy[k]).sum::<f64>();
+                    let d = [mx, dxy[c], my];
+                    (rh.lam_k[c], rh.s_k[c]) = alg2_update(&law, r, &rh.lam_k[c], &d);
+                }
+            }
+        }
+        self.rheo = Some(rh);
+    }
+
+    /// Divergence of the stress excess `S` at the active `u` and `v` nodes (zero without a
+    /// rheology): compact differences of the cell-centre normal and corner shear values.
+    fn stress_divergence(&self) -> (Vec<f64>, Vec<f64>) {
+        let n = self.sm.n();
+        let mut au = vec![0.0; n * n];
+        let mut av = vec![0.0; n * n];
+        let Some(rh) = &self.rheo else {
+            return (au, av);
+        };
+        let inv = 1.0 / self.sm.dx();
+        for j in 2..n - 2 {
+            for i in 2..n - 2 {
+                let c = i + n * j;
+                if self.liq.active_u[c] {
+                    au[c] =
+                        (rh.s_c[c][0] - rh.s_c[c - 1][0] + rh.s_k[c + n][1] - rh.s_k[c][1]) * inv;
+                }
+                if self.liq.active_v[c] {
+                    av[c] =
+                        (rh.s_k[c + 1][1] - rh.s_k[c][1] + rh.s_c[c][2] - rh.s_c[c - n][2]) * inv;
+                }
+            }
+        }
+        (au, av)
     }
 
     /// Wall load on the fluid summed over links by tag, from the two face lattices.

@@ -179,3 +179,14 @@ fn squeeze_references_and_model_agree() {
         );
     }
 }
+
+#[test]
+fn bingham_annular_couette_holds_analytic_profile() {
+    use super::rheology::HerschelBulkley;
+    use super::verify::verify_couette_hb;
+    let law = HerschelBulkley::bingham(0.03, 0.01);
+    let res = verify_couette_hb(64, law, 0.02, 3.0, 0.5, false);
+    assert!(res.r_yield_exact < 0.5, "case must contain a plug");
+    assert!(res.u_err < 0.03, "velocity error {}", res.u_err);
+    assert!(res.c_mean_err.abs() < 0.01, "torque error {}", res.c_mean_err);
+}
