@@ -481,6 +481,8 @@ pub struct StaggeredFlow<'a> {
     pub upwind: bool,
     /// Fifth-order WENO upwind advection (needs three ghost layers; overrides `upwind`).
     pub weno: bool,
+    /// Drop the convective term (creeping flow; diagnostic).
+    pub stokes: bool,
     /// Stress-free free-surface condition for the viscous solve (else zero normal derivative of
     /// each Cartesian component).
     pub stress_free_flux: bool,
@@ -521,6 +523,7 @@ impl<'a> StaggeredFlow<'a> {
             surface: None,
             upwind: false,
             weno: false,
+            stokes: false,
             stress_free_flux: true,
             robust_surface: false,
             smagorinsky: 0.0,
@@ -905,6 +908,9 @@ impl<'a> StaggeredFlow<'a> {
     fn advection(&self, u: &[f64], v: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let sm = self.sm;
         let n = sm.n();
+        if self.stokes {
+            return (vec![0.0; n * n], vec![0.0; n * n]);
+        }
         let dx = sm.dx();
         let (inv2, inv6) = (0.5 / dx, 1.0 / (6.0 * dx));
         let air_u: Vec<bool> = (0..n * n)
@@ -1146,5 +1152,47 @@ impl<'a> StaggeredFlow<'a> {
                 torque: a.torque + b.torque,
             })
             .collect()
+    }
+
+    /// Physical torque of the fluid on a drum wall that rotates rigidly at `omega` about the
+    /// origin, per unit density: the wall shear of the flow *relative* to the rigid rotation
+    /// (zero Dirichlet value at the wall, where the component-wise and the full-stress tractions
+    /// coincide). The rigid-rotation part of the component-wise traction, `-2 nu omega A`, is an
+    /// artefact of the vector Laplacian and would swamp a partially wetted wall. Only liquid nodes
+    /// count. Pressure exerts no torque on a circle.
+    pub fn rotating_wall_torque(&self, omega: f64) -> f64 {
+        let sm = self.sm;
+        let n = sm.n();
+        let mut ur = self.u.clone();
+        let mut vr = self.v.clone();
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                let (_, y) = sm.gu.centre(i, j);
+                ur[c] = self.u[c] + omega * y;
+                let (x, _) = sm.gv.centre(i, j);
+                vr[c] = self.v[c] - omega * x;
+            }
+        }
+        let zero = vec![0.0; n * n];
+        let lu = sm.gu.wall_load_masked(
+            &ur,
+            &zero,
+            self.nu,
+            |_, _| (0.0, 0.0),
+            |_, _| 0,
+            1,
+            &self.liq.active_u,
+        );
+        let lv = sm.gv.wall_load_masked(
+            &zero,
+            &vr,
+            self.nu,
+            |_, _| (0.0, 0.0),
+            |_, _| 0,
+            1,
+            &self.liq.active_v,
+        );
+        lu[0].torque + lv[0].torque
     }
 }

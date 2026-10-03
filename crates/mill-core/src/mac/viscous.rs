@@ -200,9 +200,25 @@ impl FluidGrid {
         tag: impl Fn(f64, f64) -> usize,
         tags: usize,
     ) -> Vec<WallLoad> {
+        self.wall_load_masked(u, v, mu, bv, tag, tags, &self.fluid)
+    }
+
+    /// As [`FluidGrid::wall_load`], summing only the nodes with `active[c]` (the liquid nodes of
+    /// a free-surface flow; air nodes carry extrapolated values).
+    #[allow(clippy::too_many_arguments)]
+    pub fn wall_load_masked(
+        &self,
+        u: &[f64],
+        v: &[f64],
+        mu: f64,
+        bv: impl Fn(f64, f64) -> (f64, f64),
+        tag: impl Fn(f64, f64) -> usize,
+        tags: usize,
+        active: &[bool],
+    ) -> Vec<WallLoad> {
         let mut out = vec![WallLoad::default(); tags];
         for c in 0..self.n * self.n {
-            if !self.fluid[c] {
+            if !self.fluid[c] || !active[c] {
                 continue;
             }
             for link in &self.links[c] {

@@ -1405,3 +1405,140 @@ pub fn verify_rigid_ring(
         volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
     }
 }
+
+/// Result of the viscous-slurry drum run.
+#[derive(Clone, Debug)]
+pub struct DrumSlurry {
+    pub steps: usize,
+    /// Mean wall torque on the liquid per unit density over the measured revolutions.
+    pub torque: f64,
+    /// Mean gravity balance `A g x_cm` over the same window (equals the wall torque in steady
+    /// state because the pressure exerts no torque on a circular wall).
+    pub torque_gravity: f64,
+    /// RMS deviation of the instantaneous wall torque from its mean, relative to the mean.
+    pub torque_ripple: f64,
+    /// Mean wall torque of each measured revolution.
+    pub per_rev: Vec<f64>,
+    pub volume_drift: f64,
+}
+
+/// Viscous liquid in a horizontally rotating drum of radius 0.5 filled to the area fraction
+/// `fill`, started from rest with a flat surface. `omega` is the wall rotation rate; the run
+/// settles for `settle` revolutions and then averages the wall torque over `measure` revolutions.
+pub fn verify_drum_slurry(
+    n: usize,
+    nu: f64,
+    omega: f64,
+    fill: f64,
+    settle: f64,
+    measure: f64,
+) -> DrumSlurry {
+    let (radius, g) = (0.5, 9.81);
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
+    let mut flow = StaggeredFlow::new(&sm, nu, move |x, y| (-omega * y, omega * x));
+    flow.upwind = true;
+    flow.weno = true;
+    flow.stokes = std::env::var("E3_STOKES").is_ok();
+    flow.robust_surface = std::env::var("E3_ROBUST").is_ok();
+    // Uniform ring of the requested area fraction, started in rigid rotation (a flat pool meeting
+    // the moving wall would create a contact-line singularity that stretches a sub-grid sheet).
+    let r_i = radius * (1.0 - fill).sqrt();
+    let ls = FsLevelSet::new(n, 0.55, move |x, y| r_i - (x * x + y * y).sqrt());
+    flow.enable_free_surface(ls, (0.0, -g));
+    flow.set_velocity(move |x, y| {
+        if (x * x + y * y).sqrt() > r_i - 0.02 {
+            (-omega * y, omega * x)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let dx = sm.dx();
+    let dt = 0.2 * dx / (omega * radius);
+    let rev = 2.0 * PI / omega;
+    let per_rev_steps = (rev / dt).ceil() as usize;
+    let dt = rev / per_rev_steps as f64;
+    let settle_steps = (settle * per_rev_steps as f64).round() as usize;
+    for k in 0..settle_steps {
+        flow.step(dt);
+        if std::env::var("E3_DUMP").is_ok() {
+            let mut best = (0.0f64, 0usize, 0usize);
+            for j in 0..n {
+                for i in 0..n {
+                    let c = i + n * j;
+                    if flow.liq.active_u[c] && flow.u[c].abs() > best.0 {
+                        best = (flow.u[c].abs(), i, j);
+                    }
+                }
+            }
+            if best.0 > 1.45 {
+                let (bi, bj) = (best.1, best.2);
+                println!("EXCEED at step {k}: |u|={:.4} node ({bi},{bj})", best.0);
+                let ls = &flow.surface.as_ref().unwrap().ls;
+                for j in (bj.saturating_sub(3)..(bj + 4).min(n)).rev() {
+                    let mut row = String::new();
+                    for i in bi.saturating_sub(3)..(bi + 4).min(n) {
+                        let c = i + n * j;
+                        row += &format!(
+                            "{}{:>7.3}({:>5.2}) ",
+                            if flow.liq.active_u[c] { '*' } else { ' ' },
+                            flow.u[c],
+                            ls.psi[c] / sm.dx()
+                        );
+                    }
+                    println!("{row}");
+                }
+                break;
+            }
+        }
+        if std::env::var("E3_TRACE").is_ok() && k % 25 == 0 {
+            let mut best = (0.0f64, 0.0f64, 0.0f64);
+            for j in 0..n {
+                for i in 0..n {
+                    let c = i + n * j;
+                    if flow.liq.active_u[c] && flow.u[c].abs() > best.0 {
+                        let (x, y) = sm.gu.centre(i, j);
+                        best = (flow.u[c].abs(), x, y);
+                    }
+                    if flow.liq.active_v[c] && flow.v[c].abs() > best.0 {
+                        let (x, y) = sm.gv.centre(i, j);
+                        best = (flow.v[c].abs(), x, y);
+                    }
+                }
+            }
+            let vol = flow.surface.as_ref().map(|s| s.ls.volume()).unwrap_or(0.0);
+            println!(
+                "step {k} liquid max {:.4} at ({:.3},{:.3}) vol {vol:.6}",
+                best.0, best.1, best.2
+            );
+        }
+    }
+    let measure_revs = measure.round().max(1.0) as usize;
+    let mut series = Vec::new();
+    let mut gravity = Vec::new();
+    let mut per_rev = Vec::new();
+    for _ in 0..measure_revs {
+        let mut sum = 0.0;
+        for _ in 0..per_rev_steps {
+            flow.step(dt);
+            let t = flow.rotating_wall_torque(omega);
+            sum += t;
+            series.push(t);
+            let surf = flow.surface.as_ref().expect("free surface enabled");
+            gravity.push(surf.volume0 * g * surf.ls.centroid_x());
+        }
+        per_rev.push(sum / per_rev_steps as f64);
+    }
+    let count = series.len() as f64;
+    let mean = series.iter().sum::<f64>() / count;
+    let ripple = (series.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / count).sqrt()
+        / mean.abs().max(1e-30);
+    let surf = flow.surface.as_ref().expect("free surface enabled");
+    DrumSlurry {
+        steps: settle_steps + series.len(),
+        torque: mean,
+        torque_gravity: gravity.iter().sum::<f64>() / count,
+        torque_ripple: ripple,
+        per_rev,
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
+    }
+}

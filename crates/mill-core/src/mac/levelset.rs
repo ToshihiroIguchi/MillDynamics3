@@ -268,6 +268,25 @@ impl LevelSet {
             * self.dx
     }
 
+    /// Horizontal centroid of the liquid (same smoothed volume measure as `volume`).
+    pub fn centroid_x(&self) -> f64 {
+        let eps = 1.5 * self.dx;
+        let (mut m, mut mx) = (0.0, 0.0);
+        for j in 0..self.n {
+            for i in 0..self.n {
+                let c = i + self.n * j;
+                let w = self.weight[c] * (1.0 - Self::smooth_heaviside(self.psi[c], eps));
+                m += w;
+                mx += w * (-self.half + (i as f64 + 0.5) * self.dx);
+            }
+        }
+        if m > 0.0 {
+            mx / m
+        } else {
+            0.0
+        }
+    }
+
     /// Interface length `sum delta(psi) |grad psi| dx^2` (for the volume correction).
     fn perimeter(&self) -> f64 {
         let n = self.n;

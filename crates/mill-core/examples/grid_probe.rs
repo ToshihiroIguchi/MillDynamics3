@@ -3,9 +3,10 @@
 
 use mill_core::mac::verify::{
     diagnose_couette_mac, track_sheet_growth, verify_couette_mac_scheme, verify_couette_ns,
-    verify_couette_stokes, verify_dam_break, verify_levelset_rotation, verify_manufactured,
-    verify_rigid_ring, verify_rimming, verify_sloshing_circle, verify_sloshing_rect, verify_spinup,
-    verify_spinup_mac, verify_still_pool, verify_translation, verify_wall_impact,
+    verify_couette_stokes, verify_dam_break, verify_drum_slurry, verify_levelset_rotation,
+    verify_manufactured, verify_rigid_ring, verify_rimming, verify_sloshing_circle,
+    verify_sloshing_rect, verify_spinup, verify_spinup_mac, verify_still_pool, verify_translation,
+    verify_wall_impact,
 };
 use std::time::Instant;
 
@@ -34,6 +35,7 @@ fn main() {
         "E2g" => e2g(),
         "E2d" => e2d(),
         "E2r" => e2r(),
+        "E3s" => e3s(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -443,6 +445,60 @@ fn e2r() {
                     r.surface_err_cells, r.velocity_err, r.pressure_err
                 );
             }
+        }
+    }
+}
+
+fn e3s() {
+    println!("E3s viscous slurry in a rotating drum, R = 0.5, Fr = omega^2 R / g = 0.36, fill 0.3");
+    println!(
+        "{:>6} {:>5} {:>6} {:>11} {:>11} {:>8} {:>8} {:>9}  per-rev torque",
+        "Re", "n", "steps", "torque", "gravity", "g-bal", "ripple", "volume"
+    );
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |name: &str, default: f64| -> f64 {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let settle = arg("--settle", 2.0);
+    let fill = arg("--fill", 0.3);
+    let measure = arg("--measure", 2.0);
+    let omega = (0.36 * 9.81 / 0.5f64).sqrt();
+    let res: Vec<f64> = match args
+        .iter()
+        .position(|a| a == "--re")
+        .and_then(|i| args.get(i + 1))
+    {
+        Some(v) => v.split(',').filter_map(|x| x.parse().ok()).collect(),
+        None => vec![0.2],
+    };
+    let ns: Vec<usize> = match args
+        .iter()
+        .position(|a| a == "--n")
+        .and_then(|i| args.get(i + 1))
+    {
+        Some(v) => v.split(',').filter_map(|x| x.parse().ok()).collect(),
+        None => vec![64, 128],
+    };
+    for re in res {
+        let nu = omega * 0.25 / re;
+        for &n in &ns {
+            let t0 = Instant::now();
+            let r = verify_drum_slurry(n, nu, omega, fill, settle, measure);
+            println!(
+                "{re:>6} {n:>5} {:>6} {:>11.6} {:>11.6} {:>7.2}% {:>7.2}% {:>8.4}%  {:.5?}  ({:.0?})",
+                r.steps,
+                r.torque,
+                r.torque_gravity,
+                100.0 * (r.torque / r.torque_gravity - 1.0),
+                100.0 * r.torque_ripple,
+                100.0 * r.volume_drift,
+                r.per_rev,
+                t0.elapsed()
+            );
         }
     }
 }

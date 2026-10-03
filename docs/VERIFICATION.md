@@ -480,3 +480,15 @@ Conclusion: the free-surface solver is accurate and stable for smooth flows (hol
 sloshing at n <= 128, rigid ring), but not for jets/splashes, and there is a conflict between
 consistency and robustness at the free surface that two targeted fixes did not resolve. Stop rule:
 reported to the user; no building on top.
+
+## E3s — viscous slurry in a rotating drum (first trial, 2026-10-03, gate NOT met)
+
+Probe: `grid_probe --exp E3s --re <list> --n <list> --fill f`. Drum R = 0.5, Fr = 0.36, fill 0.3, ring start in rigid rotation.
+
+- A flat pool started against the moving wall blows up at every n, Re and fill (also without convection, also with
+  `robust_surface`): the no-slip contact line drags a sub-grid sheet. A uniform ring start is stable.
+- `wall_load` summed air nodes and carried the vector-Laplacian artefact `2 nu Omega A`; replaced by
+  `StaggeredFlow::rotating_wall_torque` (shear of the flow relative to the rigid wall rotation, liquid nodes only).
+- Re = 20: wall torque 0.2257 / 0.2119 / 0.2171 at n = 64 / 128 / 256 (spread +-3 %, not monotone); the exact steady balance
+  `torque = A g x_cm` is missed by 9 / 17 / 11 %. Re = 0.2: the rigid-rotation torque is ~0 and the traction noise
+  (about nu * velocity error / dx) exceeds it.
