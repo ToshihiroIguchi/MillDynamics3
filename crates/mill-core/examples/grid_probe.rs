@@ -1151,7 +1151,7 @@ fn e5e() {
             }
             let exact = disc_pair_squeeze_force(a, h, u, nu);
             let lk = links(&[(-c, 0.0), (c, 0.0)], &[a, a], 0.5, dx, nu);
-            let forces = vec![(fx, 0.0), (-fx, 0.0)];
+            let forces = [(fx, 0.0), (-fx, 0.0)];
             let model = model_forces(&lk, &[(u, 0.0), (-u, 0.0)]);
             let blended = -(forces[0].0 + model[0].0);
             println!(
