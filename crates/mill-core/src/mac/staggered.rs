@@ -258,6 +258,22 @@ pub struct Surface {
     pub reinit_iterations: usize,
 }
 
+impl Surface {
+    /// Cell-centre velocity for advecting the level set: face averages within a band of the
+    /// interface, zero elsewhere.
+    fn cell_velocity(&self, u: &[f64], v: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let (mut uc, mut vc) = self.ls.centre_velocity(u, v);
+        let band = 4.0 * self.ls.dx;
+        for c in 0..uc.len() {
+            if self.ls.psi[c].abs() > band {
+                uc[c] = 0.0;
+                vc[c] = 0.0;
+            }
+        }
+        (uc, vc)
+    }
+}
+
 /// Smallest interface fraction used by the ghost-fluid pressure condition.
 const THETA_MIN_FS: f64 = 1e-2;
 
@@ -392,6 +408,8 @@ pub struct StaggeredFlow<'a> {
     helm: Option<(f64, Helmholtz<'a>, Helmholtz<'a>)>,
     pub liq: Liquid,
     pub surface: Option<Surface>,
+    /// Third-order upwind-biased advection instead of central differences.
+    pub upwind: bool,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -419,6 +437,7 @@ impl<'a> StaggeredFlow<'a> {
             helm: None,
             liq,
             surface: None,
+            upwind: false,
         }
     }
 
@@ -583,23 +602,34 @@ impl<'a> StaggeredFlow<'a> {
     }
 
     /// Convective terms `(U . grad) u` at `u` nodes and `(U . grad) v` at `v` nodes, for active
-    /// nodes (zero elsewhere); central differences on the extended fields.
+    /// nodes (zero elsewhere): central differences, or third-order upwind-biased ones when
+    /// `upwind` is set; the other velocity component is the 4-face average.
     fn advection(&self, u: &[f64], v: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let sm = self.sm;
         let n = sm.n();
-        let inv = 1.0 / (2.0 * sm.dx());
+        let inv2 = 1.0 / (2.0 * sm.dx());
+        let inv6 = 1.0 / (6.0 * sm.dx());
+        let d = |q: &[f64], c: usize, stride: usize, vel: f64| -> f64 {
+            if !self.upwind {
+                (q[c + stride] - q[c - stride]) * inv2
+            } else if vel > 0.0 {
+                (q[c - 2 * stride] - 6.0 * q[c - stride] + 3.0 * q[c] + 2.0 * q[c + stride]) * inv6
+            } else {
+                -(q[c + 2 * stride] - 6.0 * q[c + stride] + 3.0 * q[c] + 2.0 * q[c - stride]) * inv6
+            }
+        };
         let mut au = vec![0.0; n * n];
         let mut av = vec![0.0; n * n];
-        for j in 1..n - 1 {
-            for i in 1..n - 1 {
+        for j in 2..n - 2 {
+            for i in 2..n - 2 {
                 let c = i + n * j;
                 if self.liq.active_u[c] {
                     let vb = 0.25 * (v[c - 1] + v[c] + v[c - 1 + n] + v[c + n]);
-                    au[c] = u[c] * (u[c + 1] - u[c - 1]) * inv + vb * (u[c + n] - u[c - n]) * inv;
+                    au[c] = u[c] * d(u, c, 1, u[c]) + vb * d(u, c, n, vb);
                 }
                 if self.liq.active_v[c] {
                     let ub = 0.25 * (u[c - n] + u[c + 1 - n] + u[c] + u[c + 1]);
-                    av[c] = ub * (v[c + 1] - v[c - 1]) * inv + v[c] * (v[c + n] - v[c - n]) * inv;
+                    av[c] = ub * d(v, c, 1, ub) + v[c] * d(v, c, n, v[c]);
                 }
             }
         }
@@ -661,8 +691,15 @@ impl<'a> StaggeredFlow<'a> {
         let n = sm.n();
         let nn = n * n;
         let gravity = self.surface.as_ref().map(|s| s.gravity);
+        // Predictor: the interface position at the end of the step, advected with the old velocity,
+        // defines the topology used by the pressure condition (keeps the coupling second order).
+        let mut start_velocity = None;
         if let Some(surf) = &self.surface {
-            self.liq = Liquid::from_level_set(sm, &surf.ls.psi);
+            let vel = surf.cell_velocity(&self.u, &self.v);
+            let mut pred = surf.ls.clone();
+            pred.advect(&vel.0, &vel.1, dt);
+            self.liq = Liquid::from_level_set(sm, &pred.psi);
+            start_velocity = Some(vel);
             self.poisson = self.liq.poisson(sm);
             self.helm = None;
             for c in 0..nn {
@@ -725,15 +762,11 @@ impl<'a> StaggeredFlow<'a> {
         }
         self.prev = Some(old);
         self.time += dt;
-        if let Some(surf) = &mut self.surface {
-            let (mut uc, mut vc) = surf.ls.centre_velocity(&self.u, &self.v);
-            let band = 4.0 * surf.ls.dx;
-            for c in 0..nn {
-                if surf.ls.psi[c].abs() > band {
-                    uc[c] = 0.0;
-                    vc[c] = 0.0;
-                }
-            }
+        if let (Some(surf), Some(v0)) = (&self.surface, start_velocity) {
+            let v1 = surf.cell_velocity(&self.u, &self.v);
+            let uc: Vec<f64> = v0.0.iter().zip(&v1.0).map(|(a, b)| 0.5 * (a + b)).collect();
+            let vc: Vec<f64> = v0.1.iter().zip(&v1.1).map(|(a, b)| 0.5 * (a + b)).collect();
+            let surf = self.surface.as_mut().expect("free surface enabled");
             surf.ls.advect(&uc, &vc, dt);
             surf.ls.reinitialize(surf.reinit_iterations);
             surf.ls.correct_volume(surf.volume0);

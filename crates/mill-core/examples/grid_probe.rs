@@ -2,9 +2,9 @@
 //! grid_probe -- --exp E0`.
 
 use mill_core::mac::verify::{
-    diagnose_couette_mac, verify_couette_mac, verify_couette_ns, verify_couette_stokes,
-    verify_levelset_rotation, verify_manufactured, verify_spinup, verify_spinup_mac,
-    verify_still_pool,
+    diagnose_couette_mac, verify_couette_mac_scheme, verify_couette_ns, verify_couette_stokes,
+    verify_levelset_rotation, verify_manufactured, verify_sloshing_circle, verify_sloshing_rect,
+    verify_spinup, verify_spinup_mac, verify_still_pool,
 };
 use std::time::Instant;
 
@@ -24,6 +24,9 @@ fn main() {
         "R2s" => r2s(),
         "E2ls" => e2ls(),
         "E2a" => e2a(),
+        "E2ref" => e2ref(),
+        "E2b" => e2b(),
+        "E2bc" => e2bc(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -145,6 +148,8 @@ fn r2() {
         .skip(1)
         .map(|a| a.parse().unwrap())
         .collect();
+    let upwind = std::env::args().any(|a| a == "--upwind");
+    println!("advection: {}", if upwind { "upwind3" } else { "central" });
     let ns = if ns.is_empty() {
         vec![64, 128, 256]
     } else {
@@ -154,7 +159,7 @@ fn r2() {
         let nu = 0.25 * 0.25 / re;
         for &n in &ns {
             let t = Instant::now();
-            let r = verify_couette_mac(n, nu, 10.0, 0.25);
+            let r = verify_couette_mac_scheme(n, nu, 10.0, 0.25, upwind);
             println!(
                 "{n:>5} {re:>7} {:>6} {:>10.2e} {:>11.3}% {:>11.3}% {:>10.1e} {:>9.2}",
                 r.steps,
@@ -238,5 +243,75 @@ fn e2a() {
                 t.elapsed().as_secs_f64() * 1e3 / r.steps as f64
             );
         }
+    }
+}
+
+fn e2ref() {
+    println!("Half-full circular container: K R = omega^2 R / g, Rayleigh-Ritz (harmonic basis)");
+    for terms in [8usize, 12, 16, 20] {
+        let k = mill_core::mac::reference::half_disc_sloshing(terms, 4);
+        println!("terms={terms:<3} {k:.6?}");
+    }
+}
+
+fn e2b() {
+    use mill_core::mac::reference::rectangular_sloshing_omega;
+    println!("E2b small-amplitude sloshing, rectangular tank 1.0 x depth 0.5, amp 2 mm, nu = 1e-6");
+    let omega_ref = rectangular_sloshing_omega(9.81, 1.0, 0.5, 1);
+    println!(
+        "reference omega = {omega_ref:.5} rad/s (T = {:.4} s)",
+        2.0 * std::f64::consts::PI / omega_ref
+    );
+    println!(
+        "{:>5} {:>8} {:>6} {:>10} {:>10} {:>10} {:>10}",
+        "n", "scheme", "steps", "omega", "err", "damping", "volume"
+    );
+    let upwind_only = std::env::args().any(|a| a == "--upwind");
+    for (n, nu) in [
+        (64usize, 1e-6),
+        (128, 1e-6),
+        (128, 1e-4),
+        (128, 1e-3),
+        (128, 1e-2),
+    ] {
+        for upwind in [false, true] {
+            if upwind_only && !upwind {
+                continue;
+            }
+            let r = verify_sloshing_rect(n, 1.0, 0.5, 0.002, nu, 3.0, upwind);
+            print!("nu={nu:<6}");
+            println!(
+                "{n:>5} {:>8} {:>6} {:>10.5} {:>9.3}% {:>10.4} {:>9.4}%",
+                if upwind { "upwind3" } else { "central" },
+                r.steps,
+                r.omega,
+                100.0 * (r.omega / omega_ref - 1.0),
+                r.damping,
+                100.0 * r.volume_drift
+            );
+        }
+    }
+}
+
+fn e2bc() {
+    let k = mill_core::mac::reference::half_disc_sloshing(16, 1)[0];
+    let omega_ref = (k * 9.81 / 0.5).sqrt();
+    println!(
+        "E2b half-full circular drum R = 0.5, tilt amp 25 mm, Ritz K R = {k:.6}, omega = {omega_ref:.5} rad/s"
+    );
+    println!(
+        "{:>5} {:>8} {:>8} {:>6} {:>10} {:>10} {:>10}",
+        "n", "nu", "steps", "scheme", "omega", "err", "damping"
+    );
+    for (n, nu) in [(64usize, 1e-6), (128, 1e-6), (256, 1e-6), (128, 1e-3)] {
+        let r = verify_sloshing_circle(n, 0.025, nu, 3.0, true);
+        println!(
+            "{n:>5} {nu:>8} {:>8} {:>6} {:>10.5} {:>9.3}% {:>10.4}",
+            r.steps,
+            "upwind3",
+            r.omega,
+            100.0 * (r.omega / omega_ref - 1.0),
+            r.damping
+        );
     }
 }

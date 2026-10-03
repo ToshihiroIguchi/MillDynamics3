@@ -8,6 +8,7 @@ pub mod embedded;
 pub mod flow;
 pub mod levelset;
 pub mod multigrid;
+pub mod reference;
 pub mod staggered;
 pub mod verify;
 pub mod viscous;

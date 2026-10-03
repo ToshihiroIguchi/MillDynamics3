@@ -298,6 +298,17 @@ use super::staggered::{StaggeredFlow, StaggeredMesh};
 
 /// Same hold test as [`verify_couette_ns`] on the staggered face-velocity scheme.
 pub fn verify_couette_mac(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs {
+    verify_couette_mac_scheme(n, nu, t_end, cfl, false)
+}
+
+/// Hold test with a choice of advection scheme (`upwind`: third-order upwind-biased).
+pub fn verify_couette_mac_scheme(
+    n: usize,
+    nu: f64,
+    t_end: f64,
+    cfl: f64,
+    upwind: bool,
+) -> CouetteNs {
     let (r1, r2, omega) = (0.25, 0.5, 1.0);
     let sm = StaggeredMesh::new(n, 0.55, |x, y| {
         let r = (x * x + y * y).sqrt();
@@ -317,6 +328,7 @@ pub fn verify_couette_mac(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs 
         }
     };
     let mut flow = StaggeredFlow::new(&sm, nu, wall);
+    flow.upwind = upwind;
     flow.set_velocity(exact);
     let dx = sm.dx();
     let dt = cfl * dx / (omega * r1);
@@ -641,5 +653,174 @@ pub fn verify_still_pool(n: usize, level: f64, nu: f64, t_end: f64) -> StillPool
         pressure_err: perr / (g * depth),
         volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
         level_err_cells: lerr,
+    }
+}
+
+/// Result of a sloshing run.
+#[derive(Clone, Copy, Debug)]
+pub struct Sloshing {
+    pub steps: usize,
+    /// Measured angular frequency (rad/s) from zero crossings of the first-mode amplitude.
+    pub omega: f64,
+    /// Amplitude decay rate (1/s) from successive extrema (0 if fewer than two found).
+    pub damping: f64,
+    pub volume_drift: f64,
+}
+
+/// Interface height of the column `i` by linear interpolation of `psi` (highest crossing).
+fn column_height(ls: &FsLevelSet, i: usize) -> Option<f64> {
+    let n = ls.n;
+    let mut best = None;
+    for j in 0..n - 1 {
+        let (a, b) = (ls.psi[i + n * j], ls.psi[i + n * (j + 1)]);
+        if a < 0.0 && b >= 0.0 {
+            let (_, ya) = ls.centre(i, j);
+            best = Some(ya + ls.dx * a / (a - b));
+        }
+    }
+    best
+}
+
+/// Extracts `(omega, damping)` from a time series `(t, a)` by zero crossings and extrema.
+fn oscillation(series: &[(f64, f64)]) -> (f64, f64) {
+    let mut crossings = Vec::new();
+    for w in series.windows(2) {
+        if w[0].1 * w[1].1 < 0.0 {
+            crossings.push(w[0].0 + (w[1].0 - w[0].0) * w[0].1 / (w[0].1 - w[1].1));
+        }
+    }
+    let omega = if crossings.len() >= 2 {
+        PI * (crossings.len() - 1) as f64 / (crossings[crossings.len() - 1] - crossings[0])
+    } else {
+        f64::NAN
+    };
+    // Peak amplitudes between crossings.
+    let mut peaks: Vec<(f64, f64)> = Vec::new();
+    let mut best = (0.0, 0.0f64);
+    let mut next = 0;
+    for &(t, a) in series {
+        while next < crossings.len() && t > crossings[next] {
+            if best.1 > 0.0 {
+                peaks.push(best);
+            }
+            best = (0.0, 0.0);
+            next += 1;
+        }
+        if a.abs() > best.1 {
+            best = (t, a.abs());
+        }
+    }
+    let damping = if peaks.len() >= 2 {
+        let (a, b) = (peaks[0], peaks[peaks.len() - 1]);
+        (a.1 / b.1).ln() / (b.0 - a.0)
+    } else {
+        0.0
+    };
+    (omega, damping)
+}
+
+/// Small-amplitude first-mode sloshing in a rectangular tank `[-width/2, width/2] x [-width/2,
+/// -width/2 + height]` filled to `depth` above the floor, started from a cosine interface of
+/// amplitude `amp` at rest. Returns the measured frequency and decay.
+pub fn verify_sloshing_rect(
+    n: usize,
+    width: f64,
+    depth: f64,
+    amp: f64,
+    nu: f64,
+    t_end: f64,
+    upwind: bool,
+) -> Sloshing {
+    let g = 9.81;
+    let floor = -0.5 * width;
+    let top = floor + 0.95;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        (x.abs() - 0.5 * width).max(floor - y).max(y - top)
+    });
+    let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
+    flow.upwind = upwind;
+    let k = PI / width;
+    let level = floor + depth;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| {
+        y - level - amp * (k * (x + 0.5 * width)).cos()
+    });
+    flow.enable_free_surface(ls, (0.0, -g));
+    let dx = sm.dx();
+    let dt0 = 0.3 * dx / (g * depth).sqrt();
+    let steps = (t_end / dt0).ceil() as usize;
+    let dt = t_end / steps as f64;
+    let mut series = Vec::with_capacity(steps);
+    let columns: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let (x, _) = flow.surface.as_ref().unwrap().ls.centre(i, 0);
+            x.abs() < 0.5 * width - 2.0 * dx
+        })
+        .collect();
+    for s in 0..steps {
+        flow.step(dt);
+        let ls = &flow.surface.as_ref().unwrap().ls;
+        // First-mode amplitude: projection of the interface elevation on cos(k (x + w/2)).
+        let mut a = 0.0;
+        for &i in &columns {
+            if let Some(h) = column_height(ls, i) {
+                let (x, _) = ls.centre(i, 0);
+                a += (h - level) * (k * (x + 0.5 * width)).cos() * dx;
+            }
+        }
+        series.push(((s + 1) as f64 * dt, a * 2.0 / width));
+    }
+    let (omega, damping) = oscillation(&series);
+    let surf = flow.surface.as_ref().unwrap();
+    Sloshing {
+        steps,
+        omega,
+        damping,
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
+    }
+}
+
+/// Small-amplitude sloshing of a half-full circular drum (radius 0.5) started from a tilted flat
+/// interface `y = amp x / R` at rest; the tilt amplitude `sum eta x / sum x^2 * R` is followed in
+/// time. The reference frequency is `sqrt(K g / R)` with `K R` from
+/// [`super::reference::half_disc_sloshing`].
+pub fn verify_sloshing_circle(n: usize, amp: f64, nu: f64, t_end: f64, upwind: bool) -> Sloshing {
+    let radius = 0.5;
+    let g = 9.81;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
+    let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
+    flow.upwind = upwind;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| y - amp * x / radius);
+    flow.enable_free_surface(ls, (0.0, -g));
+    let dx = sm.dx();
+    let dt0 = 0.3 * dx / (g * radius).sqrt();
+    let steps = (t_end / dt0).ceil() as usize;
+    let dt = t_end / steps as f64;
+    let columns: Vec<usize> = (0..n)
+        .filter(|&i| {
+            let (x, _) = flow.surface.as_ref().unwrap().ls.centre(i, 0);
+            x.abs() < radius - 2.0 * dx
+        })
+        .collect();
+    let mut series = Vec::with_capacity(steps);
+    for s in 0..steps {
+        flow.step(dt);
+        let ls = &flow.surface.as_ref().unwrap().ls;
+        let (mut num, mut den) = (0.0, 0.0);
+        for &i in &columns {
+            if let Some(h) = column_height(ls, i) {
+                let (x, _) = ls.centre(i, 0);
+                num += h * x;
+                den += x * x;
+            }
+        }
+        series.push(((s + 1) as f64 * dt, num / den * radius));
+    }
+    let (omega, damping) = oscillation(&series);
+    let surf = flow.surface.as_ref().unwrap();
+    Sloshing {
+        steps,
+        omega,
+        damping,
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
     }
 }
