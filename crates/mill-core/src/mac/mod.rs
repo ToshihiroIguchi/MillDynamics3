@@ -6,6 +6,7 @@
 
 pub mod embedded;
 pub mod flow;
+pub mod levelset;
 pub mod multigrid;
 pub mod staggered;
 pub mod verify;

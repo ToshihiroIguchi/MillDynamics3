@@ -3,7 +3,7 @@
 
 use mill_core::mac::verify::{
     diagnose_couette_mac, verify_couette_mac, verify_couette_ns, verify_couette_stokes,
-    verify_manufactured, verify_spinup, verify_spinup_mac,
+    verify_levelset_rotation, verify_manufactured, verify_spinup, verify_spinup_mac,
 };
 use std::time::Instant;
 
@@ -21,6 +21,7 @@ fn main() {
         "R2" => r2(),
         "R2d" => r2d(),
         "R2s" => r2s(),
+        "E2ls" => e2ls(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -192,5 +193,25 @@ fn r2s() {
             );
         }
         println!();
+    }
+}
+
+fn e2ls() {
+    println!("E2 level set: rigid rotation, 1 revolution (WENO5 + RK3, reinit every 2 steps)");
+    println!(
+        "{:>9} {:>5} {:>6} {:>12} {:>14}",
+        "shape", "n", "steps", "L1 shape", "volume drift"
+    );
+    for (slotted, every) in [(false, 0usize), (false, 2), (true, 0), (true, 2)] {
+        for n in [64usize, 128, 256] {
+            let r = verify_levelset_rotation(n, slotted, 1.0, every);
+            println!(
+                "{:>9} {n:>5} {:>6} {:>12.3e} {:>13.4}%  reinit_every={every}",
+                if slotted { "zalesak" } else { "disc" },
+                r.steps,
+                r.shape_l1,
+                100.0 * r.volume_drift
+            );
+        }
     }
 }

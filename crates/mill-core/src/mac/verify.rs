@@ -497,3 +497,74 @@ pub fn verify_spinup_mac(n: usize, dt_nu: f64, checkpoints: &[f64]) -> Vec<SpinU
     }
     out
 }
+
+use super::levelset::LevelSet;
+
+/// Result of the rigid-rotation level-set test.
+#[derive(Clone, Copy, Debug)]
+pub struct LevelSetRotation {
+    pub steps: usize,
+    /// `sum |indicator - exact indicator| dx^2 / area` after the rotation.
+    pub shape_l1: f64,
+    /// `V_end / V_0 - 1` without the volume correction.
+    pub volume_drift: f64,
+}
+
+/// Rotates a disc (or the slotted Zalesak disc) rigidly about the origin for `revs` revolutions
+/// (period 1) with WENO5/TVD-RK3 advection and reinitialisation every 2 steps; compares the final
+/// shape with the initial one.
+pub fn verify_levelset_rotation(
+    n: usize,
+    slotted: bool,
+    revs: f64,
+    reinit_every: usize,
+) -> LevelSetRotation {
+    let half = 0.55;
+    let disc = |x: f64, y: f64| (x * x + (y - 0.25) * (y - 0.25)).sqrt() - 0.15;
+    let shape = move |x: f64, y: f64| {
+        if slotted {
+            let slot = (x.abs() - 0.025).max((y - 0.225).abs() - 0.125);
+            disc(x, y).max(-slot)
+        } else {
+            disc(x, y)
+        }
+    };
+    let mut ls = LevelSet::new(n, half, shape);
+    ls.reinitialize(20);
+    let v0 = ls.volume();
+    let omega = 2.0 * PI;
+    let dx = ls.dx;
+    let mut uc = vec![0.0; n * n];
+    let mut vc = vec![0.0; n * n];
+    for j in 0..n {
+        for i in 0..n {
+            let (x, y) = ls.centre(i, j);
+            uc[i + n * j] = -omega * y;
+            vc[i + n * j] = omega * x;
+        }
+    }
+    let dt0 = 0.5 * dx / (omega * 0.5);
+    let steps = (revs / dt0).ceil() as usize;
+    let dt = revs / steps as f64;
+    for s in 0..steps {
+        ls.advect(&uc, &vc, dt);
+        if reinit_every > 0 && s % reinit_every == reinit_every - 1 {
+            ls.reinitialize(2);
+        }
+    }
+    let mut diff = 0.0;
+    let mut area = 0.0;
+    for j in 0..n {
+        for i in 0..n {
+            let (x, y) = ls.centre(i, j);
+            let exact = shape(x, y) < 0.0;
+            diff += f64::from(u8::from(exact != (ls.psi[i + n * j] < 0.0)));
+            area += f64::from(u8::from(exact));
+        }
+    }
+    LevelSetRotation {
+        steps,
+        shape_l1: diff / area,
+        volume_drift: ls.volume() / v0 - 1.0,
+    }
+}
