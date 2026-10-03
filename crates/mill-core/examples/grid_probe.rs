@@ -3,9 +3,9 @@
 
 use mill_core::mac::verify::{
     diagnose_couette_mac, track_sheet_growth, verify_couette_mac_scheme, verify_couette_ns,
-    verify_couette_stokes, verify_dam_break, verify_levelset_rotation, verify_rigid_ring, verify_manufactured,
-    verify_rimming, verify_sloshing_circle, verify_sloshing_rect, verify_spinup, verify_spinup_mac,
-    verify_still_pool, verify_translation, verify_wall_impact,
+    verify_couette_stokes, verify_dam_break, verify_levelset_rotation, verify_manufactured,
+    verify_rigid_ring, verify_rimming, verify_sloshing_circle, verify_sloshing_rect, verify_spinup,
+    verify_spinup_mac, verify_still_pool, verify_translation, verify_wall_impact,
 };
 use std::time::Instant;
 
@@ -418,31 +418,31 @@ fn e2d() {
 
 fn e2r() {
     use mill_core::mac::staggered::StaggeredFlow;
-    println!("E2r rigidly rotating liquid ring (exact steady free surface), R = 0.5, r_i = 0.3, nu = 1e-3, t = 1 s, Omega = 8, g = 0");
+    println!("E2r rigidly rotating liquid ring (exact steady free surface), R = 0.5, r_i = 0.3, nu = 1e-3, t = 1 s");
+    println!(
+        "{:>16} {:>9} {:>4} {:>11} {:>10} {:>10}",
+        "variant", "Omega,g", "n", "surface/dx", "velocity", "pressure"
+    );
     type Cfg = Box<dyn Fn(&mut StaggeredFlow)>;
     let variants: Vec<(&str, Cfg)> = vec![
-        ("default", Box::new(|_| {})),
-        ("no stress-free flux", Box::new(|f| f.stress_free_flux = false)),
-        ("no zero-grad rule", Box::new(|f| f.zero_gradient_rule = false)),
+        ("default (weno)", Box::new(|f| f.weno = true)),
         (
-            "unbounded + no rule",
+            "robust surface",
             Box::new(|f| {
-                f.bound_slack = 1e9;
-                f.zero_gradient_rule = false;
+                f.weno = true;
+                f.robust_surface = true;
             }),
-        ),
-        (
-            "unbounded only",
-            Box::new(|f| f.bound_slack = 1e9),
         ),
     ];
     for (name, cfg) in &variants {
-        for n in [64usize, 128] {
-            let r = verify_rigid_ring(n, 8.0, 0.3, 1e-3, 1.0, 0.0, cfg.as_ref());
-            println!(
-                "{name:>22} n={n:<4} surface/dx={:.3} velocity={:.2e} pressure={:.2e}",
-                r.surface_err_cells, r.velocity_err, r.pressure_err
-            );
+        for (omega, g) in [(8.0f64, 0.0f64), (8.0, 9.81)] {
+            for n in [64usize, 128, 256] {
+                let r = verify_rigid_ring(n, omega, 0.3, 1e-3, 1.0, g, cfg.as_ref());
+                println!(
+                    "{name:>16} {omega:>4},{g:<4} {n:>4} {:>11.3} {:>10.2e} {:>10.2e}",
+                    r.surface_err_cells, r.velocity_err, r.pressure_err
+                );
+            }
         }
     }
 }

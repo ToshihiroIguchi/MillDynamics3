@@ -426,3 +426,57 @@ E2b | E2bc | E2c | E2ref`.
   and Poisson convergence (9-13 iterations) are all excluded; larger viscosity delays it (nu =
   1e-4: T = 3.06, 1e-3: 3.9) and nu = 1e-2 is stable. It is a grid-scale inviscid instability of
   sheets thinner than ~2 cells, not yet understood. Open: (d) rimming flow was not run.
+
+### E2 — free-surface investigation, final state of 2026-10-03 (gate NOT met)
+
+Root causes found, in the order they were found:
+
+1. **Interface coupling energy injection** (fixed): predictor/corrector level-set coupling (see above).
+2. **Trailing-edge instability of liquid sheets** (fixed): a sheet translating uniformly at 2.5 m/s
+   (`grid_probe --exp E2g`, exact solution, no gravity) grew a transverse velocity exponentially from
+   round-off at its rear end (1e-8 -> 0.24 m/s in 0.1 s). Cause: the air-side ghost values are
+   extrapolated quadratically along the grid lines from the liquid; an upwind stencil whose upstream
+   node is such a ghost feeds the extrapolation back with a gain above one. Fifth-order WENO
+   upwind advection (`StaggeredFlow::weno`) removes it consistently (max |v| 4e-7 at all sheet
+   thicknesses 0.6 .. 3 dx and n = 64 / 128) and keeps the hold test (Re 1000, n = 128: torque
+   -0.36 %).
+3. **Free-surface viscous condition** (fixed, now consistent): a zero normal derivative of each
+   Cartesian velocity component is not the stress-free condition; it gave an error that does not
+   shrink with the grid (7.5 % of omega R for a rigidly rotating ring at n = 64 and 128, nu = 1e-3).
+   The dropped links now carry the stress-free normal derivative built from the lagged velocity
+   gradient (`StaggeredFlow::free_surface_flux`).
+4. **Stability tricks that break consistency** (found, not used by default): clamping the air-side
+   ghost values to the range of the liquid data and zeroing the advective gradient when the
+   upstream node is air (`robust_surface`) keeps splashing flows alive (wall impact stable for 14 of
+   15 cases, dam break stable to T = 4 at n = 64 .. 256) but leaves a 4-6 % velocity error along the
+   surface of a rotating liquid ring that does not decrease with n (rigid ring, g = 0: 6.5e-2 /
+   5.2e-2 / 3.9e-2 at n = 64 / 128 / 256); without them the same test gives 2.5e-3 / 5.0e-4 at
+   n = 64 / 128 (order 2.3).
+
+Validation test added: `grid_probe --exp E2r`, liquid ring in rigid rotation (exact for g = 0 only:
+with gravity the circle centred at (0, g/omega^2) is not invariant under the rotation, so it is not a
+steady solution; an earlier version of the test used it and its failures were a test error).
+
+State of the four E2 items with the default (consistent) configuration, n = 64 / 128 / 256:
+* (a) still pool: met (unchanged).
+* (b) sloshing: rectangular tank frequency error -0.036 / -0.019 %; half-full circle
+  -0.10 / -0.04 % at n = 64 / 128 but **63 % at n = 256** (the run goes wrong: the interface jitters
+  at the free-surface nodes; the ring test shows the same: velocity error 1.05e-2 at n = 256).
+* (c) dam break: **fails at wall impact** for all n (blow-up between T = 3 and 3.5) with the default
+  scheme; before the impact the front positions agree to 1-2 % across n. With `robust_surface` it
+  survives.
+* (d) rimming flow (Moffatt): the film shows Rayleigh-Taylor-type ripples on the upper half that grow
+  with resolution (max error 16 % at n = 128, 45 % at n = 256); the thin-film solution is not a
+  stable reference without surface tension.
+* wall impact of a liquid layer (`--exp E2w`, 15 cases): fails in all but one case with the default
+  scheme: the jet that climbs the wall gains energy in the convective step (advective power
+  +0.0006 .. +0.006 per step, exponential, `explicit_power` diagnostic during development); smaller
+  time steps make it worse (it is a per-step instability, not a CFL one); eddy viscosity
+  (Smagorinsky C_s up to 0.17), first-order time stepping, no predictor, other theta limits,
+  bounding of newly wetted nodes and a normal (Aslam) continuation of the velocity into the air
+  only delay it.
+
+Conclusion: the free-surface solver is accurate and stable for smooth flows (hold, still pool,
+sloshing at n <= 128, rigid ring), but not for jets/splashes, and there is a conflict between
+consistency and robustness at the free surface that two targeted fixes did not resolve. Stop rule:
+reported to the user; no building on top.

@@ -17,7 +17,7 @@
 //! Units: density 1 (pressure is `p / rho`), kinematic viscosity `nu`.
 
 use super::flow::Mesh;
-use super::levelset::LevelSet;
+use super::levelset::{weno5, LevelSet};
 use super::multigrid::PoissonSolver;
 use super::viscous::{FluidGrid, Helmholtz, Link};
 
@@ -159,8 +159,8 @@ impl StaggeredMesh {
         }
         let open_u: Vec<bool> = au.iter().map(|&a| a > 0.0).collect();
         let open_v: Vec<bool> = av.iter().map(|&a| a > 0.0).collect();
-        let layer_u = ghost_layers(&gu.fluid, &open_u, n, 2);
-        let layer_v = ghost_layers(&gv.fluid, &open_v, n, 2);
+        let layer_u = ghost_layers(&gu.fluid, &open_u, n, 3);
+        let layer_v = ghost_layers(&gv.fluid, &open_v, n, 3);
         Self {
             mesh,
             gu,
@@ -479,14 +479,18 @@ pub struct StaggeredFlow<'a> {
     pub surface: Option<Surface>,
     /// Third-order upwind-biased advection instead of central differences.
     pub upwind: bool,
-    /// Air-side ghost values stay within this multiple of the range of the liquid data they are
-    /// extrapolated from (0 = clamp to that range).
-    pub bound_slack: f64,
+    /// Fifth-order WENO upwind advection (needs three ghost layers; overrides `upwind`).
+    pub weno: bool,
     /// Stress-free free-surface condition for the viscous solve (else zero normal derivative of
     /// each Cartesian component).
     pub stress_free_flux: bool,
-    /// Zero advective gradient where the upstream node is air.
-    pub zero_gradient_rule: bool,
+    /// Stability over consistency at a free surface: clamp air-side ghost values to the range of
+    /// the liquid data and use a zero advective gradient where the upstream node is air. Splashing
+    /// flows survive (wall jets, thin sheets), but rotating flow along the surface is then
+    /// reproduced only to a few percent that does not shrink with the grid (rigid-ring test).
+    pub robust_surface: bool,
+    /// Smagorinsky constant `C_s` of the explicit eddy viscosity (0 = off).
+    pub smagorinsky: f64,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -516,9 +520,10 @@ impl<'a> StaggeredFlow<'a> {
             liq,
             surface: None,
             upwind: false,
-            bound_slack: 0.0,
+            weno: false,
             stress_free_flux: true,
-            zero_gradient_rule: true,
+            robust_surface: false,
+            smagorinsky: 0.0,
         }
     }
 
@@ -543,21 +548,18 @@ impl<'a> StaggeredFlow<'a> {
         self.helm = None;
     }
 
-    /// Ghost extension of a `u`-lattice field: quadratic extrapolation along the grid; on the air
-    /// side of a free surface the extrapolated value is clamped to the range of the liquid data
-    /// it comes from (`bound_slack` = 0). An unbounded extrapolation fed back through the interface
-    /// velocity and the advection stencils with a gain above one and made thin liquid sheets and
-    /// wall jets blow up; a normal (Aslam) continuation, which is more accurate, did too (see
-    /// docs/VERIFICATION.md, E2).
+    /// Ghost extension of a `u`-lattice field: quadratic extrapolation along the grid lines
+    /// (walls and air side). With `robust_surface` the air-side values are clamped to the range of
+    /// the liquid data they come from.
     fn extend_u(&self, q: &mut [f64]) {
         extend_ordered(q, &self.liq.layer_u, self.sm.n(), &|_| 3, &|c| {
-            (self.sm.gu.fluid[c] && !self.liq.active_u[c]).then_some(self.bound_slack)
+            (self.robust_surface && self.sm.gu.fluid[c] && !self.liq.active_u[c]).then_some(0.0)
         });
     }
 
     fn extend_v(&self, q: &mut [f64]) {
         extend_ordered(q, &self.liq.layer_v, self.sm.n(), &|_| 3, &|c| {
-            (self.sm.gv.fluid[c] && !self.liq.active_v[c]).then_some(self.bound_slack)
+            (self.robust_surface && self.sm.gv.fluid[c] && !self.liq.active_v[c]).then_some(0.0)
         });
     }
 
@@ -692,7 +694,6 @@ impl<'a> StaggeredFlow<'a> {
         let sm = self.sm;
         let n = sm.n();
         let dx = sm.dx();
-        let (u, v) = (&self.u, &self.v);
         let mut fu = vec![0.0; n * n];
         let mut fv = vec![0.0; n * n];
         let dirs: [(f64, f64); 4] = [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)];
@@ -700,35 +701,116 @@ impl<'a> StaggeredFlow<'a> {
             for i in 1..n - 1 {
                 let c = i + n * j;
                 if self.liq.active_u[c] {
-                    // Velocity gradient A[row = component][col = direction] at the u node.
-                    let a = [
-                        [
-                            (u[c + 1] - u[c - 1]) / (2.0 * dx),
-                            (u[c + n] - u[c - n]) / (2.0 * dx),
-                        ],
-                        [
-                            (v[c] + v[c + n] - v[c - 1] - v[c - 1 + n]) / (2.0 * dx),
-                            0.5 * (v[c - 1 + n] - v[c - 1] + v[c + n] - v[c]) / dx,
-                        ],
-                    ];
-                    fu[c] = self.link_flux(&sm.gu, &self.liq.active_u, c, 0, &a, self.liq.normal_u[c], &dirs, dx);
+                    let a = self.gradient_at_u(c);
+                    fu[c] = self.link_flux(
+                        &sm.gu,
+                        &self.liq.active_u,
+                        c,
+                        0,
+                        &a,
+                        self.liq.normal_u[c],
+                        &dirs,
+                        dx,
+                    );
                 }
                 if self.liq.active_v[c] {
-                    let a = [
-                        [
-                            0.5 * (u[c + 1] - u[c] + u[c + 1 - n] - u[c - n]) / dx,
-                            (u[c] + u[c + 1] - u[c - n] - u[c + 1 - n]) / (2.0 * dx),
-                        ],
-                        [
-                            (v[c + 1] - v[c - 1]) / (2.0 * dx),
-                            (v[c + n] - v[c - n]) / (2.0 * dx),
-                        ],
-                    ];
-                    fv[c] = self.link_flux(&sm.gv, &self.liq.active_v, c, 1, &a, self.liq.normal_v[c], &dirs, dx);
+                    let a = self.gradient_at_v(c);
+                    fv[c] = self.link_flux(
+                        &sm.gv,
+                        &self.liq.active_v,
+                        c,
+                        1,
+                        &a,
+                        self.liq.normal_v[c],
+                        &dirs,
+                        dx,
+                    );
                 }
             }
         }
         (fu, fv)
+    }
+
+    /// Velocity gradient `A[component][direction] = d u_i / d x_j` at the `u` node `c`.
+    fn gradient_at_u(&self, c: usize) -> [[f64; 2]; 2] {
+        let n = self.sm.n();
+        let dx = self.sm.dx();
+        let (u, v) = (&self.u, &self.v);
+        [
+            [
+                (u[c + 1] - u[c - 1]) / (2.0 * dx),
+                (u[c + n] - u[c - n]) / (2.0 * dx),
+            ],
+            [
+                (v[c] + v[c + n] - v[c - 1] - v[c - 1 + n]) / (2.0 * dx),
+                0.5 * (v[c - 1 + n] - v[c - 1] + v[c + n] - v[c]) / dx,
+            ],
+        ]
+    }
+
+    /// Same at the `v` node `c`.
+    fn gradient_at_v(&self, c: usize) -> [[f64; 2]; 2] {
+        let n = self.sm.n();
+        let dx = self.sm.dx();
+        let (u, v) = (&self.u, &self.v);
+        [
+            [
+                0.5 * (u[c + 1] - u[c] + u[c + 1 - n] - u[c - n]) / dx,
+                (u[c] + u[c + 1] - u[c - n] - u[c + 1 - n]) / (2.0 * dx),
+            ],
+            [
+                (v[c + 1] - v[c - 1]) / (2.0 * dx),
+                (v[c + n] - v[c - n]) / (2.0 * dx),
+            ],
+        ]
+    }
+
+    /// Smagorinsky eddy-viscosity acceleration `div(nu_t grad u)` (explicit, component-wise,
+    /// `nu_t = (C_s dx)^2 |S|`) at the active nodes; free-surface and wall links carry no flux.
+    fn eddy_acceleration(&self) -> (Vec<f64>, Vec<f64>) {
+        let sm = self.sm;
+        let n = sm.n();
+        let dx = sm.dx();
+        let cs2 = (self.smagorinsky * dx).powi(2);
+        let strain = |a: [[f64; 2]; 2]| {
+            (2.0 * (a[0][0] * a[0][0] + a[1][1] * a[1][1]) + (a[0][1] + a[1][0]).powi(2)).sqrt()
+        };
+        let mut nut_u = vec![0.0; n * n];
+        let mut nut_v = vec![0.0; n * n];
+        for j in 1..n - 1 {
+            for i in 1..n - 1 {
+                let c = i + n * j;
+                if self.liq.active_u[c] {
+                    nut_u[c] = cs2 * strain(self.gradient_at_u(c));
+                }
+                if self.liq.active_v[c] {
+                    nut_v[c] = cs2 * strain(self.gradient_at_v(c));
+                }
+            }
+        }
+        let lap = |q: &[f64], nut: &[f64], active: &[bool], c: usize| -> f64 {
+            let mut s = 0.0;
+            for k in [c - 1, c + 1, c - n, c + n] {
+                if active[k] {
+                    s += 0.5 * (nut[c] + nut[k]) * (q[k] - q[c]);
+                }
+            }
+            s / (dx * dx)
+        };
+        let mut au = vec![0.0; n * n];
+        let mut av = vec![0.0; n * n];
+        for j in 2..n - 2 {
+            for i in 2..n - 2 {
+                let c = i + n * j;
+                if self.liq.active_u[c] {
+                    au[c] = lap(&self.u, &nut_u, &self.liq.active_u, c);
+                }
+                if self.liq.active_v[c] {
+                    av[c] = lap(&self.v, &nut_v, &self.liq.active_v, c);
+                }
+            }
+        }
+        (au, av)
     }
 
     /// Sum over the dropped links of node `c` of `dx * g`, see [`Self::free_surface_flux`].
@@ -763,6 +845,29 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         total
+    }
+
+    /// Kinetic energy with the face masses the projection is orthogonal for: aperture for
+    /// liquid-liquid faces, aperture times the interface fraction for liquid-air faces.
+    pub fn weighted_energy(&self) -> f64 {
+        let sm = self.sm;
+        let n = sm.n();
+        let dx2 = sm.dx() * sm.dx();
+        let mut e = 0.0;
+        for c in 0..n * n {
+            let wu = match self.liq.ku[c] {
+                1 => sm.au[c],
+                2 | 3 => sm.au[c] * self.liq.thu[c],
+                _ => 0.0,
+            };
+            let wv = match self.liq.kv[c] {
+                1 => sm.av[c],
+                2 | 3 => sm.av[c] * self.liq.thv[c],
+                _ => 0.0,
+            };
+            e += 0.5 * dx2 * (wu * self.u[c] * self.u[c] + wv * self.v[c] * self.v[c]);
+        }
+        e
     }
 
     /// Face gradient of a cell field, `(dp/dx at u nodes, dp/dy at v nodes)`; air has `p = 0` at
@@ -809,6 +914,26 @@ impl<'a> StaggeredFlow<'a> {
             .map(|c| sm.gv.fluid[c] && !self.liq.active_v[c])
             .collect();
         let d = |q: &[f64], air: &[bool], c: usize, stride: usize, vel: f64| -> f64 {
+            if self.weno {
+                let dd = |k: usize| (q[k] - q[k - stride]) / dx;
+                return if vel > 0.0 {
+                    weno5(
+                        dd(c - 2 * stride),
+                        dd(c - stride),
+                        dd(c),
+                        dd(c + stride),
+                        dd(c + 2 * stride),
+                    )
+                } else {
+                    weno5(
+                        dd(c + 3 * stride),
+                        dd(c + 2 * stride),
+                        dd(c + stride),
+                        dd(c),
+                        dd(c - stride),
+                    )
+                };
+            }
             if !self.upwind {
                 return (q[c + stride] - q[c - stride]) * inv2;
             }
@@ -817,15 +942,16 @@ impl<'a> StaggeredFlow<'a> {
             } else {
                 (c + stride, c + 2 * stride, c - stride, -1.0)
             };
-            if air[up1] && self.zero_gradient_rule {
+            if air[up1] && self.robust_surface {
                 return 0.0;
             }
             sign * (q[up2] - 6.0 * q[up1] + 3.0 * q[c] + 2.0 * q[dn]) * inv6
         };
         let mut au = vec![0.0; n * n];
         let mut av = vec![0.0; n * n];
-        for j in 2..n - 2 {
-            for i in 2..n - 2 {
+        let margin = if self.weno { 3 } else { 2 };
+        for j in margin..n - margin {
+            for i in margin..n - margin {
                 let c = i + n * j;
                 if self.liq.active_u[c] {
                     let vb = 0.25 * (v[c - 1] + v[c] + v[c - 1 + n] + v[c + n]);
@@ -921,6 +1047,11 @@ impl<'a> StaggeredFlow<'a> {
             self.v = tmp;
         }
         let (au, av) = self.advection(&self.u, &self.v);
+        let (eddy_u, eddy_v) = if self.smagorinsky > 0.0 {
+            self.eddy_acceleration()
+        } else {
+            (vec![0.0; nn], vec![0.0; nn])
+        };
         let (gpx, gpy) = self.pressure_gradient(&self.p);
         let bdf2 = matches!(&self.prev, Some(pv) if (pv.dt - dt).abs() < 1e-14 * dt);
         let sigma = if bdf2 { 1.5 } else { 1.0 } / (self.nu * dt);
@@ -937,8 +1068,8 @@ impl<'a> StaggeredFlow<'a> {
                 ),
                 _ => (au[c], av[c], self.u[c], self.v[c]),
             };
-            su[c] = (-eu - gpx[c] + gx) / self.nu;
-            sv[c] = (-ev - gpy[c] + gy) / self.nu;
+            su[c] = (-eu - gpx[c] + gx + eddy_u[c]) / self.nu;
+            sv[c] = (-ev - gpy[c] + gy + eddy_v[c]) / self.nu;
             xu[c] = pu;
             xv[c] = pv;
         }
@@ -956,7 +1087,8 @@ impl<'a> StaggeredFlow<'a> {
                 sm.gv.helmholtz_masked(sigma, &self.liq.active_v),
             ));
         }
-        let flux = (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
+        let flux =
+            (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
         let wv = &self.wall_velocity;
         if let Some((_, hu, hv)) = &self.helm {
             let (fu, fv) = match &flux {

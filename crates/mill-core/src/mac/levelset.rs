@@ -22,7 +22,7 @@ pub struct LevelSet {
 }
 
 /// WENO5 derivative from five consecutive one-sided differences (Jiang-Peng / Osher-Fedkiw).
-fn weno5(v1: f64, v2: f64, v3: f64, v4: f64, v5: f64) -> f64 {
+pub(super) fn weno5(v1: f64, v2: f64, v3: f64, v4: f64, v5: f64) -> f64 {
     let p1 = v1 / 3.0 - 7.0 * v2 / 6.0 + 11.0 * v3 / 6.0;
     let p2 = -v2 / 6.0 + 5.0 * v3 / 6.0 + v4 / 3.0;
     let p3 = v3 / 3.0 + 5.0 * v4 / 6.0 - v5 / 6.0;

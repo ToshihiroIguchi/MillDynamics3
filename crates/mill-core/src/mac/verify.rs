@@ -309,7 +309,10 @@ pub fn verify_couette_mac_scheme(
     cfl: f64,
     upwind: bool,
 ) -> CouetteNs {
-    verify_couette_mac_flow(n, nu, t_end, cfl, &|f| f.upwind = upwind)
+    verify_couette_mac_flow(n, nu, t_end, cfl, &|f| {
+        f.upwind = upwind;
+        f.weno = upwind;
+    })
 }
 
 /// Hold test with the flow configured by `configure`.
@@ -969,6 +972,7 @@ pub fn verify_wall_impact(
     let h = h_cells * dx;
     let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
     flow.upwind = true;
+    flow.weno = true;
     let ls = FsLevelSet::new(n, 0.55, |x, y| (x - 0.0).max(-0.4 - x).max(y - (floor + h)));
     flow.enable_free_surface(ls, (0.0, -g));
     flow.surface.as_mut().expect("surface").ls.reinitialize(20);
@@ -1023,6 +1027,7 @@ pub fn verify_translation(
     let sm = StaggeredMesh::new(n, 0.55, |x, y| x.abs().max(y.abs()) - 0.5);
     let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
     flow.upwind = true;
+    flow.weno = true;
     let ls = FsLevelSet::new(n, 0.55, |x, y| (x + 0.25).abs().max(y.abs()) - 0.5 * side);
     flow.enable_free_surface(ls, (0.0, 0.0));
     flow.surface.as_mut().expect("surface").ls.reinitialize(20);
@@ -1078,6 +1083,7 @@ pub fn track_sheet_growth(
     let h = h_cells * dx;
     let mut flow = StaggeredFlow::new(&sm, 1e-6, |_, _| (0.0, 0.0));
     flow.upwind = true;
+    flow.weno = true;
     let ls = FsLevelSet::new(n, 0.55, |x, y| (x - 0.0).max(-0.4 - x).max(y - (floor + h)));
     flow.enable_free_surface(ls, (0.0, 0.0));
     flow.surface.as_mut().expect("surface").ls.reinitialize(20);
@@ -1172,6 +1178,7 @@ pub fn verify_rimming(n: usize, nu: f64, omega: f64, h0: f64, revs: f64) -> Rimm
     let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
     let mut flow = StaggeredFlow::new(&sm, nu, move |x, y| (-omega * y, omega * x));
     flow.upwind = true;
+    flow.weno = true;
     let ls = FsLevelSet::new(n, 0.55, |x, y| (radius - h0) - (x * x + y * y).sqrt());
     flow.enable_free_surface(ls, (0.0, -g));
     flow.set_velocity(move |x, y| {
@@ -1308,8 +1315,11 @@ pub fn verify_rigid_ring(
     let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
     let mut flow = StaggeredFlow::new(&sm, nu, move |x, y| (-omega * y, omega * x));
     flow.upwind = true;
+    flow.weno = true;
     configure(&mut flow);
-    let ls = FsLevelSet::new(n, 0.55, move |x, y| r_i - (x * x + (y - e) * (y - e)).sqrt());
+    let ls = FsLevelSet::new(n, 0.55, move |x, y| {
+        r_i - (x * x + (y - e) * (y - e)).sqrt()
+    });
     flow.enable_free_surface(ls, (0.0, -g));
     flow.surface.as_mut().expect("surface").ls.reinitialize(20);
     flow.set_velocity(move |x, y| (-omega * y, omega * x));
