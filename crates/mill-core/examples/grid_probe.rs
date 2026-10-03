@@ -53,6 +53,9 @@ fn main() {
         "E5t" => e5t(),
         "E5c" => e5c(),
         "E5d" => e5d(),
+        "E5e" => e5e(),
+        "E5f" => e5f(),
+        "E5g" => e5g(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -916,7 +919,8 @@ fn e5a() {
             let model = eccentric_squeeze_force(a, 0.5, x0, u, nu);
             let blended = mill_core::mac::lubrication::blended_normal_force(
                 r.drag_mean,
-                mill_core::mac::lubrication::reduced_radius_wall(a, 0.5),
+                mill_core::mac::lubrication::disc_curvature(a),
+                mill_core::mac::lubrication::wall_curvature(0.5),
                 h,
                 dx,
                 nu,
@@ -1091,6 +1095,207 @@ fn e5d() {
                 "  steps {steps}, mean iterations {:.1}, {:.1} s",
                 iters as f64 / steps.max(1) as f64,
                 start.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
+
+fn e5e() {
+    use mill_core::mac::bodies::BodyFlow;
+    use mill_core::mac::lubrication::{links, model_forces, remove_grid_normal};
+    use mill_core::mac::staggered::Disc;
+    use mill_core::mac::verify::disc_pair_squeeze_force;
+    let (a, nu, u) = (0.05, 1.0, 0.01);
+    println!(
+        "E5e two equal discs a = {a} squeezed towards each other at +-{u} (drum R = 0.5), nu = 1"
+    );
+    println!(
+        "{:>5} {:>6} {:>9} {:>11} {:>11} {:>9} {:>9}",
+        "n", "h/dx", "h/a", "grid", "exact", "ratio", "blended"
+    );
+    for n in [128usize, 256] {
+        let dx = 1.1 / n as f64;
+        for f in [16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.25] {
+            let h = f * dx;
+            let c = a + 0.5 * h;
+            let discs = [
+                Disc {
+                    cx: -c,
+                    cy: 0.0,
+                    r: a,
+                    ux: u,
+                    uy: 0.0,
+                    omega: 0.0,
+                },
+                Disc {
+                    cx: c,
+                    cy: 0.0,
+                    r: a,
+                    ux: -u,
+                    uy: 0.0,
+                    omega: 0.0,
+                },
+            ];
+            let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
+            let dt = 0.005;
+            let mut fx = 0.0;
+            for _ in 0..400 {
+                let (loads, _, state, mesh) = bf.trial_many(&discs, dt);
+                bf.commit(state, mesh);
+                fx = loads[0].0;
+            }
+            let exact = disc_pair_squeeze_force(a, h, u, nu);
+            let lk = links(&[(-c, 0.0), (c, 0.0)], &[a, a], 0.5, dx, nu);
+            let mut forces = vec![(fx, 0.0), (-fx, 0.0)];
+            remove_grid_normal(&mut forces, &lk);
+            let model = model_forces(&lk, &[(u, 0.0), (-u, 0.0)]);
+            let blended = -(forces[0].0 + model[0].0);
+            println!(
+                "{n:>5} {f:>6} {:>9.4} {:>11.4e} {:>11.4e} {:>9.3} {:>9.3}",
+                h / a,
+                -fx,
+                exact,
+                -fx / exact,
+                blended / exact
+            );
+        }
+    }
+}
+
+fn pair_travel_time(a: f64, nu: f64, force: f64, h0: f64, h: f64) -> f64 {
+    use mill_core::mac::verify::disc_pair_squeeze_force;
+    let steps = 4000;
+    let (l0, l1) = (h.ln(), h0.ln());
+    let mut t = 0.0;
+    for k in 0..steps {
+        let lx = l0 + (l1 - l0) * (k as f64 + 0.5) / steps as f64;
+        let hh = lx.exp();
+        // Each disc moves at U = F / c, the gap closes at 2U: dt = c dh / (2 F).
+        t +=
+            disc_pair_squeeze_force(a, hh, 1.0, nu) / (2.0 * force) * hh * (l1 - l0) / steps as f64;
+    }
+    t
+}
+
+fn e5f() {
+    use mill_core::mac::bodies::{Body, BodyFlow, BodyStiffness};
+    use mill_core::mac::staggered::Disc;
+    use mill_core::mac::verify::disc_pair_squeeze_force;
+    let (a, nu, force, h0) = (0.05, 1.0, 5.0, 0.06);
+    let levels = [
+        0.03, 0.02, 0.01, 0.005, 0.003, 0.002, 0.001, 0.0005, 0.0003, 0.0002,
+    ];
+    println!("E5f two discs a = {a} pushed together by F = {force} each, nu = {nu}, rho_s = 1.2, h0 = {h0}");
+    for n in [64usize, 128] {
+        let dx = 1.1 / n as f64;
+        for lub in [true, false] {
+            let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
+            bf.lubrication = lub;
+            let mass = 1.2 * std::f64::consts::PI * a * a;
+            let c0 = disc_pair_squeeze_force(a, h0, 1.0, nu);
+            let u0 = force / c0;
+            let cc = a + 0.5 * h0;
+            let mk = |cx: f64, ux: f64| Body {
+                disc: Disc {
+                    cx,
+                    cy: 0.0,
+                    r: a,
+                    ux,
+                    uy: 0.0,
+                    omega: 0.0,
+                },
+                mass,
+                inertia: 0.5 * mass * a * a,
+                accel: (0.0, 0.0),
+            };
+            let mut bodies = [mk(-cc, u0), mk(cc, -u0)];
+            let setup = [BodyStiffness {
+                added_mass: std::f64::consts::PI * a * a,
+                drag_stiffness: c0,
+                spin_stiffness: 4.0 * std::f64::consts::PI * nu * a * a,
+            }; 2];
+            let ext = [(force, 0.0, 0.0), (-force, 0.0, 0.0)];
+            let dt = 0.005;
+            let mut t = 0.0;
+            let mut next = 0;
+            let (mut iters, mut steps) = (0usize, 0usize);
+            let start = Instant::now();
+            println!("n={n} (dx={dx:.4}) lubrication={lub}");
+            println!(
+                "{:>9} {:>8} {:>9} {:>9} {:>9}",
+                "gap", "gap/dx", "t_sim", "t_ref", "ratio"
+            );
+            while next < levels.len() && t < 12.0 {
+                let h_before = bodies[1].disc.cx - bodies[0].disc.cx - 2.0 * a;
+                let info = bf.step_coupled_many(&mut bodies, &ext, &setup, dt, 1e-3, 40);
+                t += dt;
+                steps += 1;
+                iters += info.iterations;
+                let h = bodies[1].disc.cx - bodies[0].disc.cx - 2.0 * a;
+                while next < levels.len() && h <= levels[next] {
+                    let frac = (h_before - levels[next]) / (h_before - h).max(1e-15);
+                    let ts = t - dt + dt * frac;
+                    let tr = pair_travel_time(a, nu, force, h0, levels[next]);
+                    println!(
+                        "{:>9.4} {:>8.2} {:>9.4} {:>9.4} {:>9.3}",
+                        levels[next],
+                        levels[next] / dx,
+                        ts,
+                        tr,
+                        ts / tr
+                    );
+                    next += 1;
+                }
+                if h < 1e-4 || !h.is_finite() {
+                    break;
+                }
+            }
+            println!(
+                "  steps {steps}, mean iterations {:.1}, {:.1} s",
+                iters as f64 / steps.max(1) as f64,
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+}
+
+fn e5g() {
+    use mill_core::mac::bodies::BodyFlow;
+    use mill_core::mac::staggered::Disc;
+    let (a, nu, u) = (0.05, 1.0, 0.01);
+    let r_eff = a * 0.5 / (0.5 - a);
+    println!("E5g disc a = {a} sliding along the drum wall at U = {u} (no spin), nu = 1");
+    println!(
+        "{:>5} {:>6} {:>9} {:>11} {:>11} {:>9}",
+        "n", "h/dx", "h/a", "F_slide", "lead", "F/lead"
+    );
+    for n in [128usize, 256] {
+        let dx = 1.1 / n as f64;
+        for f in [32.0, 16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.25] {
+            let h = f * dx;
+            let e = 0.5 - a - h;
+            let disc = Disc {
+                cx: e,
+                cy: 0.0,
+                r: a,
+                ux: 0.0,
+                uy: u,
+                omega: 0.0,
+            };
+            let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
+            let mut fy = 0.0;
+            for _ in 0..400 {
+                let (loads, _, state, mesh) = bf.trial_many(&[disc], 0.005);
+                bf.commit(state, mesh);
+                fy = loads[0].1;
+            }
+            let lead = 2.0 * 2f64.sqrt() * std::f64::consts::PI * nu * u * (r_eff / h).sqrt();
+            println!(
+                "{n:>5} {f:>6} {:>9.4} {:>11.4e} {:>11.4e} {:>9.3}",
+                h / a,
+                -fy,
+                lead,
+                -fy / lead
             );
         }
     }

@@ -1807,6 +1807,22 @@ pub fn eccentric_squeeze_force(a: f64, b: f64, e: f64, u: f64, nu: f64) -> f64 {
     8.0 * PI * nu * u * s2 / (c * c - s * s2).abs()
 }
 
+/// Steady Stokes force (per unit density) on each of two equal discs of radius `a` with gap `h`,
+/// moving towards each other at speed `u` each, in unbounded fluid (no net force, so no Stokes
+/// paradox): `F = 8 pi nu u cosh 2 xi / (2 xi cosh 2 xi - sinh 2 xi)`, `cosh xi = 1 + h / (2 a)`.
+pub fn disc_pair_squeeze_force(a: f64, h: f64, u: f64, nu: f64) -> f64 {
+    let xi = (1.0 + h / (2.0 * a)).acosh();
+    let (c2, s2) = ((2.0 * xi).cosh(), (2.0 * xi).sinh());
+    // 2 xi cosh 2 xi - sinh 2 xi, by its series for small xi (cancellation).
+    let den = if xi < 0.1 {
+        let x2 = xi * xi;
+        8.0 / 3.0 * xi * x2 * (1.0 + 0.4 * x2 * (1.0 + x2 / 7.0 * 4.0 * (1.0 / 3.0)))
+    } else {
+        2.0 * xi * c2 - s2
+    };
+    8.0 * PI * nu * u * c2 / den
+}
+
 /// Steps over which the force of a translating-disc run is averaged.
 const WINDOW: usize = 20;
 

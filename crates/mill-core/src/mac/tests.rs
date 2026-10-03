@@ -142,3 +142,40 @@ fn light_free_disc_reaches_the_stokes_terminal_speed() {
     assert!(err.abs() < 1e-2, "{err}");
     assert!(iters < 6.0, "{iters}");
 }
+
+#[test]
+fn squeeze_references_and_model_agree() {
+    use super::lubrication::{disc_curvature, squeeze_coefficient, wall_curvature};
+    use super::verify::{disc_pair_squeeze_force, eccentric_squeeze_force, stokes_annulus_drag};
+    // Exact eccentric solution reduces to the concentric Stokes drag.
+    let conc = stokes_annulus_drag(0.2, 0.5, 1.0, 1.0);
+    let ecc = eccentric_squeeze_force(0.2, 0.5, 1e-6, 1.0, 1.0);
+    assert!((ecc / conc - 1.0).abs() < 1e-4, "{ecc} vs {conc}");
+    // Disc against the drum wall: model over exact, eps = h / R_eff up to 0.8.
+    for a in [0.03, 0.05] {
+        let b = 0.5;
+        let r_eff = a * b / (b - a);
+        for eps in [0.01, 0.1, 0.4, 0.8] {
+            let h = eps * r_eff;
+            let exact = eccentric_squeeze_force(a, b, b - a - h, 1.0, 1.0);
+            let model = squeeze_coefficient(disc_curvature(a), wall_curvature(b), h, 1.0);
+            assert!(
+                (model / exact - 1.0).abs() < 0.01,
+                "wall a={a} eps={eps}: {}",
+                model / exact
+            );
+        }
+    }
+    // Two equal discs (relative approach speed is twice the speed of each).
+    let a = 1.0;
+    for eps in [0.01, 0.1, 0.4, 0.8] {
+        let h = eps * a / 2.0;
+        let exact = disc_pair_squeeze_force(a, h, 1.0, 1.0);
+        let model = 2.0 * squeeze_coefficient(disc_curvature(a), disc_curvature(a), h, 1.0);
+        assert!(
+            (model / exact - 1.0).abs() < 0.01,
+            "pair eps={eps}: {}",
+            model / exact
+        );
+    }
+}

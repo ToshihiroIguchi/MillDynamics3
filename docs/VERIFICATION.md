@@ -619,3 +619,37 @@ coupled solver, 3 iterations per step. Without the sub-grid film the disc reache
 h = 0.03, 0.02, ..., 2e-4 differ from the exact ODE by a constant 0.006 - 0.03 s (the far field of
 a fluid started at rest needs about R^2/nu to build up, E5t) and the *intervals* agree to
 0.984 - 0.9997 (n = 64 and 128; the first interval, 3.5 -> 2.3 dx, is the worst).
+
+## E5 summary (2026-10-03) — near-contact lubrication: normal (squeeze) gate MET
+
+Model generalised to signed curvatures (`mac/lubrication.rs`): `c = 3 sqrt2 pi nu R^1.5 h^-1.5
+(1 + c1 eps + c2 eps^2)`, `c1 = 0.788 + 0.265 Q`, `Q = R^3 (k1^3 + k2^3)` (quartic term of the gap
+profile). Second exact reference: two equal discs in unbounded fluid,
+`disc_pair_squeeze_force` (`F = 8 pi nu u cosh 2xi / (2 xi cosh 2xi - sinh 2xi)`, `cosh xi = 1 + h/2a`;
+reduces to `3 pi nu u (a/h)^1.5`). The model matches the wall solution to 0.3 % (a <= 0.05, eps <=
+0.8; 1.8 % for a = 0.1) and the pair solution to 0.8 % (eps <= 1.6) (unit test
+`squeeze_references_and_model_agree`).
+
+Many-body coupling (`BodyFlow::trial_many`, `step_coupled_many`): per-body secant-preconditioned
+fixed point; the stiff pair/wall squeeze terms are solved implicitly by Gauss-Seidel inside each
+iteration (a Jacobi update has spectral radius c / (c + m/dt) -> 1). 3 - 4 iterations per step.
+
+| test | result |
+|---|---|
+| E5a static disc against the wall, blended force over exact, h/dx 16 ... 0.25, n = 128, 256 | 0.978 ... 0.999 |
+| E5e static two discs, blended over exact (unbounded), h <= 4 dx | 0.994 ... 1.000 |
+| E5e resolved only, h = 4 dx / 2 dx / 1 dx (n = 256) | 0.98 / 0.84 / 0.22 (plateau below) |
+| E5d disc pushed to the wall, intervals of the closing time 0.03 -> 2e-4 vs exact ODE | 0.984 ... 0.9997 (n = 64, 128) |
+| E5f two discs pushed together, same | 0.989 ... 0.9999 |
+| same without the sub-grid film | discs overlap after 0.15 - 0.55 s (gap -> 0) |
+
+At h/a >= 1.4 the resolved two-disc force exceeds the unbounded exact value by 2 - 17 %: this is
+the confinement of the drum (it does not shrink with n), not a grid error.
+
+Open (not part of this gate): tangential and rotational lubrication. A disc sliding along the wall
+(E5g, a = 0.05, n = 256, U = 0.01) is followed by the resolved flow down to a gap of about 1 cell
+(`F / (2 sqrt2 pi nu U sqrt(R/h))` = 1.23 at h = 1 dx, then 0.88 at 0.5 dx and 0.57 at 0.25 dx,
+where the leading term would need to be added); the missing force is `O(h/R)` of the squeeze term
+and has no exact reference here. Also not done: lubrication between a disc and a free surface (E8),
+a local (non-O(n^2) per disc) load evaluation for many bodies (E7/E8), non-equal-radius pair
+references.
