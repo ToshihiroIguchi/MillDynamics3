@@ -617,6 +617,12 @@ pub struct StaggeredFlow<'a> {
     pub smagorinsky: f64,
     /// Yield-stress / non-Newtonian fluid (augmented Lagrangian), see [`Self::set_rheology`].
     pub rheo: Option<Rheo>,
+    /// Most ALG2 passes per step (1 = the multiplier lags one step) and the relative multiplier
+    /// change below which the passes stop.
+    pub alg_iterations: usize,
+    pub alg_tolerance: f64,
+    /// Passes the last step used.
+    pub last_alg_passes: usize,
 }
 
 /// Augmented-Lagrangian state of a generalised-Newtonian fluid: the multiplier (the stress) and
@@ -652,6 +658,8 @@ pub struct FlowState {
     pub robust_surface: bool,
     pub smagorinsky: f64,
     pub rheo: Option<Rheo>,
+    pub alg_iterations: usize,
+    pub alg_tolerance: f64,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -672,6 +680,8 @@ impl<'a> StaggeredFlow<'a> {
             robust_surface: self.robust_surface,
             smagorinsky: self.smagorinsky,
             rheo: self.rheo,
+            alg_iterations: self.alg_iterations,
+            alg_tolerance: self.alg_tolerance,
         }
     }
 
@@ -695,6 +705,8 @@ impl<'a> StaggeredFlow<'a> {
         flow.robust_surface = state.robust_surface;
         flow.smagorinsky = state.smagorinsky;
         flow.rheo = state.rheo;
+        flow.alg_iterations = state.alg_iterations;
+        flow.alg_tolerance = state.alg_tolerance;
         if let Some(mut surf) = state.surface {
             surf.ls.weight = sm.cell_fraction.clone();
             flow.liq = Liquid::from_level_set(sm, &surf.ls.psi, surf.theta_min);
@@ -805,6 +817,9 @@ impl<'a> StaggeredFlow<'a> {
             robust_surface: false,
             smagorinsky: 0.0,
             rheo: None,
+            alg_iterations: 1,
+            alg_tolerance: 1e-5,
+            last_alg_passes: 0,
         }
     }
 
@@ -1330,73 +1345,97 @@ impl<'a> StaggeredFlow<'a> {
             self.extend_v(&mut tmp);
             self.v = tmp;
         }
-        let (au, av) = self.advection(&self.u, &self.v);
-        let (eddy_u, eddy_v) = if self.smagorinsky > 0.0 {
-            self.eddy_acceleration()
+        // ALG2: re-solve the step with the refreshed stress excess until the multiplier settles
+        // (one pass for a Newtonian fluid, or in the lagged mode `alg_iterations = 1`).
+        let passes = if self.rheo.is_some() {
+            self.alg_iterations.max(1)
         } else {
-            (vec![0.0; nn], vec![0.0; nn])
+            1
         };
-        let (gpx, gpy) = self.pressure_gradient(&self.p);
-        let (sdu, sdv) = self.stress_divergence();
-        let bdf2 = matches!(&self.prev, Some(pv) if (pv.dt - dt).abs() < 1e-14 * dt);
-        let sigma = if bdf2 { 1.5 } else { 1.0 } / (self.nu * dt);
-        let (gx, gy) = gravity.unwrap_or((0.0, 0.0));
-        let (mut su, mut sv) = (vec![0.0; nn], vec![0.0; nn]);
-        let (mut xu, mut xv) = (vec![0.0; nn], vec![0.0; nn]);
-        for c in 0..nn {
-            let (eu, ev, pu, pv) = match (&self.prev, bdf2) {
-                (Some(pv), true) => (
-                    2.0 * au[c] - pv.au[c],
-                    2.0 * av[c] - pv.av[c],
-                    (4.0 * self.u[c] - pv.u[c]) / 3.0,
-                    (4.0 * self.v[c] - pv.v[c]) / 3.0,
-                ),
-                _ => (au[c], av[c], self.u[c], self.v[c]),
+        let saved = (
+            self.u.clone(),
+            self.v.clone(),
+            self.p.clone(),
+            self.prev.clone(),
+            self.time,
+        );
+        self.last_alg_passes = 0;
+        for pass in 0..passes {
+            if pass > 0 {
+                (self.u, self.v, self.p, self.prev, self.time) = saved.clone();
+            }
+            let (au, av) = self.advection(&self.u, &self.v);
+            let (eddy_u, eddy_v) = if self.smagorinsky > 0.0 {
+                self.eddy_acceleration()
+            } else {
+                (vec![0.0; nn], vec![0.0; nn])
             };
-            su[c] = (-eu - gpx[c] + gx + eddy_u[c] + sdu[c]) / self.nu;
-            sv[c] = (-ev - gpy[c] + gy + eddy_v[c] + sdv[c]) / self.nu;
-            xu[c] = pu;
-            xv[c] = pv;
-        }
-        let old = Prev {
-            u: self.u.clone(),
-            v: self.v.clone(),
-            au,
-            av,
-            dt,
-        };
-        if !matches!(&self.helm, Some((s, _, _)) if (s - sigma).abs() <= 1e-12 * sigma) {
-            self.helm = Some((
-                sigma,
-                sm.gu.helmholtz_masked(sigma, &self.liq.active_u),
-                sm.gv.helmholtz_masked(sigma, &self.liq.active_v),
-            ));
-        }
-        let flux =
-            (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
-        let wv = &self.wall_velocity;
-        if let Some((_, hu, hv)) = &self.helm {
-            let (fu, fv) = match &flux {
-                Some((a, b)) => (Some(&a[..]), Some(&b[..])),
-                None => (None, None),
+            let (gpx, gpy) = self.pressure_gradient(&self.p);
+            let (sdu, sdv) = self.stress_divergence();
+            let bdf2 = matches!(&self.prev, Some(pv) if (pv.dt - dt).abs() < 1e-14 * dt);
+            let sigma = if bdf2 { 1.5 } else { 1.0 } / (self.nu * dt);
+            let (gx, gy) = gravity.unwrap_or((0.0, 0.0));
+            let (mut su, mut sv) = (vec![0.0; nn], vec![0.0; nn]);
+            let (mut xu, mut xv) = (vec![0.0; nn], vec![0.0; nn]);
+            for c in 0..nn {
+                let (eu, ev, pu, pv) = match (&self.prev, bdf2) {
+                    (Some(pv), true) => (
+                        2.0 * au[c] - pv.au[c],
+                        2.0 * av[c] - pv.av[c],
+                        (4.0 * self.u[c] - pv.u[c]) / 3.0,
+                        (4.0 * self.v[c] - pv.v[c]) / 3.0,
+                    ),
+                    _ => (au[c], av[c], self.u[c], self.v[c]),
+                };
+                su[c] = (-eu - gpx[c] + gx + eddy_u[c] + sdu[c]) / self.nu;
+                sv[c] = (-ev - gpy[c] + gy + eddy_v[c] + sdv[c]) / self.nu;
+                xu[c] = pu;
+                xv[c] = pv;
+            }
+            let old = Prev {
+                u: self.u.clone(),
+                v: self.v.clone(),
+                au,
+                av,
+                dt,
             };
-            hu.solve_with_flux(&mut xu, Some(&su), fu, |x, y| wv(x, y).0, TOL_VISCOUS);
-            hv.solve_with_flux(&mut xv, Some(&sv), fv, |x, y| wv(x, y).1, TOL_VISCOUS);
+            if !matches!(&self.helm, Some((s, _, _)) if (s - sigma).abs() <= 1e-12 * sigma) {
+                self.helm = Some((
+                    sigma,
+                    sm.gu.helmholtz_masked(sigma, &self.liq.active_u),
+                    sm.gv.helmholtz_masked(sigma, &self.liq.active_v),
+                ));
+            }
+            let flux =
+                (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
+            let wv = &self.wall_velocity;
+            if let Some((_, hu, hv)) = &self.helm {
+                let (fu, fv) = match &flux {
+                    Some((a, b)) => (Some(&a[..]), Some(&b[..])),
+                    None => (None, None),
+                };
+                hu.solve_with_flux(&mut xu, Some(&su), fu, |x, y| wv(x, y).0, TOL_VISCOUS);
+                hv.solve_with_flux(&mut xv, Some(&sv), fv, |x, y| wv(x, y).1, TOL_VISCOUS);
+            }
+            self.extend_u(&mut xu);
+            self.extend_v(&mut xv);
+            self.u_star = xu.clone();
+            self.v_star = xv.clone();
+            self.u = xu;
+            self.v = xv;
+            let dt_eff = if bdf2 { dt * 2.0 / 3.0 } else { dt };
+            let phi = self.project(dt_eff);
+            for (p, f) in self.p.iter_mut().zip(&phi) {
+                *p += f;
+            }
+            self.prev = Some(old);
+            self.time += dt;
+            self.last_alg_passes = pass + 1;
+            let change = self.update_rheology();
+            if pass > 0 && change < self.alg_tolerance {
+                break;
+            }
         }
-        self.extend_u(&mut xu);
-        self.extend_v(&mut xv);
-        self.u_star = xu.clone();
-        self.v_star = xv.clone();
-        self.u = xu;
-        self.v = xv;
-        let dt_eff = if bdf2 { dt * 2.0 / 3.0 } else { dt };
-        let phi = self.project(dt_eff);
-        for (p, f) in self.p.iter_mut().zip(&phi) {
-            *p += f;
-        }
-        self.prev = Some(old);
-        self.time += dt;
-        self.update_rheology();
         if let (Some(surf), Some(v0)) = (&self.surface, start_velocity) {
             let v1 = surf.cell_velocity(&self.u, &self.v);
             let uc: Vec<f64> = v0.0.iter().zip(&v1.0).map(|(a, b)| 0.5 * (a + b)).collect();
@@ -1432,9 +1471,9 @@ impl<'a> StaggeredFlow<'a> {
     /// ALG2 d- and lambda-steps from the current velocity. Strain rates are compact MAC
     /// differences: `Dxx`, `Dyy` at cell centres, `Dxy` at corners; the missing components of the
     /// tensor at each location are the averages of the four surrounding values.
-    fn update_rheology(&mut self) {
+    fn update_rheology(&mut self) -> f64 {
         let Some(mut rh) = self.rheo.take() else {
-            return;
+            return 0.0;
         };
         let n = self.sm.n();
         let inv = 1.0 / self.sm.dx();
@@ -1450,8 +1489,11 @@ impl<'a> StaggeredFlow<'a> {
             for i in 1..n - 1 {
                 let c = i + n * j;
                 if known(c, &[0, 1], &[0, n]) {
-                    dxx[c] = (u[c + 1] - u[c]) * inv;
-                    dyy[c] = (v[c + n] - v[c]) * inv;
+                    // Deviatoric part: exactly cancels the implicit Laplacian of the velocity
+                    // solve for any (also not discretely divergence-free) iterate.
+                    let half_diff = 0.5 * ((u[c + 1] - u[c]) - (v[c + n] - v[c])) * inv;
+                    dxx[c] = half_diff;
+                    dyy[c] = -half_diff;
                 }
                 if known(c, &[0], &[0]) && lu[c - n] < 255 && lv[c - 1] < 255 {
                     dxy[c] = 0.5 * ((u[c] - u[c - n]) + (v[c] - v[c - 1])) * inv;
@@ -1459,18 +1501,37 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         let (law, r) = (rh.law, rh.r);
+        let (mut delta, mut scale) = (0.0f64, 0.0f64);
+        let (mut done_c, mut done_k) = (vec![false; n * n], vec![false; n * n]);
         for j in 2..n - 2 {
             for i in 2..n - 2 {
                 let c = i + n * j;
+                // Air has no stress: no multiplier in air cells and at corners that touch one.
+                let air = |k: usize| self.sm.mesh.pressure_active[k] && !self.liq.cell[k];
+                let cell_air = air(c);
+                let corner_air = cell_air || air(c - 1) || air(c - n) || air(c - n - 1);
+                if cell_air {
+                    (rh.lam_c[c], rh.s_c[c]) = ([0.0; 3], [0.0; 3]);
+                }
+                if corner_air {
+                    (rh.lam_k[c], rh.s_k[c]) = ([0.0; 3], [0.0; 3]);
+                }
                 // Cell centre: normal components of the cell, shear from the four corners.
                 let cxy = [dxy[c], dxy[c + 1], dxy[c + n], dxy[c + n + 1]];
-                if dxx[c].is_finite() && cxy.iter().all(|x| x.is_finite()) {
+                if !cell_air && dxx[c].is_finite() && cxy.iter().all(|x| x.is_finite()) {
                     let d = [dxx[c], 0.25 * cxy.iter().sum::<f64>(), dyy[c]];
-                    (rh.lam_c[c], rh.s_c[c]) = alg2_update(&law, r, &rh.lam_c[c], &d);
+                    done_c[c] = self.sm.mesh.pressure_active[c];
+                    let old = rh.lam_c[c];
+                    (rh.lam_c[c], rh.s_c[c]) = alg2_update(&law, r, &old, &d);
+                    for k in [0, 2] {
+                        delta = delta.max((rh.lam_c[c][k] - old[k]).abs());
+                        scale = scale.max(rh.lam_c[c][k].abs());
+                    }
                 }
                 // Corner: shear of the corner, normal components from the four cells around it.
                 let cells = [c - n - 1, c - n, c - 1, c];
-                if dxy[c].is_finite()
+                if !corner_air
+                    && dxy[c].is_finite()
                     && cells
                         .iter()
                         .all(|&k| dxx[k].is_finite() && dyy[k].is_finite())
@@ -1478,11 +1539,36 @@ impl<'a> StaggeredFlow<'a> {
                     let mx = 0.25 * cells.iter().map(|&k| dxx[k]).sum::<f64>();
                     let my = 0.25 * cells.iter().map(|&k| dyy[k]).sum::<f64>();
                     let d = [mx, dxy[c], my];
-                    (rh.lam_k[c], rh.s_k[c]) = alg2_update(&law, r, &rh.lam_k[c], &d);
+                    done_k[c] = cells.iter().all(|&k| self.sm.mesh.pressure_active[k]);
+                    let old = rh.lam_k[c];
+                    (rh.lam_k[c], rh.s_k[c]) = alg2_update(&law, r, &old, &d);
+                    delta = delta.max((rh.lam_k[c][1] - old[1]).abs());
+                    scale = scale.max(rh.lam_k[c][1].abs());
+                }
+            }
+        }
+        // Beyond the walls the stress excess is extrapolated from the fluid side (computing it
+        // from extrapolated velocities, which carry no wall information, is unreliable).
+        let air = |k: usize| self.sm.mesh.pressure_active[k] && !self.liq.cell[k];
+        let none = vec![false; n * n];
+        let layer_c = ghost_layers(&done_c, &none, n, 2);
+        let layer_k = ghost_layers(&done_k, &none, n, 2);
+        for comp in 0..3 {
+            let mut qc: Vec<f64> = rh.s_c.iter().map(|t| t[comp]).collect();
+            extend(&mut qc, &layer_c, n, 2);
+            let mut qk: Vec<f64> = rh.s_k.iter().map(|t| t[comp]).collect();
+            extend(&mut qk, &layer_k, n, 2);
+            for c in n + 1..n * n {
+                if !done_c[c] && !air(c) {
+                    rh.s_c[c][comp] = qc[c];
+                }
+                if !done_k[c] && !(air(c) || air(c - 1) || air(c - n) || air(c - n - 1)) {
+                    rh.s_k[c][comp] = qk[c];
                 }
             }
         }
         self.rheo = Some(rh);
+        delta / scale.max(1e-300)
     }
 
     /// Divergence of the stress excess `S` at the active `u` and `v` nodes (zero without a

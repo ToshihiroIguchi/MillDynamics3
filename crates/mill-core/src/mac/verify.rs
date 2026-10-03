@@ -2340,6 +2340,7 @@ pub fn verify_couette_hb(
     t_end: f64,
     cfl: f64,
     from_rest: bool,
+    alg_iters: usize,
 ) -> CouetteHb {
     let (r1, r2, omega) = (0.25, 0.5, 1.0);
     let sm = StaggeredMesh::new(n, 0.55, |x, y| {
@@ -2362,6 +2363,7 @@ pub fn verify_couette_hb(
     let mut flow = StaggeredFlow::new(&sm, 1.0, wall);
     flow.set_rheology(law, r_aug);
     flow.stokes = true;
+    flow.alg_iterations = alg_iters;
     if from_rest {
         flow.set_velocity(|_, _| (0.0, 0.0));
     } else {
@@ -2438,4 +2440,77 @@ pub fn verify_couette_hb(
         c_max_err: worst,
         plug_speed: plug,
     }
+}
+
+/// Largest face speed over the active nodes of a free-surface flow.
+fn max_speed(flow: &StaggeredFlow) -> f64 {
+    let mut vmax = 0.0f64;
+    for c in 0..flow.u.len() {
+        if flow.liq.active_u[c] {
+            vmax = vmax.max(flow.u[c].abs());
+        }
+        if flow.liq.active_v[c] {
+            vmax = vmax.max(flow.v[c].abs());
+        }
+    }
+    vmax
+}
+
+/// Stationary circular drum (radius 0.5) holding a liquid with a tilted flat surface
+/// (`psi = y - x tan(alpha)`), gravity downward; integrates `t_end` and returns `(t, max speed,
+/// surface slope)` at `samples` evenly spaced times. The surface slope is the interface-height
+/// difference of the columns at `x = -0.25` and `x = +0.25`, divided by `0.5` (initially
+/// `tan(alpha)`; zero once the liquid has levelled).
+pub fn verify_slump(
+    n: usize,
+    law: HerschelBulkley,
+    r_aug: f64,
+    alpha: f64,
+    t_end: f64,
+    samples: usize,
+    alg_iters: usize,
+) -> Vec<(f64, f64, f64, f64)> {
+    let radius = 0.5;
+    let g = 9.81;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
+    let mut flow = StaggeredFlow::new(&sm, 1.0, |_, _| (0.0, 0.0));
+    flow.set_rheology(law, r_aug);
+    flow.alg_iterations = alg_iters;
+    flow.upwind = true;
+    flow.weno = true;
+    let tan = alpha.tan();
+    flow.enable_free_surface(FsLevelSet::new(n, 0.55, move |x, y| y - x * tan), (0.0, -g));
+    let dx = sm.dx();
+    let dt0 = 0.3 * dx / (g * 2.0 * radius).sqrt();
+    let steps = (t_end / dt0).ceil() as usize;
+    let dt = t_end / steps as f64;
+    let per = (steps / samples).max(1);
+    let height_at = |flow: &StaggeredFlow, x: f64| {
+        let surf = flow.surface.as_ref().expect("free surface");
+        let i = ((x + 0.55) / dx) as usize;
+        column_height(&surf.ls, i).unwrap_or(f64::NAN)
+    };
+    let mut out = Vec::new();
+    for s in 1..=steps {
+        flow.step(dt);
+        if s % per == 0 {
+            let slope = (height_at(&flow, 0.25) - height_at(&flow, -0.25)) / 0.5;
+            // Deep bulk: active nodes more than three cells below the interface.
+            let surf = flow.surface.as_ref().expect("free surface");
+            let mut deep = 0.0f64;
+            for c in 0..n * n {
+                if surf.ls.psi[c] < -3.0 * dx {
+                    let (cl, cr) = (c.saturating_sub(1), c);
+                    if flow.liq.active_u[cr] && flow.liq.active_u[cl] {
+                        deep = deep.max(flow.u[c].abs());
+                    }
+                    if flow.liq.active_v[c] {
+                        deep = deep.max(flow.v[c].abs());
+                    }
+                }
+            }
+            out.push((s as f64 * dt, max_speed(&flow), slope, deep));
+        }
+    }
+    out
 }

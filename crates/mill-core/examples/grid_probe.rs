@@ -57,6 +57,7 @@ fn main() {
         "E5f" => e5f(),
         "E5g" => e5g(),
         "E6a" => e6a(),
+        "E6d" => e6d(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -1311,6 +1312,11 @@ fn e6a() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.5);
     let rest = std::env::args().any(|a| a == "--rest");
+    let iters: usize = std::env::args()
+        .skip_while(|a| a != "--iters")
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let only: Option<String> = std::env::args().skip_while(|a| a != "--only").nth(1);
     let rs: Vec<f64> = std::env::args()
         .skip_while(|a| a != "--r")
@@ -1351,12 +1357,46 @@ fn e6a() {
         }
         for n in [64usize, 128] {
             for &r in &rs {
-                let res = verify_couette_hb(n, law, r, t_end, 0.5, rest);
+                let res = verify_couette_hb(n, law, r, t_end, 0.5, rest, iters);
                 println!(
                     "{name:>12} {n:>5} {r:>6} {:>8.5} {:>8.4} {:>9.2e} {:>10.2e} {:>10.2e} {:>10.2e}",
                     res.c_exact, res.r_yield_exact, res.u_err, res.c_mean_err, res.c_max_err, res.plug_speed
                 );
             }
+        }
+    }
+}
+
+fn e6d() {
+    use mill_core::mac::rheology::HerschelBulkley;
+    use mill_core::mac::verify::verify_slump;
+    let arg = |name: &str, default: f64| -> f64 {
+        std::env::args()
+            .skip_while(|a| a != name)
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let n = arg("--n", 64.0) as usize;
+    let t_end = arg("--t", 10.0);
+    let tau_list: Vec<f64> = std::env::args()
+        .skip_while(|a| a != "--tau")
+        .nth(1)
+        .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_else(|| vec![0.0, 0.5, 2.0, 8.0]);
+    let r = arg("--r", 0.02);
+    let iters = arg("--iters", 1.0) as usize;
+    println!("E6d tilted surface (20 deg) in a stationary drum, nu_p = 0.01, n = {n}, r = {r}");
+    for tau in tau_list {
+        let law = HerschelBulkley::bingham(tau, arg("--k", 0.01));
+        let series = verify_slump(n, law, r, 20f64.to_radians(), t_end, 10, iters);
+        println!("tau_y/rho = {tau}");
+        println!(
+            "{:>8} {:>12} {:>9} {:>12}",
+            "t", "max speed", "slope", "deep speed"
+        );
+        for (t, v, slope, deep) in series {
+            println!("{t:>8.3} {v:>12.3e} {slope:>9.4} {deep:>12.3e}");
         }
     }
 }

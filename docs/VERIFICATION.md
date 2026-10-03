@@ -653,3 +653,34 @@ where the leading term would need to be added); the missing force is `O(h/R)` of
 and has no exact reference here. Also not done: lubrication between a disc and a free surface (E8),
 a local (non-O(n^2) per disc) load evaluation for many bodies (E7/E8), non-equal-radius pair
 references.
+
+## E6 summary (non-Newtonian: Herschel-Bulkley by ALG2)
+
+Implementation: `mac/rheology.rs` (law, d-step) and `StaggeredFlow::set_rheology`. The velocity
+solves keep the constant-viscosity Gibou Helmholtz (`nu = r / 2`); the stress excess
+`S = lambda - r d` (normal parts at cell centres, shear at corners, deviatoric strain, zero in air,
+extrapolated beyond walls) enters as an explicit divergence; `lambda`, `d` are updated from the new
+velocity, once per step or in `alg_iterations` passes per step.
+
+E6a annular Couette (r1 = 0.25 at 1 rad/s, r2 = 0.5 fixed, K = 0.01, tau_y = 0.03 gives a plug beyond
+r = 0.41), `grid_probe --exp E6a`, started from the analytic profile, n = 128, r = 0.02..0.08:
+
+| law | ring-mean torque error | max velocity error / (Omega r1) |
+|---|---|---|
+| Newtonian | 0.01 % | 0.03 % |
+| power law n = 0.6 | 0.02 % | 0.08 % |
+| Bingham | 0.1 % | 0.3 - 0.4 % |
+| Herschel-Bulkley n = 0.6 | 0.1 % | 0.3 - 0.4 % |
+
+The result changes by < 0.5 % between r = 0.02 and 0.08. The stress in a plug is not unique (any
+self-equilibrated field is admissible), so the torque constant is compared as an azimuthal ring mean.
+From rest the approach to steady state is slow for large r (r = 0.32: 10 % at t = 12).
+
+E6d tilted surface (20 degrees) in a stationary drum, `grid_probe --exp E6d` (n = 64): the surface
+is held (slope 0.364 -> 0.361 over 2 s at tau_y/rho = 8) but a creep remains in the plug that falls
+only as 1/r, not with the number of passes: 5e-3 m/s at r = 4, 3e-4 at r = 40 (tau_y/rho = 2.. 8),
+6e-5 at r = 400; the gate is 1e-5 m/s. For partial yielding (tau_y/rho = 0.5) r = 40..400 diverges
+within a few steps (the explicit stress and the implicit Laplacian are different discretisations
+near cut cells, an error that scales with r), r = 4 is stable and creeps at 4e-4 m/s.
+Gate (d) is NOT met. Tried: more passes, air masking, wall extrapolation of the stress, deviatoric
+strain, an exact same-operator cancellation (worse).
