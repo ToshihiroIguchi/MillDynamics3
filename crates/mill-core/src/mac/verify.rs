@@ -2045,3 +2045,143 @@ pub fn verify_terminal_stokes(
     let k = stokes_annulus_drag(a, radius, 1.0, nu);
     (body.disc.ux / (force / k) - 1.0, iters / steps as f64)
 }
+
+/// Result of the falling-disc run.
+#[derive(Clone, Debug)]
+pub struct FallingDisc {
+    pub steps: usize,
+    /// Vertical position of the disc at the sampled times.
+    pub y: Vec<f64>,
+    pub vy_max: f64,
+    pub iterations: f64,
+    pub divergence: f64,
+    /// Largest `|u|` of the fluid at the end (blow-up check).
+    pub umax: f64,
+    pub ok: bool,
+}
+
+/// Disc of radius `a` and density ratio `ratio` released at rest at `(0, y0)` in the drum of
+/// radius 0.5 under gravity 9.81 (reduced gravity on the body, buoyancy through the fluid
+/// pressure is replaced by the net weight `(ratio - 1) pi a^2 g`), viscosity `nu`; `dt` is
+/// `cfl dx / sqrt(g a)`. Samples `y` every `t_end / 5`.
+pub fn verify_falling_disc(
+    n: usize,
+    a: f64,
+    ratio: f64,
+    y0: f64,
+    nu: f64,
+    t_end: f64,
+    cfl: f64,
+) -> FallingDisc {
+    let (radius, g) = (0.5, 9.81);
+    let dx = 1.1 / n as f64;
+    let dt0 = cfl * dx / (g * a).sqrt();
+    let steps = (t_end / dt0).ceil() as usize;
+    let dt = t_end / steps as f64;
+    let mass = ratio * PI * a * a;
+    let ma = confined_added_mass(a, radius);
+    let mut bf = BodyFlow::new(n, 0.55, radius, nu);
+    let mut body = Body {
+        disc: Disc {
+            cx: 0.0,
+            cy: y0,
+            r: a,
+            ux: 0.0,
+            uy: 0.0,
+            omega: 0.0,
+        },
+        mass,
+        inertia: 0.5 * mass * a * a,
+        accel: (0.0, 0.0),
+    };
+    let weight = (ratio - 1.0) * PI * a * a * g;
+    let (mut iters, mut div, mut vmax) = (0.0, 0.0f64, 0.0f64);
+    let mut y = Vec::new();
+    let mut ok = true;
+    for step in 0..steps {
+        let drag_est = stokes_annulus_drag(a, radius, 1.0, nu).min(1e3);
+        let info = bf.step_coupled(
+            &mut body,
+            (0.0, -weight, 0.0),
+            dt,
+            ma,
+            drag_est,
+            confined_spin_stiffness(a, radius, nu),
+            1e-5,
+            30,
+        );
+        iters += info.iterations as f64;
+        div = div.max(info.load.divergence);
+        vmax = vmax.max(body.disc.uy.abs());
+        if !(body.disc.cy.is_finite() && body.disc.cy.abs() < radius) || info.residual > 1e-2 {
+            ok = false;
+            break;
+        }
+        if (step + 1) % (steps / 5).max(1) == 0 {
+            y.push(body.disc.cy);
+        }
+    }
+    FallingDisc {
+        steps,
+        y,
+        vy_max: vmax,
+        iterations: iters / steps as f64,
+        divergence: div,
+        umax: 0.0,
+        ok,
+    }
+}
+
+/// Free disc driven by a constant external torque in a drum at rest: the steady spin rate is the
+/// torque over the confined Couette stiffness. Returns the relative error of the spin rate at
+/// `t_end`, the largest translation speed (must stay at round-off by symmetry) and the mean
+/// iterations per step.
+pub fn verify_free_spin(
+    n: usize,
+    a: f64,
+    ratio: f64,
+    torque: f64,
+    nu: f64,
+    t_end: f64,
+    dt: f64,
+) -> (f64, f64, f64) {
+    let radius = 0.5;
+    let steps = (t_end / dt).round() as usize;
+    let mass = ratio * PI * a * a;
+    let ma = confined_added_mass(a, radius);
+    let kappa = confined_spin_stiffness(a, radius, nu);
+    let mut bf = BodyFlow::new(n, 0.55, radius, nu);
+    let mut body = Body {
+        disc: Disc {
+            cx: 0.0,
+            cy: 0.0,
+            r: a,
+            ux: 0.0,
+            uy: 0.0,
+            omega: 0.0,
+        },
+        mass,
+        inertia: 0.5 * mass * a * a,
+        accel: (0.0, 0.0),
+    };
+    let (mut iters, mut vmax) = (0.0, 0.0f64);
+    for _ in 0..steps {
+        let info = bf.step_coupled(
+            &mut body,
+            (0.0, 0.0, torque),
+            dt,
+            ma,
+            stokes_annulus_drag(a, radius, 1.0, nu),
+            kappa,
+            1e-8,
+            30,
+        );
+        iters += info.iterations as f64;
+        vmax = vmax.max(body.disc.ux.hypot(body.disc.uy));
+    }
+    (
+        body.disc.omega / (torque / kappa) - 1.0,
+        vmax,
+        iters / steps as f64,
+    )
+}

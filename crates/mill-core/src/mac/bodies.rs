@@ -142,7 +142,7 @@ impl BodyFlow {
             nu,
             state: None,
             prev_mesh: None,
-            weno: false,
+            weno: true,
         }
     }
 
@@ -261,8 +261,10 @@ impl BodyFlow {
             let un = (m * u0 / dt + fxk + kx * uk) / (m / dt + kx);
             let vn = (m * v0 / dt + fyk + ky * vk) / (m / dt + ky);
             let wn = (body.inertia * w0 / dt + tk + kw * wk) / (body.inertia / dt + kw);
-            let scale = ((un - u0).powi(2) + (vn - v0).powi(2)).sqrt().max(1e-12);
             let rr = body.disc.r;
+            let scale = ((un - u0).powi(2) + (vn - v0).powi(2) + (rr * (wn - w0)).powi(2))
+                .sqrt()
+                .max(1e-12);
             let residual =
                 ((un - uk).powi(2) + (vn - vk).powi(2) + (rr * (wn - wk)).powi(2)).sqrt() / scale;
             uk = un;

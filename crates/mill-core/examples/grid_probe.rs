@@ -40,6 +40,8 @@ fn main() {
         "E4b" => e4b(),
         "E4s" => e4s(),
         "E4m" => e4m(),
+        "E4d" => e4d(),
+        "E4e" => e4e(),
         "E4k" => e4k(),
         "E4h" => e4h(),
         "E4p" => e4p(),
@@ -838,5 +840,39 @@ fn e4y() {
             last.1,
             last.1 / y.max(1e-30)
         );
+    }
+}
+
+fn e4d() {
+    use mill_core::mac::verify::verify_falling_disc;
+    println!(
+        "E4d falling disc a = 0.1 released at y = 0.15 in the drum, t = 0.6 s: y at 5 sample times"
+    );
+    for nu in [1e-3, 1e-4] {
+        for ratio in [1.0, 1.05, 1.2] {
+            for n in [64usize, 128] {
+                let t = Instant::now();
+                let r = verify_falling_disc(n, 0.1, ratio, 0.15, nu, 0.6, 0.3);
+                let ys: Vec<String> = r.y.iter().map(|y| format!("{y:.4}")).collect();
+                println!(
+                    "nu={nu:.0e} rho={ratio:<4} n={n:<4} steps {:>5} iters {:.1} ok={} vymax {:.3} y: {} ({:.0?})",
+                    r.steps, r.iterations, r.ok, r.vy_max, ys.join(" "), t.elapsed()
+                );
+            }
+        }
+    }
+}
+
+fn e4e() {
+    println!("E4e free disc a = 0.2 under torque T = 0.05 in the drum at rest (nu = 1): steady spin vs T / kappa");
+    for n in [64usize, 128, 256] {
+        for ratio in [0.5, 1.0, 3.0] {
+            let (err, v, it) =
+                mill_core::mac::verify::verify_free_spin(n, 0.2, ratio, 0.05, 1.0, 0.8, 0.01);
+            println!(
+                "n={n:<4} rho={ratio:<4} spin err {:+.3}%  max translation {v:.1e}  iters {it:.1}",
+                100.0 * err
+            );
+        }
     }
 }

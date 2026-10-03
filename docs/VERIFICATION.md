@@ -569,3 +569,18 @@ Disc a = 0.2 in the drum (R = 0.5), force 1.0 along +x, `grid_probe --exp E4m | 
   is met to ~2 % (an extrapolation, not a direct measurement).
 - coupled run at nu = 1e-3: stable for rho_s = 0.5 ... 3 (added mass up to 3 x the body mass), 3 iterations per step; speed
   deficit vs the inviscid value -3.5 ... -7.8 % (viscous), independent of dt and n to 0.4 %.
+
+## E4 summary (2026-10-03) — rigid bodies in fluid: gate MET
+
+| item | result |
+|---|---|
+| (a) fixed disc buoyancy | <= 0.12 % at d/dx = 12, torque ~ 0 |
+| (b) prescribed disc, Stokes drag / Couette torque | <= 0.1 % (n = 64 ... 256); moving mesh vs frozen <= 0.5 %, force noise <= 0.6 % |
+| (c) free disc, Stokes terminal speed | <= 0.25 % (rho_s = 0.5, 1); added mass consistent with the inviscid value to ~2 % (extrapolated) |
+| (d) neutrally buoyant / light disc at low viscosity (`--exp E4d`: nu = 1e-3, 1e-4, rho_s = 1, 1.05, 1.2, dt = 0.3 dx / sqrt(g a)) | stable, 3 iterations per step; rho_s = 1 stays at rest exactly; trajectories n = 64 vs 128 within 2 % of the drop distance |
+| (e) free disc under torque, steady spin vs `T / kappa` (confined Couette) | -0.07 / -0.06 / -0.04 % at n = 64 / 128 / 256, all rho_s |
+
+Not done: a published 2D sedimentation benchmark (Glowinski 2001 / Wan & Turek 2006): their tables are not available here and are not
+reconstructed from memory. The Stokes terminal speed, Couette torque and added mass are exact references instead. Open items: several
+discs and disc-disc / disc-wall closeness (E5 lubrication), the disc inside a *free surface* flow (E8; the machinery is
+independent: `FlowState` carries the level set), and the cost of the mesh rebuild per step (about 5 ms at n = 128).
