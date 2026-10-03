@@ -492,3 +492,20 @@ Probe: `grid_probe --exp E3s --re <list> --n <list> --fill f`. Drum R = 0.5, Fr 
 - Re = 20: wall torque 0.2257 / 0.2119 / 0.2171 at n = 64 / 128 / 256 (spread +-3 %, not monotone); the exact steady balance
   `torque = A g x_cm` is missed by 9 / 17 / 11 %. Re = 0.2: the rigid-rotation torque is ~0 and the traction noise
   (about nu * velocity error / dx) exceeds it.
+
+### E3s follow-up: torque diagnostics (Re = 20, fill 0.3 unless noted)
+
+| n | wall torque | gravity (centroid) | gravity (faces) | pressure torque | dL/dt |
+|---|---|---|---|---|---|
+| 64 | 0.2256 | 0.2073 | 0.2045 | 1.2e-3 | 2e-4 |
+| 128 | 0.2118 | 0.1814 | 0.1796 | -4e-5 | -1e-4 |
+| 256 | 0.2171 | 0.1948 | 0.1940 | -3e-5 | -4e-4 |
+
+- The run is steady (dL/dt ~ 0) and the pressure torque is negligible, so `wall torque = A g x_cm` must hold; the wall
+  torque misses it by +0.021 / +0.032 / +0.023 (fill 0.6: +0.034/+0.038 at n = 64/128; fill 0.8: +0.041/+0.051).
+- Cause: the whole torque is carried by a velocity jump of ~0.2 % of the wall speed over the wall-adjacent cell
+  (`tau / (nu R perimeter) * dx`), so a relative velocity error of 4e-4 already gives ~20 % torque error. The traction
+  measurement is ill-conditioned for a nearly rigidly co-rotating liquid.
+- Steady film thickness h(phi) at phi = 2.5, 32.5, ... deg (n = 64 / 128 / 256), e.g. phi = 242.5 deg:
+  0.0389 / 0.0465 / 0.0427; 212.5 deg: 0.0387 / 0.0449 / 0.0405. Differences of +-8 % that are not monotone in n
+  (n = 128 is the outlier), i.e. the film (5-10 cells thick) is not converged and the centroid torque inherits +-7 %.

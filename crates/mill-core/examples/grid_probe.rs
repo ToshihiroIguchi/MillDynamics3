@@ -499,6 +499,20 @@ fn e3s() {
                 r.per_rev,
                 t0.elapsed()
             );
+            println!(
+                "       gravity from faces {:.6}  pressure torque {:.6}  wall-gravity {:.6}  dL/dt {:.6}",
+                r.torque_gravity_faces,
+                r.torque_pressure,
+                r.torque - r.torque_gravity_faces,
+                r.l_rate
+            );
+            let line: Vec<String> = r
+                .film
+                .iter()
+                .step_by(6)
+                .map(|h| format!("{h:.4}"))
+                .collect();
+            println!("       film(phi=2.5deg step 30deg) {}", line.join(" "));
         }
     }
 }

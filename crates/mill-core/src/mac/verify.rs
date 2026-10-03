@@ -1420,6 +1420,15 @@ pub struct DrumSlurry {
     /// Mean wall torque of each measured revolution.
     pub per_rev: Vec<f64>,
     pub volume_drift: f64,
+    /// Film thickness at 72 angles from the bottom (direction of rotation), at the end.
+    pub film: Vec<f64>,
+    /// Mean gravity torque from the liquid faces (`sum -g x dV` over liquid v-faces) as a check
+    /// of the level-set centroid.
+    pub torque_gravity_faces: f64,
+    /// Mean torque of the pressure on the cut wall cells (zero for an exact circle).
+    pub torque_pressure: f64,
+    /// Rate of change of the liquid angular momentum over the measured window.
+    pub l_rate: f64,
 }
 
 /// Viscous liquid in a horizontally rotating drum of radius 0.5 filled to the area fraction
@@ -1512,9 +1521,29 @@ pub fn verify_drum_slurry(
             );
         }
     }
+    let ang_mom = |flow: &StaggeredFlow| -> f64 {
+        let mut l = 0.0;
+        for jj in 0..n {
+            for ii in 0..n {
+                let c = ii + n * jj;
+                if flow.liq.active_u[c] {
+                    let (_, y) = sm.gu.centre(ii, jj);
+                    l -= y * flow.u[c] * dx * dx * sm.au[c];
+                }
+                if flow.liq.active_v[c] {
+                    let (x, _) = sm.gv.centre(ii, jj);
+                    l += x * flow.v[c] * dx * dx * sm.av[c];
+                }
+            }
+        }
+        l
+    };
+    let l_start = ang_mom(&flow);
     let measure_revs = measure.round().max(1.0) as usize;
     let mut series = Vec::new();
     let mut gravity = Vec::new();
+    let mut gravity_faces = Vec::new();
+    let mut pressure_torque = Vec::new();
     let mut per_rev = Vec::new();
     for _ in 0..measure_revs {
         let mut sum = 0.0;
@@ -1525,6 +1554,34 @@ pub fn verify_drum_slurry(
             series.push(t);
             let surf = flow.surface.as_ref().expect("free surface enabled");
             gravity.push(surf.volume0 * g * surf.ls.centroid_x());
+            let mut gf = 0.0;
+            for jj in 0..n {
+                for ii in 0..n {
+                    let c = ii + n * jj;
+                    if flow.liq.active_v[c] {
+                        let (x, _) = sm.gv.centre(ii, jj);
+                        gf += g * x * dx * dx * sm.av[c];
+                    }
+                }
+            }
+            gravity_faces.push(gf);
+            let mut tp = 0.0;
+            for jj in 0..n {
+                for ii in 0..n {
+                    let c = ii + n * jj;
+                    if !flow.liq.cell[c] {
+                        continue;
+                    }
+                    let fx = (sm.au[c + 1] - sm.au[c]) * dx;
+                    let fy = (sm.av[c + n] - sm.av[c]) * dx;
+                    let (x, y) = (
+                        -0.55 + (ii as f64 + 0.5) * dx,
+                        -0.55 + (jj as f64 + 0.5) * dx,
+                    );
+                    tp += flow.p[c] * (x * fy - y * fx);
+                }
+            }
+            pressure_torque.push(tp);
         }
         per_rev.push(sum / per_rev_steps as f64);
     }
@@ -1533,7 +1590,40 @@ pub fn verify_drum_slurry(
     let ripple = (series.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / count).sqrt()
         / mean.abs().max(1e-30);
     let surf = flow.surface.as_ref().expect("free surface enabled");
+    let ls = &surf.ls;
+    let psi_at = |x: f64, y: f64| -> f64 {
+        let (fx, fy) = ((x + 0.55) / dx - 0.5, (y + 0.55) / dx - 0.5);
+        let (i, j) = (fx.floor() as usize, fy.floor() as usize);
+        let (sx, sy) = (fx - i as f64, fy - j as f64);
+        let at = |a: usize, b: usize| ls.psi[a + n * b];
+        (1.0 - sx) * (1.0 - sy) * at(i, j)
+            + sx * (1.0 - sy) * at(i + 1, j)
+            + (1.0 - sx) * sy * at(i, j + 1)
+            + sx * sy * at(i + 1, j + 1)
+    };
+    let film: Vec<f64> = (0..72)
+        .map(|k| {
+            let p = 2.0 * PI * (k as f64 + 0.5) / 72.0;
+            let dir = (p.sin(), -p.cos());
+            let mut r = radius - 0.25 * dx;
+            let mut prev = psi_at(dir.0 * r, dir.1 * r);
+            while r > 0.05 {
+                let rn = r - 0.05 * dx;
+                let cur = psi_at(dir.0 * rn, dir.1 * rn);
+                if prev < 0.0 && cur >= 0.0 {
+                    return radius - (r - prev / (prev - cur) * 0.05 * dx);
+                }
+                prev = cur;
+                r = rn;
+            }
+            f64::NAN
+        })
+        .collect();
     DrumSlurry {
+        film,
+        torque_gravity_faces: gravity_faces.iter().sum::<f64>() / count,
+        torque_pressure: pressure_torque.iter().sum::<f64>() / count,
+        l_rate: (ang_mom(&flow) - l_start) / (measure_revs as f64 * rev),
         steps: settle_steps + series.len(),
         torque: mean,
         torque_gravity: gravity.iter().sum::<f64>() / count,
