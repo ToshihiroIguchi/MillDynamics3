@@ -135,6 +135,12 @@ impl FluidGrid {
     /// Operator `(sigma - Laplacian) x`, `sigma >= 0` in 1/m^2 (`1 / (nu dt)`); `sigma = 0` is the
     /// Poisson problem.
     pub fn helmholtz(&self, sigma: f64) -> Helmholtz<'_> {
+        self.helmholtz_masked(sigma, &self.fluid)
+    }
+
+    /// Same on the nodes with `active[c]` only: links to wall boundaries stay Dirichlet, links to
+    /// inactive neighbour nodes are dropped (zero normal derivative, e.g. a free surface).
+    pub fn helmholtz_masked(&self, sigma: f64, active: &[bool]) -> Helmholtz<'_> {
         let n = self.n;
         let dx2 = self.dx() * self.dx();
         let mut wx = vec![0.0; (n + 1) * n];
@@ -143,18 +149,23 @@ impl FluidGrid {
         for j in 0..n {
             for i in 0..n {
                 let c = i + n * j;
-                if !self.fluid[c] {
+                if !self.fluid[c] || !active[c] {
                     continue;
                 }
                 extra[c] = sigma * dx2;
                 for (k, link) in self.links[c].iter().enumerate() {
                     match link {
-                        Link::Fluid(_) => match k {
-                            RIGHT => wx[i + 1 + (n + 1) * j] = 1.0,
-                            UP => wy[i + n * (j + 1)] = 1.0,
-                            LEFT => wx[i + (n + 1) * j] = 1.0,
-                            _ => wy[i + n * j] = 1.0,
-                        },
+                        Link::Fluid(nb) => {
+                            if !active[*nb] {
+                                continue;
+                            }
+                            match k {
+                                RIGHT => wx[i + 1 + (n + 1) * j] = 1.0,
+                                UP => wy[i + n * (j + 1)] = 1.0,
+                                LEFT => wx[i + (n + 1) * j] = 1.0,
+                                _ => wy[i + n * j] = 1.0,
+                            }
+                        }
                         Link::Boundary { theta, .. } => extra[c] += 1.0 / theta,
                     }
                 }
@@ -164,6 +175,11 @@ impl FluidGrid {
         Helmholtz {
             grid: self,
             sigma,
+            active: active
+                .iter()
+                .zip(&self.fluid)
+                .map(|(&a, &f)| a && f)
+                .collect(),
             solver: PoissonSolver::from_weights(n, wx, wy, extra),
         }
     }
@@ -207,6 +223,7 @@ impl FluidGrid {
 pub struct Helmholtz<'a> {
     grid: &'a FluidGrid,
     sigma: f64,
+    active: Vec<bool>,
     solver: PoissonSolver,
 }
 
@@ -224,7 +241,7 @@ impl Helmholtz<'_> {
         let dx2 = g.dx() * g.dx();
         let mut b = vec![0.0; x.len()];
         for c in 0..x.len() {
-            if !g.fluid[c] {
+            if !self.active[c] {
                 continue;
             }
             b[c] = self.sigma * dx2 * x[c] + source.map_or(0.0, |s| dx2 * s[c]);
@@ -237,7 +254,7 @@ impl Helmholtz<'_> {
         let mut sol = vec![0.0; x.len()];
         let stats = self.solver.solve(&b, &mut sol, tol, 500);
         for c in 0..x.len() {
-            if g.fluid[c] {
+            if self.active[c] {
                 x[c] = sol[c];
             }
         }

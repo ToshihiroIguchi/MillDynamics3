@@ -16,6 +16,9 @@ pub struct LevelSet {
     pub dx: f64,
     pub half: f64,
     pub psi: Vec<f64>,
+    /// Fraction of each cell that is part of the domain (1 everywhere unless set); the liquid
+    /// volume and its correction only count the domain part.
+    pub weight: Vec<f64>,
 }
 
 /// WENO5 derivative from five consecutive one-sided differences (Jiang-Peng / Osher-Fedkiw).
@@ -46,7 +49,13 @@ impl LevelSet {
                 psi[i + n * j] = f(-half + (i as f64 + 0.5) * dx, -half + (j as f64 + 0.5) * dx);
             }
         }
-        Self { n, dx, half, psi }
+        Self {
+            n,
+            dx,
+            half,
+            psi,
+            weight: vec![1.0; n * n],
+        }
     }
 
     pub fn centre(&self, i: usize, j: usize) -> (f64, f64) {
@@ -252,7 +261,8 @@ impl LevelSet {
         let eps = 1.5 * self.dx;
         self.psi
             .iter()
-            .map(|&p| 1.0 - Self::smooth_heaviside(p, eps))
+            .zip(&self.weight)
+            .map(|(&p, &w)| w * (1.0 - Self::smooth_heaviside(p, eps)))
             .sum::<f64>()
             * self.dx
             * self.dx
@@ -267,11 +277,11 @@ impl LevelSet {
             for i in 1..n - 1 {
                 let c = i + n * j;
                 let p = self.psi[c];
-                if p.abs() < eps {
+                if p.abs() < eps && self.weight[c] > 0.0 {
                     let gx = (self.psi[c + 1] - self.psi[c - 1]) / (2.0 * self.dx);
                     let gy = (self.psi[c + n] - self.psi[c - n]) / (2.0 * self.dx);
                     let delta = 0.5 / eps * (1.0 + (PI * p / eps).cos());
-                    s += delta * (gx * gx + gy * gy).sqrt();
+                    s += self.weight[c] * delta * (gx * gx + gy * gy).sqrt();
                 }
             }
         }

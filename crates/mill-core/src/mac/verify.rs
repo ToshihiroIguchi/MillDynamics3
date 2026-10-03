@@ -568,3 +568,78 @@ pub fn verify_levelset_rotation(
         volume_drift: ls.volume() / v0 - 1.0,
     }
 }
+
+use super::levelset::LevelSet as FsLevelSet;
+
+/// Result of the still-pool test.
+#[derive(Clone, Copy, Debug)]
+pub struct StillPool {
+    pub steps: usize,
+    /// `max |velocity| / sqrt(g D)` over active nodes at the end.
+    pub spurious: f64,
+    /// `max |p - p_hydrostatic| / (g depth)` over liquid cells at the end.
+    pub pressure_err: f64,
+    /// Liquid area drift of the level set (`V / V0 - 1`).
+    pub volume_drift: f64,
+    /// Highest interface position error `max |y_interface - level|`, in cells.
+    pub level_err_cells: f64,
+}
+
+/// A circular drum (radius 0.5) half filled with still liquid (`psi = y - level`), gravity
+/// downward; integrates `t_end` seconds and checks that nothing moves and the pressure stays
+/// hydrostatic.
+pub fn verify_still_pool(n: usize, level: f64, nu: f64, t_end: f64) -> StillPool {
+    let radius = 0.5;
+    let g = 9.81;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
+    let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
+    let ls = FsLevelSet::new(n, 0.55, |_, y| y - level);
+    flow.enable_free_surface(ls, (0.0, -g));
+    let dx = sm.dx();
+    let dt0 = 0.3 * dx / (g * 2.0 * radius).sqrt();
+    let steps = (t_end / dt0).ceil() as usize;
+    let dt = t_end / steps as f64;
+    for _ in 0..steps {
+        flow.step(dt);
+    }
+    let mut vmax = 0.0f64;
+    for c in 0..n * n {
+        if flow.liq.active_u[c] {
+            vmax = vmax.max(flow.u[c].abs());
+        }
+        if flow.liq.active_v[c] {
+            vmax = vmax.max(flow.v[c].abs());
+        }
+    }
+    let surf = flow.surface.as_ref().expect("free surface enabled");
+    let depth = level + radius;
+    let mut perr = 0.0f64;
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            if flow.liq.cell[c] {
+                let (_, y) = surf.ls.centre(i, j);
+                perr = perr.max((flow.p[c] - g * (level - y)).abs());
+            }
+        }
+    }
+    // Interface height in the middle column: linear interpolation of psi.
+    let mut lerr = 0.0f64;
+    for i in n / 2 - 2..n / 2 + 2 {
+        for j in 0..n - 1 {
+            let (a, b) = (surf.ls.psi[i + n * j], surf.ls.psi[i + n * (j + 1)]);
+            if a < 0.0 && b >= 0.0 {
+                let (_, ya) = surf.ls.centre(i, j);
+                let yi = ya + dx * a / (a - b);
+                lerr = lerr.max((yi - level).abs() / dx);
+            }
+        }
+    }
+    StillPool {
+        steps,
+        spurious: vmax / (g * 2.0 * radius).sqrt(),
+        pressure_err: perr / (g * depth),
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
+        level_err_cells: lerr,
+    }
+}

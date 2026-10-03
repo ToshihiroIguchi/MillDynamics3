@@ -4,6 +4,7 @@
 use mill_core::mac::verify::{
     diagnose_couette_mac, verify_couette_mac, verify_couette_ns, verify_couette_stokes,
     verify_levelset_rotation, verify_manufactured, verify_spinup, verify_spinup_mac,
+    verify_still_pool,
 };
 use std::time::Instant;
 
@@ -22,6 +23,7 @@ fn main() {
         "R2d" => r2d(),
         "R2s" => r2s(),
         "E2ls" => e2ls(),
+        "E2a" => e2a(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -211,6 +213,29 @@ fn e2ls() {
                 r.steps,
                 r.shape_l1,
                 100.0 * r.volume_drift
+            );
+        }
+    }
+}
+
+fn e2a() {
+    println!("E2a still pool in a drum (R = 0.5), t_end = 1 s, nu = 1e-6");
+    println!(
+        "{:>5} {:>7} {:>6} {:>12} {:>12} {:>12} {:>10} {:>9}",
+        "n", "level", "steps", "|u|/sqrt(gD)", "p err", "volume", "y err/dx", "ms/step"
+    );
+    for level in [0.0f64, -0.13] {
+        for n in [64usize, 128] {
+            let t = Instant::now();
+            let r = verify_still_pool(n, level, 1e-6, 1.0);
+            println!(
+                "{n:>5} {level:>7} {:>6} {:>12.2e} {:>11.3}% {:>11.4}% {:>10.3} {:>9.2}",
+                r.steps,
+                r.spurious,
+                100.0 * r.pressure_err,
+                100.0 * r.volume_drift,
+                r.level_err_cells,
+                t.elapsed().as_secs_f64() * 1e3 / r.steps as f64
             );
         }
     }
