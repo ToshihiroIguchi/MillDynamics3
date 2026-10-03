@@ -187,7 +187,12 @@ impl StaggeredMesh {
 /// Fills the ghost layers of `q` by polynomial extrapolation from the interior along each grid
 /// direction: quadratic `3 q1 - 3 q2 + q3` where three interior values exist, else linear
 /// `2 q1 - q2`, else constant; directions of the best available order are averaged.
-pub fn extend(q: &mut [f64], layer: &[u8], n: usize) {
+pub fn extend(q: &mut [f64], layer: &[u8], n: usize, max_order: u8) {
+    extend_ordered(q, layer, n, &|_| max_order);
+}
+
+/// Same with the highest extrapolation order chosen per node.
+pub fn extend_ordered(q: &mut [f64], layer: &[u8], n: usize, order_of: &dyn Fn(usize) -> u8) {
     let ok = |a: isize, b: isize| a >= 0 && b >= 0 && (a as usize) < n && (b as usize) < n;
     let depth_max = layer
         .iter()
@@ -203,6 +208,7 @@ pub fn extend(q: &mut [f64], layer: &[u8], n: usize) {
                 if layer[c] != depth {
                     continue;
                 }
+                let max_order = order_of(c);
                 let at = |k: isize, di: isize, dj: isize| -> Option<f64> {
                     let (ii, jj) = (i as isize + k * di, j as isize + k * dj);
                     (ok(ii, jj) && layer[ii as usize + n * jj as usize] < depth)
@@ -211,8 +217,10 @@ pub fn extend(q: &mut [f64], layer: &[u8], n: usize) {
                 let mut best = (0u8, 0.0f64, 0.0f64);
                 for (di, dj) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
                     let cand = match (at(1, di, dj), at(2, di, dj), at(3, di, dj)) {
-                        (Some(a), Some(b), Some(c3)) => Some((3u8, 3.0 * a - 3.0 * b + c3)),
-                        (Some(a), Some(b), None) => Some((2, 2.0 * a - b)),
+                        (Some(a), Some(b), Some(c3)) if max_order >= 3 => {
+                            Some((3u8, 3.0 * a - 3.0 * b + c3))
+                        }
+                        (Some(a), Some(b), _) if max_order >= 2 => Some((2, 2.0 * a - b)),
                         (Some(a), None, _) => Some((1, a)),
                         _ => None,
                     };
@@ -256,6 +264,12 @@ pub struct Surface {
     pub volume0: f64,
     /// Reinitialisation sweeps per step.
     pub reinit_iterations: usize,
+    /// Smallest interface fraction of the ghost-fluid pressure condition.
+    pub theta_min: f64,
+    /// Use the interface position predicted at the end of the step for the pressure condition.
+    pub predictor: bool,
+    /// Restore the liquid area every step by shifting the level set.
+    pub correct_volume: bool,
 }
 
 impl Surface {
@@ -313,7 +327,7 @@ impl Liquid {
         }
     }
 
-    fn from_level_set(sm: &StaggeredMesh, psi: &[f64]) -> Self {
+    fn from_level_set(sm: &StaggeredMesh, psi: &[f64], theta_min: f64) -> Self {
         let n = sm.n();
         let cell: Vec<bool> = (0..n * n)
             .map(|c| psi[c] < 0.0 && sm.mesh.pressure_active[c])
@@ -335,8 +349,8 @@ impl Liquid {
             }
             match (cell[lo], cell[hi]) {
                 (true, true) => (1, 1.0),
-                (true, false) => (2, (psi[lo] / (psi[lo] - psi[hi])).clamp(THETA_MIN_FS, 1.0)),
-                (false, true) => (3, (psi[hi] / (psi[hi] - psi[lo])).clamp(THETA_MIN_FS, 1.0)),
+                (true, false) => (2, (psi[lo] / (psi[lo] - psi[hi])).clamp(theta_min, 1.0)),
+                (false, true) => (3, (psi[hi] / (psi[hi] - psi[lo])).clamp(theta_min, 1.0)),
                 (false, false) => (0, 1.0),
             }
         };
@@ -400,6 +414,8 @@ pub struct StaggeredFlow<'a> {
     pub time: f64,
     /// Largest `|div|` (per cell, aperture weighted) right after the last projection.
     pub projected_divergence: f64,
+    /// Iterations and residual of the last pressure solve.
+    pub last_solve: (u32, f64),
     /// Flux sampling corrections `off * d(velocity)/d(face direction)`, held fixed during a
     /// projection so that it stays exact.
     cu: Vec<f64>,
@@ -410,6 +426,18 @@ pub struct StaggeredFlow<'a> {
     pub surface: Option<Surface>,
     /// Third-order upwind-biased advection instead of central differences.
     pub upwind: bool,
+    /// Always use backward Euler / AB1 (robustness over accuracy).
+    pub first_order: bool,
+    /// Highest polynomial order of the ghost extrapolation (3 quadratic, 2 linear, 1 constant).
+    pub ext_order: u8,
+    /// Same for nodes that are not part of the liquid topology (air side of a free surface).
+    pub air_order: u8,
+    /// Diagnostics: drop the convective term.
+    pub skip_advection: bool,
+    /// Incremental pressure form (previous pressure gradient in the predictor); off = pure projection.
+    pub incremental: bool,
+    /// First-order upwind advection (diagnostic / most robust).
+    pub upwind1: bool,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -432,12 +460,19 @@ impl<'a> StaggeredFlow<'a> {
             poisson,
             time: 0.0,
             projected_divergence: 0.0,
+            last_solve: (0, 0.0),
             cu: vec![0.0; n * n],
             cv: vec![0.0; n * n],
             helm: None,
             liq,
             surface: None,
             upwind: false,
+            first_order: false,
+            ext_order: 3,
+            air_order: 3,
+            skip_advection: false,
+            incremental: true,
+            upwind1: false,
         }
     }
 
@@ -447,16 +482,41 @@ impl<'a> StaggeredFlow<'a> {
     pub fn enable_free_surface(&mut self, mut ls: LevelSet, gravity: (f64, f64)) {
         ls.weight = self.sm.cell_fraction.clone();
         let volume0 = ls.volume();
-        self.liq = Liquid::from_level_set(self.sm, &ls.psi);
+        self.liq = Liquid::from_level_set(self.sm, &ls.psi, THETA_MIN_FS);
         self.poisson = self.liq.poisson(self.sm);
         self.surface = Some(Surface {
             ls,
             gravity,
             volume0,
             reinit_iterations: 2,
+            theta_min: THETA_MIN_FS,
+            predictor: true,
+            correct_volume: true,
         });
         self.prev = None;
         self.helm = None;
+    }
+
+    fn extend_u(&self, q: &mut [f64]) {
+        let n = self.sm.n();
+        extend_ordered(q, &self.liq.layer_u, n, &|c| {
+            if self.liq.ku[c] != 0 {
+                self.ext_order
+            } else {
+                self.air_order
+            }
+        });
+    }
+
+    fn extend_v(&self, q: &mut [f64]) {
+        let n = self.sm.n();
+        extend_ordered(q, &self.liq.layer_v, n, &|c| {
+            if self.liq.kv[c] != 0 {
+                self.ext_order
+            } else {
+                self.air_order
+            }
+        });
     }
 
     fn update_flux_corrections(&mut self) {
@@ -543,7 +603,8 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         let mut phi = vec![0.0; n * n];
-        self.poisson.solve(&rhs, &mut phi, TOL_PROJECT, 300);
+        let st = self.poisson.solve(&rhs, &mut phi, TOL_PROJECT, 300);
+        self.last_solve = (st.iterations, st.residual);
         let k = dt_eff / dx;
         for j in 0..n {
             for i in 1..n {
@@ -568,8 +629,12 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         self.projected_divergence = self.max_divergence();
-        extend(&mut self.u, &self.liq.layer_u, n);
-        extend(&mut self.v, &self.liq.layer_v, n);
+        let mut tmp = std::mem::take(&mut self.u);
+        self.extend_u(&mut tmp);
+        self.u = tmp;
+        let mut tmp = std::mem::take(&mut self.v);
+        self.extend_v(&mut tmp);
+        self.v = tmp;
         phi
     }
 
@@ -607,10 +672,17 @@ impl<'a> StaggeredFlow<'a> {
     fn advection(&self, u: &[f64], v: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let sm = self.sm;
         let n = sm.n();
+        let inv1 = 1.0 / sm.dx();
         let inv2 = 1.0 / (2.0 * sm.dx());
         let inv6 = 1.0 / (6.0 * sm.dx());
         let d = |q: &[f64], c: usize, stride: usize, vel: f64| -> f64 {
-            if !self.upwind {
+            if self.upwind1 {
+                if vel > 0.0 {
+                    (q[c] - q[c - stride]) * inv1
+                } else {
+                    (q[c + stride] - q[c]) * inv1
+                }
+            } else if !self.upwind {
                 (q[c + stride] - q[c - stride]) * inv2
             } else if vel > 0.0 {
                 (q[c - 2 * stride] - 6.0 * q[c - stride] + 3.0 * q[c] + 2.0 * q[c + stride]) * inv6
@@ -674,8 +746,8 @@ impl<'a> StaggeredFlow<'a> {
                 ay[c] = -av[c] + self.nu * lv[c];
             }
         }
-        extend(&mut ax, &self.liq.layer_u, n);
-        extend(&mut ay, &self.liq.layer_v, n);
+        self.extend_u(&mut ax);
+        self.extend_v(&mut ay);
         let u0 = std::mem::replace(&mut self.u, ax);
         let v0 = std::mem::replace(&mut self.v, ay);
         self.p = self.project(1.0);
@@ -697,8 +769,10 @@ impl<'a> StaggeredFlow<'a> {
         if let Some(surf) = &self.surface {
             let vel = surf.cell_velocity(&self.u, &self.v);
             let mut pred = surf.ls.clone();
-            pred.advect(&vel.0, &vel.1, dt);
-            self.liq = Liquid::from_level_set(sm, &pred.psi);
+            if surf.predictor {
+                pred.advect(&vel.0, &vel.1, dt);
+            }
+            self.liq = Liquid::from_level_set(sm, &pred.psi, surf.theta_min);
             start_velocity = Some(vel);
             self.poisson = self.liq.poisson(sm);
             self.helm = None;
@@ -707,11 +781,26 @@ impl<'a> StaggeredFlow<'a> {
                     self.p[c] = 0.0;
                 }
             }
-            extend(&mut self.u, &self.liq.layer_u, n);
-            extend(&mut self.v, &self.liq.layer_v, n);
+            let mut tmp = std::mem::take(&mut self.u);
+            self.extend_u(&mut tmp);
+            self.u = tmp;
+            let mut tmp = std::mem::take(&mut self.v);
+            self.extend_v(&mut tmp);
+            self.v = tmp;
         }
-        let (au, av) = self.advection(&self.u, &self.v);
-        let (gpx, gpy) = self.pressure_gradient(&self.p);
+        if self.first_order {
+            self.prev = None;
+        }
+        let (mut au, mut av) = self.advection(&self.u, &self.v);
+        if self.skip_advection {
+            au.fill(0.0);
+            av.fill(0.0);
+        }
+        let (mut gpx, mut gpy) = self.pressure_gradient(&self.p);
+        if !self.incremental {
+            gpx.fill(0.0);
+            gpy.fill(0.0);
+        }
         let bdf2 = matches!(&self.prev, Some(pv) if (pv.dt - dt).abs() < 1e-14 * dt);
         let sigma = if bdf2 { 1.5 } else { 1.0 } / (self.nu * dt);
         let (gx, gy) = gravity.unwrap_or((0.0, 0.0));
@@ -751,14 +840,14 @@ impl<'a> StaggeredFlow<'a> {
             hu.solve(&mut xu, Some(&su), |x, y| wv(x, y).0, TOL_VISCOUS);
             hv.solve(&mut xv, Some(&sv), |x, y| wv(x, y).1, TOL_VISCOUS);
         }
-        extend(&mut xu, &self.liq.layer_u, n);
-        extend(&mut xv, &self.liq.layer_v, n);
+        self.extend_u(&mut xu);
+        self.extend_v(&mut xv);
         self.u = xu;
         self.v = xv;
         let dt_eff = if bdf2 { dt * 2.0 / 3.0 } else { dt };
         let phi = self.project(dt_eff);
         for (p, f) in self.p.iter_mut().zip(&phi) {
-            *p += f;
+            *p = if self.incremental { *p + f } else { *f };
         }
         self.prev = Some(old);
         self.time += dt;
@@ -769,7 +858,9 @@ impl<'a> StaggeredFlow<'a> {
             let surf = self.surface.as_mut().expect("free surface enabled");
             surf.ls.advect(&uc, &vc, dt);
             surf.ls.reinitialize(surf.reinit_iterations);
-            surf.ls.correct_volume(surf.volume0);
+            if surf.correct_volume {
+                surf.ls.correct_volume(surf.volume0);
+            }
         }
     }
 

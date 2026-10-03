@@ -3,8 +3,8 @@
 
 use mill_core::mac::verify::{
     diagnose_couette_mac, verify_couette_mac_scheme, verify_couette_ns, verify_couette_stokes,
-    verify_levelset_rotation, verify_manufactured, verify_sloshing_circle, verify_sloshing_rect,
-    verify_spinup, verify_spinup_mac, verify_still_pool,
+    verify_dam_break, verify_levelset_rotation, verify_manufactured, verify_sloshing_circle,
+    verify_sloshing_rect, verify_spinup, verify_spinup_mac, verify_still_pool,
 };
 use std::time::Instant;
 
@@ -27,6 +27,7 @@ fn main() {
         "E2ref" => e2ref(),
         "E2b" => e2b(),
         "E2bc" => e2bc(),
+        "E2c" => e2c(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -314,4 +315,27 @@ fn e2bc() {
             r.damping
         );
     }
+}
+
+fn e2c() {
+    let ts = [0.5, 1.0, 1.5, 2.0, 2.5];
+    println!("E2c dam break of a square column a = 0.2 in a 1.0 tank, nu = 1e-6 (Z = x_front / a)");
+    print!("{:>5} {:>7} {:>8}", "n", "scheme", "volume");
+    for t in ts {
+        print!("  T={t:<4}");
+    }
+    println!("  max|u|");
+    for (n, upwind) in [(64usize, true), (128, true), (256, true), (128, false)] {
+        let r = verify_dam_break(n, 0.2, 1e-6, &ts, upwind);
+        print!(
+            "{n:>5} {:>7} {:>7.4}%",
+            if upwind { "upwind3" } else { "central" },
+            100.0 * r.volume_drift
+        );
+        for (_, z) in &r.front {
+            print!("  {z:>6.3}");
+        }
+        println!("  {:.2}", r.max_speed);
+    }
+    println!("Ritter shallow-water upper bound: Z = 1 + 2 T");
 }

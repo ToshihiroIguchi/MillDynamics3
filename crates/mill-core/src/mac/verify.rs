@@ -824,3 +824,74 @@ pub fn verify_sloshing_circle(n: usize, amp: f64, nu: f64, t_end: f64, upwind: b
         volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
     }
 }
+
+/// Result of the dam-break run: front position history and conservation.
+#[derive(Clone, Debug)]
+pub struct DamBreak {
+    pub steps: usize,
+    /// `(T, Z)` samples with `T = t sqrt(g / a)`, `Z = (x_front - x_wall) / a`.
+    pub front: Vec<(f64, f64)>,
+    pub volume_drift: f64,
+    pub max_speed: f64,
+}
+
+/// Collapse of a square liquid column of side `a` against the left wall of a rectangular tank
+/// `1.0 x 0.95` (liquid released at `t = 0`); samples the surge front (rightmost liquid cell in
+/// the bottom row) at the dimensionless times `ts`.
+pub fn verify_dam_break(n: usize, a: f64, nu: f64, ts: &[f64], upwind: bool) -> DamBreak {
+    let g = 9.81;
+    let (left, floor) = (-0.5, -0.5);
+    let top = floor + 0.95;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        (x - 0.5).max(left - x).max(floor - y).max(y - top)
+    });
+    let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
+    flow.upwind = upwind;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| (x - (left + a)).max(y - (floor + a)));
+    flow.enable_free_surface(ls, (0.0, -g));
+    flow.surface.as_mut().expect("surface").ls.reinitialize(20);
+    let dx = sm.dx();
+    let dt = 0.2 * dx / (2.0 * (g * a).sqrt());
+    let t_end = ts.iter().cloned().fold(0.0, f64::max) * (a / g).sqrt();
+    let steps = (t_end / dt).ceil() as usize;
+    let mut front = Vec::new();
+    let mut next = 0;
+    let mut max_speed = 0.0f64;
+    // Bottom row: first row whose centre is above the floor.
+    let jrow = ((floor - (-0.55)) / dx).floor() as usize;
+    for s in 0..steps {
+        flow.step(dt);
+        let t = (s + 1) as f64 * dt;
+        let tt = t * (g / a).sqrt();
+        while next < ts.len() && tt >= ts[next] {
+            let ls = &flow.surface.as_ref().expect("surface").ls;
+            let mut xf = left;
+            for i in 0..n {
+                if ls.psi[i + n * jrow] < 0.0 && sm.mesh.pressure_active[i + n * jrow] {
+                    let (x, _) = ls.centre(i, jrow);
+                    // Interface position by linear interpolation towards the next cell.
+                    let (p0, p1) = (ls.psi[i + n * jrow], ls.psi[i + 1 + n * jrow]);
+                    xf = if p1 >= 0.0 {
+                        x + dx * p0 / (p0 - p1)
+                    } else {
+                        x
+                    };
+                }
+            }
+            front.push((tt, (xf - left) / a));
+            next += 1;
+        }
+        for c in 0..n * n {
+            if flow.liq.active_u[c] {
+                max_speed = max_speed.max(flow.u[c].abs());
+            }
+        }
+    }
+    let surf = flow.surface.as_ref().expect("surface");
+    DamBreak {
+        steps,
+        front,
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
+        max_speed,
+    }
+}

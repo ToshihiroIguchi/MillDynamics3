@@ -88,3 +88,26 @@ fn solver_is_deterministic() {
     let (b, ..) = verify_manufactured(48);
     assert_eq!(a.to_bits(), b.to_bits());
 }
+
+#[test]
+fn half_disc_sloshing_reference_is_converged() {
+    let a = super::reference::half_disc_sloshing(12, 1)[0];
+    let b = super::reference::half_disc_sloshing(16, 1)[0];
+    assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+    assert!((b - 1.355727).abs() < 1e-5, "{b}");
+}
+
+#[test]
+fn level_set_disc_rotates_with_small_volume_drift() {
+    let r = super::verify::verify_levelset_rotation(96, false, 1.0, 2);
+    assert!(r.volume_drift.abs() < 2e-3, "{r:?}");
+    assert!(r.shape_l1 < 0.05, "{r:?}");
+}
+
+#[test]
+fn still_pool_stays_at_rest() {
+    let r = super::verify::verify_still_pool(48, -0.1, 1e-6, 0.3);
+    assert!(r.spurious < 1e-4, "{r:?}");
+    assert!(r.pressure_err < 0.05, "{r:?}");
+    assert!(r.volume_drift.abs() < 1e-4, "{r:?}");
+}

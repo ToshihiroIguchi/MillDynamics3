@@ -386,3 +386,43 @@ shrink between n = 128 and 256 (cut-cell jitter). Judged acceptable for the gate
 Solver tolerances for the staggered stepper were relaxed 1e-12 -> 1e-9 (relative residual) with
 identical errors and projected divergence <= 8e-15; Helmholtz hierarchies are cached per sigma.
 Cost at n = 128: 15-19 ms/step (was 20-30).
+
+## Grid-solver track — E2 (free surface), status 2026-10-03
+
+Code: `mac/levelset.rs` (WENO5 + TVD-RK3 level set, Newton-contour reinitialisation, volume
+correction), free-surface layer in `mac/staggered.rs` (`Liquid` topology rebuilt per step from a
+predicted interface, ghost-fluid Neumann/Dirichlet pressure with `1/theta`, masked viscous
+Helmholtz, gravity as a face force, predictor/corrector level-set coupling, optional third-order
+upwind advection), reference solutions in `mac/reference.rs`. Probes: `grid_probe --exp E2ls | E2a |
+E2b | E2bc | E2c | E2ref`.
+
+* **Level set** (rigid rotation, 1 revolution, n = 64/128/256): disc volume drift -0.19 / 0.009 /
+  0.031 % (uncorrected, reinit every 2 steps), advection alone is second order. The Zalesak slotted
+  disc loses its slot corners to reinitialisation (volume drift up to 0.45 %), covered by the
+  global volume correction that the solver applies every step.
+* **E2a still pool** (R = 0.5, 1 s, water): spurious velocity 1.05e-6 / 7.6e-7 sqrt(gD) (gate 1e-4),
+  hydrostatic pressure error 1.75 / 0.42 % (n = 64 / 128, level 0) and 2.4 / 0.57 % (level -0.13)
+  (gate 1 % at n = 128), volume exact. **Met.**
+* **E2b sloshing.** Rectangular tank 1.0 x 0.5 (exact Lamb dispersion, omega = 5.31655 rad/s): frequency
+  error -0.036 / -0.019 % at n = 64 / 128 (nu = 1e-6); viscous damping rate rises monotonically with
+  nu (0.0002 / 0.014 / 0.075 / 0.351 1/s for nu = 1e-6 .. 1e-2). Half-full circular drum R = 0.5:
+  independent Rayleigh-Ritz reference K R = 1.355727 (converged to 6 digits, harmonic basis;
+  omega = 5.15746 rad/s): frequency error -0.05 / +0.02 / -0.28 % at n = 64 / 128 / 256 (tilt amp
+  25 mm). **Met** (<= 1 %). A real defect was found and fixed on the way: with the interface advanced
+  after the velocity update the free surface injected energy (amplitude +1 % per period, first
+  order in dx); a predictor (interface advected with the old velocity defines the pressure
+  topology) and a trapezoidal corrector (final level-set step with the mean of old and new
+  velocity) removed it (growth rate 0.017 -> 0.0005 1/s).
+* **E2c dam break** (square column a = 0.2 in a 1.0 tank, water). Front position Z = x/a at
+  T = t sqrt(g/a) = 0.5, 1, 1.5, 2, 2.5: n = 64: 1.380 2.015 2.759 3.590 4.508; n = 128: 1.339 1.929
+  2.710 3.576 4.488; n = 256: 1.315 1.912 2.704 3.623 4.480. 128 -> 256 changes by <= 1.8 %; all values
+  below the shallow-water bound 1 + 2T. The Martin & Moyce (1952) data table could not be obtained
+  from the web sources available to this session (the paper is paywalled), so no comparison with
+  the experiment was made and no numbers were invented. **NOT MET: at wall impact (T ~ 2.8) the
+  jet that climbs the wall (liquid sheet ~1.7 cells thick) blows up for n >= 128 (n = 64 survives).**
+  Diagnosis: growth factor 2-3 per step independent of dt (CFL 0.2 -> 0.05), advection scheme
+  (central / third-order / first-order upwind), time scheme (BDF2 / BDF1), incremental pressure,
+  predictor, volume correction, theta_min (0.01 .. 1.0), ghost extrapolation order, wall alignment
+  and Poisson convergence (9-13 iterations) are all excluded; larger viscosity delays it (nu =
+  1e-4: T = 3.06, 1e-3: 3.9) and nu = 1e-2 is stable. It is a grid-scale inviscid instability of
+  sheets thinner than ~2 cells, not yet understood. Open: (d) rimming flow was not run.
