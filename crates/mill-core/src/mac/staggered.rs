@@ -39,6 +39,75 @@ pub struct StaggeredMesh {
     pub off_v: Vec<f64>,
     /// Fraction of each cell inside the domain (8 x 8 sub-sampling).
     pub cell_fraction: Vec<f64>,
+    /// Net flux (per unit length) of the moving solid bodies' surface velocity out of each cell's
+    /// fluid part, see [`StaggeredMesh::set_body_flux`]; zero for static solids.
+    pub body_flux: Vec<f64>,
+}
+
+/// A rigid disc moving through the domain: centre, radius, translation velocity and spin.
+#[derive(Clone, Copy, Debug)]
+pub struct Disc {
+    pub cx: f64,
+    pub cy: f64,
+    pub r: f64,
+    pub ux: f64,
+    pub uy: f64,
+    pub omega: f64,
+}
+
+impl Disc {
+    /// Signed distance to the disc surface (negative inside).
+    pub fn sdf(&self, x: f64, y: f64) -> f64 {
+        ((x - self.cx).powi(2) + (y - self.cy).powi(2)).sqrt() - self.r
+    }
+
+    /// Velocity of the material point of the disc at `(x, y)`.
+    pub fn velocity(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.ux - self.omega * (y - self.cy),
+            self.uy + self.omega * (x - self.cx),
+        )
+    }
+}
+
+/// Length and first moment (both as fractions of the segment `p0 -> p1`) of the part with
+/// `phi < 0`; crossings are located by bisection.
+fn inside_moments(phi: &impl Fn(f64, f64) -> f64, p0: (f64, f64), p1: (f64, f64)) -> (f64, f64) {
+    const M: usize = 16;
+    let at = |t: f64| (p0.0 + t * (p1.0 - p0.0), p0.1 + t * (p1.1 - p0.1));
+    let inside = |t: f64| {
+        let (x, y) = at(t);
+        phi(x, y) < 0.0
+    };
+    let (mut len, mut mom) = (0.0, 0.0);
+    for k in 0..M {
+        let (ta, tb) = (k as f64 / M as f64, (k + 1) as f64 / M as f64);
+        let (ia, ib) = (inside(ta), inside(tb));
+        let (a, b) = match (ia, ib) {
+            (true, true) => (ta, tb),
+            (false, false) => continue,
+            _ => {
+                let (mut lo, mut hi) = (ta, tb);
+                for _ in 0..50 {
+                    let mid = 0.5 * (lo + hi);
+                    if inside(mid) == ia {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let t = 0.5 * (lo + hi);
+                if ia {
+                    (ta, t)
+                } else {
+                    (t, tb)
+                }
+            }
+        };
+        len += b - a;
+        mom += 0.5 * (b * b - a * a);
+    }
+    (len, mom)
 }
 
 /// Centroid (as a fraction `t` of the segment `p0 -> p1`) of the part with `phi < 0`; 0.5 if none.
@@ -172,6 +241,51 @@ impl StaggeredMesh {
             off_u,
             off_v,
             cell_fraction,
+            body_flux: vec![0.0; n * n],
+        }
+    }
+
+    /// Sets `body_flux` for moving discs: the surface velocity of a rigid body is divergence free,
+    /// so the flux it drives through the part of a cell boundary that the body covers equals,
+    /// with the opposite sign, the flux through the body's own surface inside the cell; the
+    /// pressure projection must add it to the divergence of the open faces.
+    pub fn set_body_flux(&mut self, discs: &[Disc]) {
+        let n = self.n();
+        let dx = self.dx();
+        let half = self.mesh.grid.half;
+        let mut covered_u = vec![0.0; n * n];
+        let mut covered_v = vec![0.0; n * n];
+        for d in discs {
+            let phi = |x: f64, y: f64| d.sdf(x, y);
+            for j in 0..n {
+                for i in 0..n {
+                    let c = i + n * j;
+                    let (x0, y0) = (-half + i as f64 * dx, -half + j as f64 * dx);
+                    if (x0 - d.cx).abs() > d.r + 2.0 * dx || (y0 - d.cy).abs() > d.r + 2.0 * dx {
+                        continue;
+                    }
+                    // u-face: vertical segment at x0 from y0 to y0 + dx, normal velocity ub_x.
+                    let (len, mom) = inside_moments(&phi, (x0, y0), (x0, y0 + dx));
+                    if len > 0.0 {
+                        let alpha = d.ux - d.omega * (y0 - d.cy);
+                        covered_u[c] += alpha * len - d.omega * dx * mom;
+                    }
+                    let (len, mom) = inside_moments(&phi, (x0, y0), (x0 + dx, y0));
+                    if len > 0.0 {
+                        let alpha = d.uy + d.omega * (x0 - d.cx);
+                        covered_v[c] += alpha * len + d.omega * dx * mom;
+                    }
+                }
+            }
+        }
+        self.body_flux.fill(0.0);
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                let right = if i + 1 < n { covered_u[c + 1] } else { 0.0 };
+                let top = if j + 1 < n { covered_v[c + n] } else { 0.0 };
+                self.body_flux[c] = right - covered_u[c] + top - covered_v[c];
+            }
         }
     }
 
@@ -461,6 +575,11 @@ pub struct StaggeredFlow<'a> {
     pub u: Vec<f64>,
     pub v: Vec<f64>,
     pub p: Vec<f64>,
+    /// Velocity right after the viscous solve of the last step (before the projection): the
+    /// projection moves nodes that sit almost on a wall off their wall value, which a wall
+    /// traction `(u_b - u) / theta` amplifies; loads on bodies are read from this field.
+    pub u_star: Vec<f64>,
+    pub v_star: Vec<f64>,
     wall_velocity: WallVelocity<'a>,
     prev: Option<Prev>,
     poisson: PoissonSolver,
@@ -495,7 +614,139 @@ pub struct StaggeredFlow<'a> {
     pub smagorinsky: f64,
 }
 
+/// Everything of a [`StaggeredFlow`] except the mesh and the wall-velocity closure: moving
+/// bodies change the mesh every step, so the flow is carried from one mesh to the next.
+pub struct FlowState {
+    pub nu: f64,
+    pub u: Vec<f64>,
+    pub v: Vec<f64>,
+    pub p: Vec<f64>,
+    prev: Option<Prev>,
+    pub time: f64,
+    pub surface: Option<Surface>,
+    pub upwind: bool,
+    pub weno: bool,
+    pub stokes: bool,
+    pub stress_free_flux: bool,
+    pub robust_surface: bool,
+    pub smagorinsky: f64,
+}
+
 impl<'a> StaggeredFlow<'a> {
+    /// Detaches the flow state from its mesh.
+    pub fn into_state(self) -> FlowState {
+        FlowState {
+            nu: self.nu,
+            u: self.u,
+            v: self.v,
+            p: self.p,
+            prev: self.prev,
+            time: self.time,
+            surface: self.surface,
+            upwind: self.upwind,
+            weno: self.weno,
+            stokes: self.stokes,
+            stress_free_flux: self.stress_free_flux,
+            robust_surface: self.robust_surface,
+            smagorinsky: self.smagorinsky,
+        }
+    }
+
+    /// Continues `state` on a new mesh `sm` (same grid, moved bodies). Velocities at nodes that
+    /// the bodies uncovered are the ghost values extrapolated into the solid on the old mesh.
+    pub fn from_state(
+        sm: &'a StaggeredMesh,
+        state: FlowState,
+        wall_velocity: impl Fn(f64, f64) -> (f64, f64) + 'a,
+    ) -> Self {
+        let mut flow = Self::new(sm, state.nu, wall_velocity);
+        flow.u = state.u;
+        flow.v = state.v;
+        flow.p = state.p;
+        flow.prev = state.prev;
+        flow.time = state.time;
+        flow.upwind = state.upwind;
+        flow.weno = state.weno;
+        flow.stokes = state.stokes;
+        flow.stress_free_flux = state.stress_free_flux;
+        flow.robust_surface = state.robust_surface;
+        flow.smagorinsky = state.smagorinsky;
+        if let Some(mut surf) = state.surface {
+            surf.ls.weight = sm.cell_fraction.clone();
+            flow.liq = Liquid::from_level_set(sm, &surf.ls.psi, surf.theta_min);
+            flow.poisson = flow.liq.poisson(sm);
+            flow.surface = Some(surf);
+        }
+        // Fresh nodes need valid values: re-extend into the new ghost layers.
+        let mut tmp = std::mem::take(&mut flow.u);
+        flow.extend_u(&mut tmp);
+        flow.u = tmp;
+        let mut tmp = std::mem::take(&mut flow.v);
+        flow.extend_v(&mut tmp);
+        flow.v = tmp;
+        flow
+    }
+
+    /// Initialises what a moving body uncovered since `old` (the previous mesh): face nodes that
+    /// were solid get the body's rigid velocity `rigid(x, y)` (they lie within a step's travel of
+    /// its no-slip surface), cells that carried no pressure get the mean of their neighbours.
+    pub fn initialise_fresh(
+        &mut self,
+        old: &StaggeredMesh,
+        rigid: impl Fn(f64, f64) -> (f64, f64),
+    ) {
+        let sm = self.sm;
+        let n = sm.n();
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                if sm.gu.fluid[c] && !old.gu.fluid[c] {
+                    let (x, y) = sm.gu.centre(i, j);
+                    self.u[c] = rigid(x, y).0;
+                    if let Some(pv) = &mut self.prev {
+                        pv.u[c] = self.u[c];
+                    }
+                }
+                if sm.gv.fluid[c] && !old.gv.fluid[c] {
+                    let (x, y) = sm.gv.centre(i, j);
+                    self.v[c] = rigid(x, y).1;
+                    if let Some(pv) = &mut self.prev {
+                        pv.v[c] = self.v[c];
+                    }
+                }
+            }
+        }
+        let mut known: Vec<bool> = old.mesh.pressure_active.clone();
+        for _ in 0..3 {
+            let snapshot = known.clone();
+            for j in 1..n - 1 {
+                for i in 1..n - 1 {
+                    let c = i + n * j;
+                    if snapshot[c] || !sm.mesh.pressure_active[c] {
+                        continue;
+                    }
+                    let (mut sum, mut cnt) = (0.0, 0.0);
+                    for nb in [c - 1, c + 1, c - n, c + n] {
+                        if snapshot[nb] {
+                            sum += self.p[nb];
+                            cnt += 1.0;
+                        }
+                    }
+                    if cnt > 0.0 {
+                        self.p[c] = sum / cnt;
+                        known[c] = true;
+                    }
+                }
+            }
+        }
+        let mut tmp = std::mem::take(&mut self.u);
+        self.extend_u(&mut tmp);
+        self.u = tmp;
+        let mut tmp = std::mem::take(&mut self.v);
+        self.extend_v(&mut tmp);
+        self.v = tmp;
+    }
+
     pub fn new(
         sm: &'a StaggeredMesh,
         nu: f64,
@@ -510,6 +761,8 @@ impl<'a> StaggeredFlow<'a> {
             u: vec![0.0; n * n],
             v: vec![0.0; n * n],
             p: vec![0.0; n * n],
+            u_star: vec![0.0; n * n],
+            v_star: vec![0.0; n * n],
             wall_velocity: Box::new(wall_velocity),
             prev: None,
             poisson,
@@ -622,7 +875,7 @@ impl<'a> StaggeredFlow<'a> {
         };
         let right = if i + 1 < n { fu(i + 1 + n * j) } else { 0.0 };
         let top = if j + 1 < n { fv(i + n * (j + 1)) } else { 0.0 };
-        right - fu(i + n * j) + top - fv(i + n * j)
+        right - fu(i + n * j) + top - fv(i + n * j) + sm.body_flux[i + n * j]
     }
 
     pub fn max_divergence(&self) -> f64 {
@@ -1106,6 +1359,8 @@ impl<'a> StaggeredFlow<'a> {
         }
         self.extend_u(&mut xu);
         self.extend_v(&mut xv);
+        self.u_star = xu.clone();
+        self.v_star = xv.clone();
         self.u = xu;
         self.v = xv;
         let dt_eff = if bdf2 { dt * 2.0 / 3.0 } else { dt };

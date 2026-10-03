@@ -294,7 +294,7 @@ pub fn verify_couette_ns(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs {
     }
 }
 
-use super::staggered::{StaggeredFlow, StaggeredMesh};
+use super::staggered::{Disc, FlowState, StaggeredFlow, StaggeredMesh};
 
 /// Same hold test as [`verify_couette_ns`] on the staggered face-velocity scheme.
 pub fn verify_couette_mac(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs {
@@ -1728,5 +1728,230 @@ pub fn verify_buoyancy(n: usize, r: f64, t_end: f64) -> Buoyancy {
         side_force: fx / weight,
         torque: tq / (g * r * r * r),
         spurious: vmax / (g * 2.0 * radius).sqrt(),
+    }
+}
+
+/// Force and torque of the fluid on a disc (per unit density): pressure on the cut cells moved to
+/// the wall point along the local gradient, plus the viscous traction of the flow relative to the
+/// disc's rigid-body velocity (zero Dirichlet value at its surface, where the component-wise and
+/// the full-stress tractions coincide). Torque is about the disc centre.
+pub fn disc_load(flow: &StaggeredFlow, disc: &Disc) -> (f64, f64, f64) {
+    let sm = flow.sm;
+    let n = sm.n();
+    let dx = sm.dx();
+    let half = sm.mesh.grid.half;
+    let (mut fx, mut fy, mut tq) = (0.0, 0.0, 0.0);
+    for j in 1..n - 1 {
+        for i in 1..n - 1 {
+            let c = i + n * j;
+            if !flow.liq.cell[c] {
+                continue;
+            }
+            let (x, y) = (-half + (i as f64 + 0.5) * dx, -half + (j as f64 + 0.5) * dx);
+            let d = ((x - disc.cx).powi(2) + (y - disc.cy).powi(2)).sqrt();
+            if (d - disc.r).abs() > 1.5 * dx {
+                continue;
+            }
+            let (ax, ay) = (
+                (sm.au[c + 1] - sm.au[c]) * dx,
+                (sm.av[c + n] - sm.av[c]) * dx,
+            );
+            let grad = |lo: usize, hi: usize| -> f64 {
+                match (flow.liq.cell[lo], flow.liq.cell[hi]) {
+                    (true, true) => (flow.p[hi] - flow.p[lo]) / (2.0 * dx),
+                    (true, false) => (flow.p[c] - flow.p[lo]) / dx,
+                    (false, true) => (flow.p[hi] - flow.p[c]) / dx,
+                    _ => 0.0,
+                }
+            };
+            let (gx, gy) = (grad(c - 1, c + 1), grad(c - n, c + n));
+            let (sx, sy) = (
+                disc.cx + disc.r * (x - disc.cx) / d,
+                disc.cy + disc.r * (y - disc.cy) / d,
+            );
+            let pw = flow.p[c] + gx * (sx - x) + gy * (sy - y);
+            let (px, py) = (-pw * ax, -pw * ay);
+            fx += px;
+            fy += py;
+            tq += (sx - disc.cx) * py - (sy - disc.cy) * px;
+        }
+    }
+    // Viscous part from the relative velocity.
+    let mut ur = flow.u.clone();
+    let mut vr = flow.v.clone();
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            let (xu, yu) = sm.gu.centre(i, j);
+            ur[c] = flow.u_star[c] - disc.velocity(xu, yu).0;
+            let (xv, yv) = sm.gv.centre(i, j);
+            vr[c] = flow.v_star[c] - disc.velocity(xv, yv).1;
+        }
+    }
+    let zero = vec![0.0; n * n];
+    let tag = |x: f64, y: f64| usize::from(disc.sdf(x, y).abs() < 0.75 * dx);
+    let lu = sm.gu.wall_load_masked(
+        &ur,
+        &zero,
+        flow.nu,
+        |_, _| (0.0, 0.0),
+        tag,
+        2,
+        &flow.liq.active_u,
+    );
+    let lv = sm.gv.wall_load_masked(
+        &zero,
+        &vr,
+        flow.nu,
+        |_, _| (0.0, 0.0),
+        tag,
+        2,
+        &flow.liq.active_v,
+    );
+    // Loads are on the fluid; the disc feels the opposite. Torque about the origin -> centre.
+    let (lfx, lfy) = (lu[1].fx + lv[1].fx, lu[1].fy + lv[1].fy);
+    let lt_origin = lu[1].torque + lv[1].torque;
+    let lt_centre = lt_origin - (disc.cx * lfy - disc.cy * lfx);
+    (fx - lfx, fy - lfy, tq - lt_centre)
+}
+
+/// Steady Stokes drag (force per unit density, i.e. `4 pi nu |D|`) on a disc of radius `a`
+/// translating at `u` inside a fixed concentric cylinder of radius `b`: the stream function
+/// `psi = sin(theta) (A r + B / r + C r^3 + D r ln r)` with `f(a) = u a`, `f'(a) = u`,
+/// `f(b) = f'(b) = 0`; the net force is carried by the Stokeslet coefficient `D`.
+pub fn stokes_annulus_drag(a: f64, b: f64, u: f64, nu: f64) -> f64 {
+    let rows = |r: f64| {
+        (
+            [r, 1.0 / r, r * r * r, r * r.ln()],
+            [1.0, -1.0 / (r * r), 3.0 * r * r, r.ln() + 1.0],
+        )
+    };
+    let mut m = [[0.0; 5]; 4];
+    m[0][..4].copy_from_slice(&rows(a).0);
+    m[0][4] = u * a;
+    m[1][..4].copy_from_slice(&rows(a).1);
+    m[1][4] = u;
+    m[2][..4].copy_from_slice(&rows(b).0);
+    m[3][..4].copy_from_slice(&rows(b).1);
+    for k in 0..4 {
+        let piv = (k..4)
+            .max_by(|&i, &j| m[i][k].abs().total_cmp(&m[j][k].abs()))
+            .unwrap_or(k);
+        m.swap(k, piv);
+        for i in k + 1..4 {
+            let f = m[i][k] / m[k][k];
+            let pivot_row = m[k];
+            for (mij, pkj) in m[i].iter_mut().zip(pivot_row).skip(k) {
+                *mij -= f * pkj;
+            }
+        }
+    }
+    let mut x = [0.0; 4];
+    for k in (0..4).rev() {
+        let s: f64 = (k + 1..4).map(|j| m[k][j] * x[j]).sum();
+        x[k] = (m[k][4] - s) / m[k][k];
+    }
+    4.0 * PI * nu * x[3].abs()
+}
+
+/// Steps over which the force of a translating-disc run is averaged.
+const WINDOW: usize = 20;
+
+/// Result of a translating-disc run.
+#[derive(Clone, Copy, Debug)]
+pub struct MovingDisc {
+    pub steps: usize,
+    /// Force on the disc along its direction of motion (per unit density).
+    pub drag: f64,
+    /// Mean and relative RMS deviation of the drag over the last `WINDOW` steps.
+    pub drag_mean: f64,
+    pub drag_noise: f64,
+    pub side: f64,
+    pub torque: f64,
+    pub divergence: f64,
+    pub centre_x: f64,
+}
+
+/// Disc of radius `a` translating at `u` (+x) inside the drum of radius 0.5, viscosity `nu`, fluid
+/// started at rest, integrated to `t_end` with step `dt`. With `moving` the disc advances (the mesh
+/// is rebuilt every step), else its surface velocity is imposed at a fixed position `x0`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_moving_disc(
+    n: usize,
+    a: f64,
+    x0: f64,
+    u: f64,
+    omega: f64,
+    nu: f64,
+    t_end: f64,
+    dt: f64,
+    moving: bool,
+) -> MovingDisc {
+    let radius = 0.5;
+    let steps = (t_end / dt).round() as usize;
+    let mut disc = Disc {
+        cx: x0,
+        cy: 0.0,
+        r: a,
+        ux: u,
+        uy: 0.0,
+        omega,
+    };
+    let build = |d: &Disc| {
+        let dd = *d;
+        let mut sm = StaggeredMesh::new(n, 0.55, move |x, y| {
+            ((x * x + y * y).sqrt() - radius).max(-dd.sdf(x, y))
+        });
+        sm.set_body_flux(&[*d]);
+        sm
+    };
+    let mut state: Option<FlowState> = None;
+    let mut prev_sm: Option<StaggeredMesh> = None;
+    let mut last = (0.0, 0.0, 0.0, 0.0);
+    let mut window: Vec<f64> = Vec::new();
+    for step in 0..steps {
+        if moving {
+            disc.cx = x0 + u * dt * (step + 1) as f64;
+        }
+        let sm = build(&disc);
+        let d = disc;
+        let dx = sm.dx();
+        let wall = move |x: f64, y: f64| {
+            if d.sdf(x, y).abs() < 0.6 * dx {
+                d.velocity(x, y)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+        let mut flow = match state.take() {
+            Some(s) => StaggeredFlow::from_state(&sm, s, wall),
+            None => StaggeredFlow::new(&sm, nu, wall),
+        };
+        if let Some(old) = &prev_sm {
+            flow.initialise_fresh(old, move |x, y| d.velocity(x, y));
+        }
+        flow.step(dt);
+        if step + WINDOW >= steps {
+            let (fx, _, _) = disc_load(&flow, &disc);
+            window.push(-fx);
+        }
+        if step + 1 == steps {
+            let (fx, fy, tq) = disc_load(&flow, &disc);
+            last = (fx, fy, tq, flow.projected_divergence);
+        }
+        state = Some(flow.into_state());
+        prev_sm = Some(sm);
+    }
+    let mean = window.iter().sum::<f64>() / window.len() as f64;
+    let rms = (window.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / window.len() as f64).sqrt();
+    MovingDisc {
+        steps,
+        drag: -last.0,
+        drag_mean: mean,
+        drag_noise: rms / mean,
+        side: last.1,
+        torque: last.2,
+        divergence: last.3,
+        centre_x: disc.cx,
     }
 }

@@ -523,3 +523,28 @@ gradient (`grid_probe --exp E4a`):
 | 256 | 46.5 | 0.15 % / 0.00 % | -8e-6 | 1e-6 | 2e-6 |
 
 Gate (<= 0.5 %, zero torque): met. The cell-centre pressure alone is not enough at d/dx ~ 12 (1.1 %).
+
+## E4b — prescribed translating / spinning disc (2026-10-03, PASSED)
+
+Machinery added to `mac/staggered.rs`: `Disc` (centre, radius, velocity, spin), `StaggeredMesh::set_body_flux` (flux of the body's
+surface velocity through the part of each cell boundary the body covers, exact by the divergence theorem; added to the divergence
+of the projection), `FlowState` / `into_state` / `from_state` (flow carried to a rebuilt mesh every step),
+`initialise_fresh` (nodes that the body uncovered get its rigid velocity, new pressure cells the neighbour mean) and
+`u_star`/`v_star` (velocity before the projection, used for body loads: the projection moves nodes that sit almost on the
+wall off their wall value and a wall traction `(u_b - u)/theta` amplifies that by 1/theta, giving 10 x spikes in the force when
+a node happens to lie on the surface). Loads: pressure on the cut cells moved to the wall point along the local gradient, plus
+the traction of the flow *relative to the rigid body velocity* (zero Dirichlet value, so the component-wise and full-stress
+tractions coincide); near-wall links (theta < 0.3) use a two-node gradient.
+
+Disc a = 0.2 in the drum R = 0.5, nu = 1 (`grid_probe --exp E4b | E4r | E4s`):
+
+| test | n = 64 | 128 | 256 |
+|---|---|---|---|
+| translating disc, steady drag vs 2D Stokes cylinder-in-cylinder (Stokeslet coefficient of `psi = sin(theta)(Ar + B/r + Cr^3 + D r ln r)`), U = 0.01 | -0.03 % | +0.10 % | +0.02 % |
+| spinning disc, torque vs exact Couette `4 pi nu omega a^2 b^2/(b^2-a^2)` | +0.07 % | +0.06 % | +0.04 % |
+| moving (mesh rebuilt each step) vs frozen at the mean position, U = 0.1, dt 0.01 / 0.005 | -0.12 / -0.51 % | -0.20 / -0.08 % | -0.11 / -0.04 % |
+| drag noise of the moving disc (rms over 20 steps) | 0.6 / 0.2 % | 0.4 / 0.3 % | 0.4 / 0.3 % |
+
+Steady drag vs eccentric position is smooth (n = 128: 6.543 ... 6.681 for x0 = 0 ... 0.04). Gate (<= 2 % at d/dx >= 8): met
+(here d/dx = 23 ... 93). Before the `u_star` fix the same test jittered by up to +-25 % depending on where the surface fell
+between nodes. E1 hold tests (R2) are unchanged (torque <= 0.1 %).

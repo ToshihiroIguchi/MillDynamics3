@@ -8,6 +8,9 @@
 use super::multigrid::{PoissonSolver, SolveStats};
 
 const THETA_MIN: f64 = 1e-3;
+
+/// Links shorter than this fraction of the grid spacing use a two-node wall gradient for loads.
+const NEAR_WALL: f64 = 0.3;
 const LEFT: usize = 0;
 const RIGHT: usize = 1;
 const DOWN: usize = 2;
@@ -200,11 +203,12 @@ impl FluidGrid {
         tag: impl Fn(f64, f64) -> usize,
         tags: usize,
     ) -> Vec<WallLoad> {
-        self.wall_load_masked(u, v, mu, bv, tag, tags, &self.fluid)
+        self.wall_load_impl(u, v, mu, bv, tag, tags, &self.fluid, 0.0)
     }
 
     /// As [`FluidGrid::wall_load`], summing only the nodes with `active[c]` (the liquid nodes of
-    /// a free-surface flow; air nodes carry extrapolated values).
+    /// a free-surface flow; air nodes carry extrapolated values), and reading links shorter than
+    /// `NEAR_WALL` of a spacing with a two-node wall gradient (loads on moving bodies).
     #[allow(clippy::too_many_arguments)]
     pub fn wall_load_masked(
         &self,
@@ -216,15 +220,45 @@ impl FluidGrid {
         tags: usize,
         active: &[bool],
     ) -> Vec<WallLoad> {
+        self.wall_load_impl(u, v, mu, bv, tag, tags, active, NEAR_WALL)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn wall_load_impl(
+        &self,
+        u: &[f64],
+        v: &[f64],
+        mu: f64,
+        bv: impl Fn(f64, f64) -> (f64, f64),
+        tag: impl Fn(f64, f64) -> usize,
+        tags: usize,
+        active: &[bool],
+        near_wall: f64,
+    ) -> Vec<WallLoad> {
         let mut out = vec![WallLoad::default(); tags];
         for c in 0..self.n * self.n {
             if !self.fluid[c] || !active[c] {
                 continue;
             }
-            for link in &self.links[c] {
+            for (k, link) in self.links[c].iter().enumerate() {
                 if let Link::Boundary { theta, bx, by } = *link {
                     let (ub, vb) = bv(bx, by);
-                    let (fx, fy) = (mu * (ub - u[c]) / theta, mu * (vb - v[c]) / theta);
+                    let (mut fx, mut fy) = (mu * (ub - u[c]) / theta, mu * (vb - v[c]) / theta);
+                    // A node very close to the wall is a poor probe of the wall gradient (it is
+                    // pinned to the wall value and any error is amplified by 1 / theta): use the
+                    // quadratic through the wall value and the next two nodes away from it.
+                    if theta < near_wall {
+                        if let Link::Fluid(nb) = self.links[c][k ^ 1] {
+                            if active[nb] {
+                                let (s1, s2) = (theta, 1.0 + theta);
+                                let slope = |q1: f64, q2: f64, w: f64| {
+                                    (s2 * s2 * (q1 - w) - s1 * s1 * (q2 - w)) / (s1 * s2)
+                                };
+                                fx = -mu * slope(u[c], u[nb], ub);
+                                fy = -mu * slope(v[c], v[nb], vb);
+                            }
+                        }
+                    }
                     let w = &mut out[tag(bx, by)];
                     w.fx += fx;
                     w.fy += fy;

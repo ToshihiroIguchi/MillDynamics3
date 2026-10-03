@@ -2,11 +2,11 @@
 //! grid_probe -- --exp E0`.
 
 use mill_core::mac::verify::{
-    diagnose_couette_mac, track_sheet_growth, verify_buoyancy, verify_couette_mac_scheme,
-    verify_couette_ns, verify_couette_stokes, verify_dam_break, verify_drum_slurry,
-    verify_levelset_rotation, verify_manufactured, verify_rigid_ring, verify_rimming,
-    verify_sloshing_circle, verify_sloshing_rect, verify_spinup, verify_spinup_mac,
-    verify_still_pool, verify_translation, verify_wall_impact,
+    diagnose_couette_mac, stokes_annulus_drag, track_sheet_growth, verify_buoyancy,
+    verify_couette_mac_scheme, verify_couette_ns, verify_couette_stokes, verify_dam_break,
+    verify_drum_slurry, verify_levelset_rotation, verify_manufactured, verify_moving_disc,
+    verify_rigid_ring, verify_rimming, verify_sloshing_circle, verify_sloshing_rect, verify_spinup,
+    verify_spinup_mac, verify_still_pool, verify_translation, verify_wall_impact,
 };
 use std::time::Instant;
 
@@ -37,6 +37,9 @@ fn main() {
         "E2r" => e2r(),
         "E3s" => e3s(),
         "E4a" => e4a(),
+        "E4b" => e4b(),
+        "E4s" => e4s(),
+        "E4r" => e4rot(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -537,6 +540,80 @@ fn e4a() {
             r.side_force,
             r.torque,
             r.spurious
+        );
+    }
+}
+
+fn e4b() {
+    println!("E4b translating disc a = 0.2 in the drum (R = 0.5), nu = 1; fluid from rest");
+    println!(
+        "{:>5} {:>8} {:>8} {:>6} {:>11} {:>11} {:>9} {:>10} {:>10}",
+        "n", "mode", "x_end", "steps", "drag", "reference", "err", "side", "diverg"
+    );
+    let (a, nu) = (0.2, 1.0);
+    let u0 = 0.01;
+    let reference = stokes_annulus_drag(a, 0.5, u0, nu);
+    for n in [64usize, 128, 256] {
+        let r = verify_moving_disc(n, a, 0.0, u0, 0.0, nu, 0.6, 0.01, false);
+        println!(
+            "{n:>5} {:>8} {:>8.4} {:>6} {:>11.6e} {:>11.6e} {:>8.3}% {:>10.2e} {:>10.2e}",
+            "frozen",
+            r.centre_x,
+            r.steps,
+            r.drag,
+            reference,
+            100.0 * (r.drag / reference - 1.0),
+            r.side,
+            r.divergence
+        );
+    }
+    println!(
+        "moving vs frozen (U = 0.1, window mean of the last 20 steps, frozen at the mean position)"
+    );
+    for n in [64usize, 128, 256] {
+        for dt in [0.01, 0.005] {
+            let t_end = 0.4;
+            let mid = 0.1 * dt * 0.5 * 20.0;
+            let frozen = verify_moving_disc(n, a, 0.04 - mid, 0.1, 0.0, nu, t_end, dt, false);
+            let moved = verify_moving_disc(n, a, 0.0, 0.1, 0.0, nu, t_end, dt, true);
+            println!(
+                "{n:>5} dt={dt:<6} frozen {:>9.5} moving {:>9.5} diff {:>7.3}% noise {:>6.2}% (frozen {:>5.2}%)",
+                frozen.drag_mean,
+                moved.drag_mean,
+                100.0 * (moved.drag_mean / frozen.drag_mean - 1.0),
+                100.0 * moved.drag_noise,
+                100.0 * frozen.drag_noise
+            );
+        }
+    }
+}
+
+fn e4s() {
+    println!("E4s frozen disc a = 0.2, U = 0.1, nu = 1: steady drag vs centre position");
+    for n in [64usize, 128] {
+        let row: Vec<String> = (0..=10)
+            .map(|k| {
+                let x0 = 0.004 * k as f64;
+                let r = verify_moving_disc(n, 0.2, x0, 0.1, 0.0, 1.0, 0.4, 0.01, false);
+                format!("{:.4}", r.drag_mean)
+            })
+            .collect();
+        println!("n={n:<4} x0=0..0.04 step 0.004: {}", row.join(" "));
+    }
+}
+
+fn e4rot() {
+    println!("E4r disc a = 0.2 spinning at omega = 0.1 in the drum (R = 0.5), nu = 1: torque vs exact Couette");
+    let (a, b, omega, nu) = (0.2, 0.5, 0.1, 1.0);
+    let exact = 4.0 * std::f64::consts::PI * nu * omega * a * a * b * b / (b * b - a * a);
+    for n in [64usize, 128, 256] {
+        let r = verify_moving_disc(n, a, 0.0, 0.0, omega, nu, 0.6, 0.01, false);
+        println!(
+            "n={n:<4} torque {:.6} exact {:.6} err {:+.3}% (side force {:.1e})",
+            r.torque,
+            exact,
+            100.0 * (r.torque / exact - 1.0),
+            r.side
         );
     }
 }

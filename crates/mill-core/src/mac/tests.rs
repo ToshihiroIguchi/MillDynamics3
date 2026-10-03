@@ -111,3 +111,26 @@ fn still_pool_stays_at_rest() {
     assert!(r.pressure_err < 0.05, "{r:?}");
     assert!(r.volume_drift.abs() < 1e-4, "{r:?}");
 }
+
+#[test]
+fn submerged_disc_feels_the_displaced_weight() {
+    let r = super::verify::verify_buoyancy(64, 0.1, 0.1);
+    assert!(r.force_err.abs() < 5e-3, "{r:?}");
+    assert!(r.torque.abs() < 1e-2, "{r:?}");
+}
+
+#[test]
+fn translating_disc_drag_matches_stokes_annulus() {
+    use super::verify::{stokes_annulus_drag, verify_moving_disc};
+    let reference = stokes_annulus_drag(0.2, 0.5, 0.01, 1.0);
+    let frozen = verify_moving_disc(64, 0.2, 0.0, 0.01, 0.0, 1.0, 0.6, 0.02, false);
+    assert!((frozen.drag / reference - 1.0).abs() < 1e-2, "{frozen:?}");
+    // The moving disc (mesh rebuilt every step) must reproduce the frozen-position drag.
+    let still = verify_moving_disc(64, 0.2, 0.03, 0.1, 0.0, 1.0, 0.3, 0.01, false);
+    let moved = verify_moving_disc(64, 0.2, 0.0, 0.1, 0.0, 1.0, 0.3, 0.01, true);
+    assert!(moved.drag_noise < 0.05, "{moved:?}");
+    assert!(
+        (moved.drag_mean / still.drag_mean - 1.0).abs() < 2e-2,
+        "{moved:?} vs {still:?}"
+    );
+}
