@@ -294,6 +294,7 @@ pub fn verify_couette_ns(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs {
     }
 }
 
+use super::bodies::{disc_load, Body, BodyFlow, BodyLoad};
 use super::staggered::{Disc, FlowState, StaggeredFlow, StaggeredMesh};
 
 /// Same hold test as [`verify_couette_ns`] on the staggered face-velocity scheme.
@@ -1731,90 +1732,6 @@ pub fn verify_buoyancy(n: usize, r: f64, t_end: f64) -> Buoyancy {
     }
 }
 
-/// Force and torque of the fluid on a disc (per unit density): pressure on the cut cells moved to
-/// the wall point along the local gradient, plus the viscous traction of the flow relative to the
-/// disc's rigid-body velocity (zero Dirichlet value at its surface, where the component-wise and
-/// the full-stress tractions coincide). Torque is about the disc centre.
-pub fn disc_load(flow: &StaggeredFlow, disc: &Disc) -> (f64, f64, f64) {
-    let sm = flow.sm;
-    let n = sm.n();
-    let dx = sm.dx();
-    let half = sm.mesh.grid.half;
-    let (mut fx, mut fy, mut tq) = (0.0, 0.0, 0.0);
-    for j in 1..n - 1 {
-        for i in 1..n - 1 {
-            let c = i + n * j;
-            if !flow.liq.cell[c] {
-                continue;
-            }
-            let (x, y) = (-half + (i as f64 + 0.5) * dx, -half + (j as f64 + 0.5) * dx);
-            let d = ((x - disc.cx).powi(2) + (y - disc.cy).powi(2)).sqrt();
-            if (d - disc.r).abs() > 1.5 * dx {
-                continue;
-            }
-            let (ax, ay) = (
-                (sm.au[c + 1] - sm.au[c]) * dx,
-                (sm.av[c + n] - sm.av[c]) * dx,
-            );
-            let grad = |lo: usize, hi: usize| -> f64 {
-                match (flow.liq.cell[lo], flow.liq.cell[hi]) {
-                    (true, true) => (flow.p[hi] - flow.p[lo]) / (2.0 * dx),
-                    (true, false) => (flow.p[c] - flow.p[lo]) / dx,
-                    (false, true) => (flow.p[hi] - flow.p[c]) / dx,
-                    _ => 0.0,
-                }
-            };
-            let (gx, gy) = (grad(c - 1, c + 1), grad(c - n, c + n));
-            let (sx, sy) = (
-                disc.cx + disc.r * (x - disc.cx) / d,
-                disc.cy + disc.r * (y - disc.cy) / d,
-            );
-            let pw = flow.p[c] + gx * (sx - x) + gy * (sy - y);
-            let (px, py) = (-pw * ax, -pw * ay);
-            fx += px;
-            fy += py;
-            tq += (sx - disc.cx) * py - (sy - disc.cy) * px;
-        }
-    }
-    // Viscous part from the relative velocity.
-    let mut ur = flow.u.clone();
-    let mut vr = flow.v.clone();
-    for j in 0..n {
-        for i in 0..n {
-            let c = i + n * j;
-            let (xu, yu) = sm.gu.centre(i, j);
-            ur[c] = flow.u_star[c] - disc.velocity(xu, yu).0;
-            let (xv, yv) = sm.gv.centre(i, j);
-            vr[c] = flow.v_star[c] - disc.velocity(xv, yv).1;
-        }
-    }
-    let zero = vec![0.0; n * n];
-    let tag = |x: f64, y: f64| usize::from(disc.sdf(x, y).abs() < 0.75 * dx);
-    let lu = sm.gu.wall_load_masked(
-        &ur,
-        &zero,
-        flow.nu,
-        |_, _| (0.0, 0.0),
-        tag,
-        2,
-        &flow.liq.active_u,
-    );
-    let lv = sm.gv.wall_load_masked(
-        &zero,
-        &vr,
-        flow.nu,
-        |_, _| (0.0, 0.0),
-        tag,
-        2,
-        &flow.liq.active_v,
-    );
-    // Loads are on the fluid; the disc feels the opposite. Torque about the origin -> centre.
-    let (lfx, lfy) = (lu[1].fx + lv[1].fx, lu[1].fy + lv[1].fy);
-    let lt_origin = lu[1].torque + lv[1].torque;
-    let lt_centre = lt_origin - (disc.cx * lfy - disc.cy * lfx);
-    (fx - lfx, fy - lfy, tq - lt_centre)
-}
-
 /// Steady Stokes drag (force per unit density, i.e. `4 pi nu |D|`) on a disc of radius `a`
 /// translating at `u` inside a fixed concentric cylinder of radius `b`: the stream function
 /// `psi = sin(theta) (A r + B / r + C r^3 + D r ln r)` with `f(a) = u a`, `f'(a) = u`,
@@ -1954,4 +1871,177 @@ pub fn verify_moving_disc(
         divergence: last.3,
         centre_x: disc.cx,
     }
+}
+
+/// Viscous torque per unit spin rate of a disc of radius `a` in a concentric drum of radius `b`
+/// (steady Couette flow): `4 pi nu a^2 b^2 / (b^2 - a^2)`.
+pub fn confined_spin_stiffness(a: f64, b: f64, nu: f64) -> f64 {
+    4.0 * PI * nu * a * a * b * b / (b * b - a * a)
+}
+
+/// Added mass (per unit density) of a disc of radius `a` moving along a diameter of a concentric
+/// cylinder of radius `b` in inviscid fluid: `pi a^2 (b^2 + a^2) / (b^2 - a^2)`.
+pub fn confined_added_mass(a: f64, b: f64) -> f64 {
+    PI * a * a * (b * b + a * a) / (b * b - a * a)
+}
+
+/// Result of the added-mass tests.
+#[derive(Clone, Copy, Debug)]
+pub struct AddedMass {
+    pub steps: usize,
+    /// Measured effective added mass over the confined inviscid value, minus one.
+    pub ratio_err: f64,
+    /// Mean fixed-point iterations per step (coupled run), else 0.
+    pub iterations: f64,
+    /// Disc velocity at the end over `F t / (m + m_a)`, minus one (coupled run), else 0.
+    pub speed_err: f64,
+    pub divergence: f64,
+}
+
+/// Prescribed acceleration: the disc (radius `a`, concentric) is accelerated from rest at `a0`
+/// along +x in a drum of radius 0.5 filled with fluid of viscosity `nu`; the fluid reaction at
+/// `t_end`, `-F = m_a a0` for an inviscid fluid, gives the effective added mass.
+pub fn verify_added_mass_prescribed(
+    n: usize,
+    a: f64,
+    a0: f64,
+    nu: f64,
+    t_end: f64,
+    dt: f64,
+) -> AddedMass {
+    let radius = 0.5;
+    let steps = (t_end / dt).round() as usize;
+    let mut bf = BodyFlow::new(n, 0.55, radius, nu);
+    let mut load = BodyLoad {
+        fx: 0.0,
+        fy: 0.0,
+        torque: 0.0,
+        divergence: 0.0,
+    };
+    for step in 0..steps {
+        let t = dt * (step + 1) as f64;
+        let disc = Disc {
+            cx: 0.5 * a0 * t * t,
+            cy: 0.0,
+            r: a,
+            ux: a0 * t,
+            uy: 0.0,
+            omega: 0.0,
+        };
+        let (l, state, mesh) = bf.trial(&disc, dt);
+        bf.commit(state, mesh);
+        load = l;
+    }
+    let ma = confined_added_mass(a, radius);
+    AddedMass {
+        steps,
+        ratio_err: -load.fx / (ma * a0) - 1.0,
+        iterations: 0.0,
+        speed_err: 0.0,
+        divergence: load.divergence,
+    }
+}
+
+/// Free disc of mass `ratio * pi a^2` driven by a constant external force `force` along +x in
+/// the same drum (coupled fluid-disc steps); compares the velocity at `t_end` with the inviscid
+/// short-time value `F t / (m + m_a)`.
+pub fn verify_added_mass_coupled(
+    n: usize,
+    a: f64,
+    ratio: f64,
+    force: f64,
+    nu: f64,
+    t_end: f64,
+    dt: f64,
+) -> AddedMass {
+    let radius = 0.5;
+    let steps = (t_end / dt).round() as usize;
+    let mass = ratio * PI * a * a;
+    let ma = confined_added_mass(a, radius);
+    let mut bf = BodyFlow::new(n, 0.55, radius, nu);
+    let mut body = Body {
+        disc: Disc {
+            cx: 0.0,
+            cy: 0.0,
+            r: a,
+            ux: 0.0,
+            uy: 0.0,
+            omega: 0.0,
+        },
+        mass,
+        inertia: 0.5 * mass * a * a,
+        accel: (0.0, 0.0),
+    };
+    let (mut iters, mut div) = (0.0, 0.0f64);
+    for _ in 0..steps {
+        let info = bf.step_coupled(
+            &mut body,
+            (force, 0.0, 0.0),
+            dt,
+            ma,
+            0.0,
+            confined_spin_stiffness(a, radius, nu),
+            1e-6,
+            30,
+        );
+        iters += info.iterations as f64;
+        div = div.max(info.load.divergence);
+    }
+    let expected = force * t_end / (mass + ma);
+    AddedMass {
+        steps,
+        ratio_err: 0.0,
+        iterations: iters / steps as f64,
+        speed_err: body.disc.ux / expected - 1.0,
+        divergence: div,
+    }
+}
+
+/// Free disc pushed by a constant force in a viscous (Stokes) fluid: after the transient
+/// (rate `drag / (m + m_a)`) it moves at the terminal speed `F / k` with `k` the steady
+/// concentric Stokes drag coefficient. Returns the relative error of the speed at `t_end` and the
+/// mean number of coupling iterations.
+pub fn verify_terminal_stokes(
+    n: usize,
+    a: f64,
+    ratio: f64,
+    force: f64,
+    nu: f64,
+    t_end: f64,
+    dt: f64,
+) -> (f64, f64) {
+    let radius = 0.5;
+    let steps = (t_end / dt).round() as usize;
+    let mass = ratio * PI * a * a;
+    let ma = confined_added_mass(a, radius);
+    let mut bf = BodyFlow::new(n, 0.55, radius, nu);
+    let mut body = Body {
+        disc: Disc {
+            cx: 0.0,
+            cy: 0.0,
+            r: a,
+            ux: 0.0,
+            uy: 0.0,
+            omega: 0.0,
+        },
+        mass,
+        inertia: 0.5 * mass * a * a,
+        accel: (0.0, 0.0),
+    };
+    let mut iters = 0.0;
+    for _ in 0..steps {
+        let info = bf.step_coupled(
+            &mut body,
+            (force, 0.0, 0.0),
+            dt,
+            ma,
+            stokes_annulus_drag(a, radius, 1.0, nu),
+            confined_spin_stiffness(a, radius, nu),
+            1e-6,
+            40,
+        );
+        iters += info.iterations as f64;
+    }
+    let k = stokes_annulus_drag(a, radius, 1.0, nu);
+    (body.disc.ux / (force / k) - 1.0, iters / steps as f64)
 }

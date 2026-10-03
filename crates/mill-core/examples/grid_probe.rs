@@ -39,6 +39,11 @@ fn main() {
         "E4a" => e4a(),
         "E4b" => e4b(),
         "E4s" => e4s(),
+        "E4m" => e4m(),
+        "E4k" => e4k(),
+        "E4h" => e4h(),
+        "E4p" => e4p(),
+        "E4y" => e4y(),
         "E4r" => e4rot(),
         other => eprintln!("unknown experiment {other}"),
     }
@@ -614,6 +619,224 @@ fn e4rot() {
             exact,
             100.0 * (r.torque / exact - 1.0),
             r.side
+        );
+    }
+}
+
+fn e4m() {
+    use mill_core::mac::verify::{
+        confined_added_mass, verify_added_mass_coupled, verify_added_mass_prescribed,
+    };
+    let a = 0.2;
+    let only_terminal = std::env::args().any(|x| x == "--terminal");
+    println!(
+        "E4m added mass: disc a = {a} in the drum R = 0.5, m_a (confined, inviscid) = {:.5}",
+        confined_added_mass(a, 0.5)
+    );
+    if !only_terminal {
+        println!("prescribed acceleration a0 = 3 m/s^2 from rest, t = 0.05 s");
+        println!(
+            "{:>5} {:>8} {:>8} {:>7} {:>10} {:>10}",
+            "n", "nu", "dt", "steps", "m_a err", "div"
+        );
+        for n in [64usize, 128] {
+            for nu in [1e-2, 1e-3, 1e-4] {
+                for dt in [0.005, 0.0025] {
+                    let r = verify_added_mass_prescribed(n, a, 3.0, nu, 0.05, dt);
+                    println!(
+                        "{n:>5} {nu:>8.0e} {dt:>8} {:>7} {:>9.3}% {:>10.1e}",
+                        r.steps,
+                        100.0 * r.ratio_err,
+                        r.divergence
+                    );
+                }
+            }
+        }
+    }
+    println!("terminal speed in Stokes flow (nu = 1, F = 1, t = 0.05 s) vs F / k, k = concentric Stokes drag per unit speed");
+    for n in [64usize, 128] {
+        for ratio in [0.5, 1.0, 3.0] {
+            for dt in [0.005, 0.0025] {
+                let (err, iters) =
+                    mill_core::mac::verify::verify_terminal_stokes(n, a, ratio, 1.0, 1.0, 0.05, dt);
+                println!(
+                    "n={n:<4} rho_s={ratio:<4} dt={dt:<7} iters {iters:.1} speed err {:+.3}%",
+                    100.0 * err
+                );
+            }
+        }
+    }
+    if only_terminal {
+        return;
+    }
+    println!("coupled free disc, constant force 1.0, t = 0.05 s: u(t) vs F t / (m + m_a)");
+    println!(
+        "{:>5} {:>6} {:>8} {:>8} {:>6} {:>10} {:>10}",
+        "n", "rho_s", "nu", "dt", "iters", "u err", "div"
+    );
+    for n in [64usize, 128] {
+        for ratio in [0.5, 1.0, 1.25, 3.0] {
+            for dt in [0.005, 0.0025] {
+                let r = verify_added_mass_coupled(n, a, ratio, 1.0, 1e-3, 0.05, dt);
+                println!(
+                    "{n:>5} {ratio:>6} {:>8.0e} {dt:>8} {:>6.1} {:>9.3}% {:>10.1e}",
+                    1e-3,
+                    r.iterations,
+                    100.0 * r.speed_err,
+                    r.divergence
+                );
+            }
+        }
+    }
+}
+
+fn e4k() {
+    use mill_core::mac::bodies::BodyFlow;
+    use mill_core::mac::staggered::Disc;
+    println!(
+        "E4k fluid force response dF/du of the first and later steps (nu = 1, a = 0.2, n = 64)"
+    );
+    for dt in [0.005, 0.0025] {
+        let mut bf = BodyFlow::new(64, 0.55, 0.5, 1.0);
+        for step in 0..6 {
+            let mk = |u: f64| Disc {
+                cx: 0.0,
+                cy: 0.0,
+                r: 0.2,
+                ux: u,
+                uy: 0.0,
+                omega: 0.0,
+            };
+            let mky = |u: f64| Disc {
+                cx: 0.0,
+                cy: 0.0,
+                r: 0.2,
+                ux: 0.0,
+                uy: u,
+                omega: 0.0,
+            };
+            let (m1, _, _) = bf.trial(&mky(0.0), dt);
+            let (m2, _, _) = bf.trial(&mky(0.01), dt);
+            println!(
+                "   lateral: Fy(0)={:.5} Fy(0.01)={:.5} K_y={:.2}",
+                m1.fy,
+                m2.fy,
+                -(m2.fy - m1.fy) / 0.01
+            );
+            let (l1, _, _) = bf.trial(&mk(0.0), dt);
+            let (l2, st, mesh) = bf.trial(&mk(0.01), dt);
+            let (l3, _, _) = bf.trial(&mk(0.02), dt);
+            println!(
+                "dt={dt} step {step}: F(0)={:.4} F(0.01)={:.4} F(0.02)={:.4}  K = {:.2} / {:.2}",
+                l1.fx,
+                l2.fx,
+                l3.fx,
+                -(l2.fx - l1.fx) / 0.01,
+                -(l3.fx - l2.fx) / 0.01
+            );
+            bf.commit(st, mesh);
+        }
+        println!("  expected K = m_a/dt + k = {:.2}", 0.17354 / dt + 65.4);
+    }
+}
+
+fn e4h() {
+    use mill_core::mac::bodies::{Body, BodyFlow};
+    use mill_core::mac::staggered::Disc;
+    use mill_core::mac::verify::{confined_added_mass, stokes_annulus_drag};
+    let (a, nu, dt) = (0.2, 1.0, 0.005);
+    let mass = std::f64::consts::PI * a * a;
+    let mut bf = BodyFlow::new(64, 0.55, 0.5, nu);
+    let mut body = Body {
+        disc: Disc {
+            cx: 0.0,
+            cy: 0.0,
+            r: a,
+            ux: 0.0,
+            uy: 0.0,
+            omega: 0.0,
+        },
+        mass,
+        inertia: 0.5 * mass * a * a,
+        accel: (0.0, 0.0),
+    };
+    let (ma, k) = (
+        confined_added_mass(a, 0.5),
+        stokes_annulus_drag(a, 0.5, 1.0, nu),
+    );
+    for step in 0..14 {
+        let info = bf.step_coupled(
+            &mut body,
+            (1.0, 0.0, 0.0),
+            dt,
+            ma,
+            k,
+            mill_core::mac::verify::confined_spin_stiffness(a, 0.5, nu),
+            1e-6,
+            40,
+        );
+        println!(
+            "step {step}: u {:.5} v {:.2e} iters {} residual {:.2e} F_fluid {:.4}",
+            body.disc.ux, body.disc.uy, info.iterations, info.residual, info.load.fx
+        );
+    }
+}
+
+fn e4p() {
+    use mill_core::mac::bodies::BodyFlow;
+    use mill_core::mac::staggered::Disc;
+    let (a, nu, dt) = (0.2, 1.0, 0.005);
+    let mut bf = BodyFlow::new(64, 0.55, 0.5, nu);
+    let mut x = 0.0;
+    for step in 0..30 {
+        let u = 0.015;
+        x += u * dt;
+        let d = Disc {
+            cx: x,
+            cy: 0.0,
+            r: a,
+            ux: u,
+            uy: 0.0,
+            omega: 0.0,
+        };
+        let (l, st, mesh) = bf.trial(&d, dt);
+        let vmax = st.v.iter().fold(0.0f64, |m, q| m.max(q.abs()));
+        println!(
+            "step {step}: Fx {:.5} Fy {:.2e} max|v| {:.2e} div {:.1e}",
+            l.fx, l.fy, vmax, l.divergence
+        );
+        bf.commit(st, mesh);
+    }
+}
+
+fn e4y() {
+    use mill_core::mac::bodies::BodyFlow;
+    use mill_core::mac::staggered::Disc;
+    println!("E4y lateral force on a disc moving along x at lateral offset y (nu = 1, U = 0.015)");
+    let (a, nu, dt) = (0.2, 1.0, 0.005);
+    for y in [0.0, 1e-4, 1e-3, 5e-3, 2e-2] {
+        let mut bf = BodyFlow::new(64, 0.55, 0.5, nu);
+        let mut x = 0.0;
+        let mut last = (0.0, 0.0);
+        for _ in 0..30 {
+            x += 0.015 * dt;
+            let d = Disc {
+                cx: x,
+                cy: y,
+                r: a,
+                ux: 0.015,
+                uy: 0.0,
+                omega: 0.0,
+            };
+            let (l, st, mesh) = bf.trial(&d, dt);
+            bf.commit(st, mesh);
+            last = (l.fx, l.fy);
+        }
+        println!(
+            "y = {y:.0e}: Fx {:.5} Fy {:.4e}  Fy/y = {:.3e}",
+            last.0,
+            last.1,
+            last.1 / y.max(1e-30)
         );
     }
 }

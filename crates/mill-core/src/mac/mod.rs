@@ -4,6 +4,7 @@
 //! Cell-centred pressure, face-based velocity, cut-cell geometry through face apertures, and a
 //! multigrid-preconditioned CG solver for the weighted (variational) Poisson problem.
 
+pub mod bodies;
 pub mod embedded;
 pub mod flow;
 pub mod levelset;

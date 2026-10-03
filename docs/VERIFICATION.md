@@ -548,3 +548,24 @@ Disc a = 0.2 in the drum R = 0.5, nu = 1 (`grid_probe --exp E4b | E4r | E4s`):
 Steady drag vs eccentric position is smooth (n = 128: 6.543 ... 6.681 for x0 = 0 ... 0.04). Gate (<= 2 % at d/dx >= 8): met
 (here d/dx = 23 ... 93). Before the `u_star` fix the same test jittered by up to +-25 % depending on where the surface fell
 between nodes. E1 hold tests (R2) are unchanged (torque <= 0.1 %).
+
+## E4c — free disc coupled to the fluid (2026-10-03, PASSED for the Stokes/added-mass checks)
+
+`mac/bodies.rs`: `BodyFlow::trial/commit/step_coupled`. The disc equation is integrated with backward Euler and solved with
+a fixed-point iteration per step on the new body velocity; the position is predicted once (constant acceleration) and frozen
+during the iteration (with a moving position the force jumps whenever the surface crosses a node and the map stops being
+contractive). The iteration is preconditioned with the linear part of the fluid force, `K = m_a/dt + k` (added mass, Stokes
+drag per unit speed), refined by secant estimates per component after the second iterate (measured K varied 82 -> 420 with
+the mesh history; a fixed preconditioner then diverged exponentially), and a torque stiffness for the spin (without it the
+spin iteration diverged because `dt kappa / I > 1`). 3 iterations per step.
+
+Disc a = 0.2 in the drum (R = 0.5), force 1.0 along +x, `grid_probe --exp E4m | E4k | E4h | E4p | E4y`:
+
+- terminal speed in Stokes flow (nu = 1, concentric drag coefficient `k = 65.4`), after 0.05 s: error
+  -0.01 / +0.02 % (rho_s = 0.5 / 1, n = 64, dt 0.005), -0.2 / -0.25 % (dt 0.0025), +0.07 / +0.09 % (n = 128, dt 0.005);
+  rho_s = 3: -0.5 ... -1.2 % (not yet fully relaxed).
+- prescribed acceleration a0 = 3 m/s^2: the effective added mass error is `-2 % + 650 % sqrt(nu)`: 62.8 / 18.4 / 4.9 % at nu = 1e-2 / 1e-3 / 1e-4
+  (n = 128), i.e. the excess is the (physical) viscous Stokes-layer force and the inviscid added mass `pi a^2 (b^2 + a^2)/(b^2 - a^2)`
+  is met to ~2 % (an extrapolation, not a direct measurement).
+- coupled run at nu = 1e-3: stable for rho_s = 0.5 ... 3 (added mass up to 3 x the body mass), 3 iterations per step; speed
+  deficit vs the inviscid value -3.5 ... -7.8 % (viscous), independent of dt and n to 0.4 %.

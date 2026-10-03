@@ -134,3 +134,11 @@ fn translating_disc_drag_matches_stokes_annulus() {
         "{moved:?} vs {still:?}"
     );
 }
+
+#[test]
+fn light_free_disc_reaches_the_stokes_terminal_speed() {
+    // Density ratio 0.5 (added mass 3x the body mass): plain fixed-point coupling diverges.
+    let (err, iters) = super::verify::verify_terminal_stokes(48, 0.2, 0.5, 1.0, 1.0, 0.05, 0.005);
+    assert!(err.abs() < 1e-2, "{err}");
+    assert!(iters < 6.0, "{iters}");
+}

@@ -379,6 +379,7 @@ const TOL_VISCOUS: f64 = 1e-9;
 
 type WallVelocity<'a> = Box<dyn Fn(f64, f64) -> (f64, f64) + 'a>;
 
+#[derive(Clone)]
 struct Prev {
     u: Vec<f64>,
     v: Vec<f64>,
@@ -388,6 +389,7 @@ struct Prev {
 }
 
 /// Free-surface state: the level set (liquid where `psi < 0`) and body acceleration.
+#[derive(Clone)]
 pub struct Surface {
     pub ls: LevelSet,
     /// Body acceleration `(gx, gy)` in m/s^2.
@@ -616,6 +618,7 @@ pub struct StaggeredFlow<'a> {
 
 /// Everything of a [`StaggeredFlow`] except the mesh and the wall-velocity closure: moving
 /// bodies change the mesh every step, so the flow is carried from one mesh to the next.
+#[derive(Clone)]
 pub struct FlowState {
     pub nu: f64,
     pub u: Vec<f64>,
