@@ -237,6 +237,19 @@ impl Helmholtz<'_> {
         bval: impl Fn(f64, f64) -> f64,
         tol: f64,
     ) -> SolveStats {
+        self.solve_with_flux(x, source, None, bval, tol)
+    }
+
+    /// As [`Helmholtz::solve`] with an extra right-hand side `flux[c]` (already multiplied by
+    /// `dx`): the outward-normal-derivative data of the dropped (free-surface) links.
+    pub fn solve_with_flux(
+        &self,
+        x: &mut [f64],
+        source: Option<&[f64]>,
+        flux: Option<&[f64]>,
+        bval: impl Fn(f64, f64) -> f64,
+        tol: f64,
+    ) -> SolveStats {
         let g = self.grid;
         let dx2 = g.dx() * g.dx();
         let mut b = vec![0.0; x.len()];
@@ -244,7 +257,9 @@ impl Helmholtz<'_> {
             if !self.active[c] {
                 continue;
             }
-            b[c] = self.sigma * dx2 * x[c] + source.map_or(0.0, |s| dx2 * s[c]);
+            b[c] = self.sigma * dx2 * x[c]
+                + source.map_or(0.0, |s| dx2 * s[c])
+                + flux.map_or(0.0, |f| f[c]);
             for link in &g.links[c] {
                 if let Link::Boundary { theta, bx, by } = *link {
                     b[c] += bval(bx, by) / theta;

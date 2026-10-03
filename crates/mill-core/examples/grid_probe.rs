@@ -2,9 +2,10 @@
 //! grid_probe -- --exp E0`.
 
 use mill_core::mac::verify::{
-    diagnose_couette_mac, verify_couette_mac_scheme, verify_couette_ns, verify_couette_stokes,
-    verify_dam_break, verify_levelset_rotation, verify_manufactured, verify_sloshing_circle,
-    verify_sloshing_rect, verify_spinup, verify_spinup_mac, verify_still_pool,
+    diagnose_couette_mac, track_sheet_growth, verify_couette_mac_scheme, verify_couette_ns,
+    verify_couette_stokes, verify_dam_break, verify_levelset_rotation, verify_rigid_ring, verify_manufactured,
+    verify_rimming, verify_sloshing_circle, verify_sloshing_rect, verify_spinup, verify_spinup_mac,
+    verify_still_pool, verify_translation, verify_wall_impact,
 };
 use std::time::Instant;
 
@@ -28,6 +29,11 @@ fn main() {
         "E2b" => e2b(),
         "E2bc" => e2bc(),
         "E2c" => e2c(),
+        "E2w" => e2w(),
+        "E2t" => e2t(),
+        "E2g" => e2g(),
+        "E2d" => e2d(),
+        "E2r" => e2r(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -318,7 +324,7 @@ fn e2bc() {
 }
 
 fn e2c() {
-    let ts = [0.5, 1.0, 1.5, 2.0, 2.5];
+    let ts = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
     println!("E2c dam break of a square column a = 0.2 in a 1.0 tank, nu = 1e-6 (Z = x_front / a)");
     print!("{:>5} {:>7} {:>8}", "n", "scheme", "volume");
     for t in ts {
@@ -338,4 +344,105 @@ fn e2c() {
         println!("  {:.2}", r.max_speed);
     }
     println!("Ritter shallow-water upper bound: Z = 1 + 2 T");
+}
+
+fn e2w() {
+    println!("E2w liquid layer (u0 = 2.5 m/s, gravity) hitting a wall at x = 0.5 (t_end = 0.8 s): blow-up time or final speed");
+    println!("{:>5} {:>8} {:>12} {:>10}", "n", "h/dx", "blow-up", "speed");
+    for n in [64usize, 128, 256] {
+        for h in [0.6, 1.0, 1.7, 3.0, 6.0] {
+            let r = verify_wall_impact(n, h, 2.5, 1e-6, 0.8, 0.5, &|f| f.upwind = true);
+            println!(
+                "{n:>5} {h:>8} {:>12} {:>10.2}",
+                r.blew_up_at.map_or("-".to_string(), |t| format!("{t:.4}")),
+                r.final_speed
+            );
+        }
+    }
+}
+
+fn e2t() {
+    println!("E2t rigid translation of a liquid block (side 0.2, u0 = 2.5, no gravity), t = 0.1 s");
+    for n in [64usize, 128] {
+        match verify_translation(n, 0.2, 2.5, 1e-6, 0.1, &|_| {}) {
+            Some((dev, vmax)) => println!("n={n:<4} max|u-u0| = {dev:.3e}  max|v| = {vmax:.3e}"),
+            None => println!("n={n:<4} BLEW UP"),
+        }
+    }
+}
+
+fn e2g() {
+    println!("E2g thin sheet sliding on a floor, u0 = 2.5, no gravity: max|v| at t = 0.1");
+    for n in [64usize, 128] {
+        for h in [0.6, 1.0, 1.7, 3.0] {
+            let hist = track_sheet_growth(n, h, 2.5, 0.1, true, &|f| f.upwind = true);
+            let last = hist.last().unwrap();
+            println!(
+                "n={n:<4} h/dx={h:<4} t={:.4} max|v|={:.3e} at {:?}",
+                last.0, last.1, last.3
+            );
+        }
+    }
+}
+
+fn e2d() {
+    println!(
+        "E2d rimming flow (R = 0.5, Omega = 1, nu = 0.02, ring h0 = 16 mm) vs Moffatt thin film"
+    );
+    let revs: f64 = std::env::args()
+        .skip_while(|a| a != "--revs")
+        .nth(1)
+        .and_then(|a| a.parse().ok())
+        .unwrap_or(2.0);
+    for n in [128usize, 256] {
+        let r = verify_rimming(n, 0.02, 1.0, 0.016, revs);
+        println!(
+            "n={n:<4} steps={} q/qmax={:.3} h/R(max)={:.3} max rel err={:.2}% rms={:.2}% volume={:.4}%",
+            r.steps,
+            r.q_over_qmax,
+            r.h_over_r,
+            100.0 * r.max_rel_err,
+            100.0 * r.rms_rel_err,
+            100.0 * r.volume_drift
+        );
+        for k in (0..r.phi.len()).step_by(6) {
+            println!(
+                "   phi={:6.1} deg  h_sim={:.4}  h_theory={:.4}",
+                r.phi[k].to_degrees(),
+                r.h_sim[k],
+                r.h_theory[k]
+            );
+        }
+    }
+}
+
+fn e2r() {
+    use mill_core::mac::staggered::StaggeredFlow;
+    println!("E2r rigidly rotating liquid ring (exact steady free surface), R = 0.5, r_i = 0.3, nu = 1e-3, t = 1 s, Omega = 8, g = 0");
+    type Cfg = Box<dyn Fn(&mut StaggeredFlow)>;
+    let variants: Vec<(&str, Cfg)> = vec![
+        ("default", Box::new(|_| {})),
+        ("no stress-free flux", Box::new(|f| f.stress_free_flux = false)),
+        ("no zero-grad rule", Box::new(|f| f.zero_gradient_rule = false)),
+        (
+            "unbounded + no rule",
+            Box::new(|f| {
+                f.bound_slack = 1e9;
+                f.zero_gradient_rule = false;
+            }),
+        ),
+        (
+            "unbounded only",
+            Box::new(|f| f.bound_slack = 1e9),
+        ),
+    ];
+    for (name, cfg) in &variants {
+        for n in [64usize, 128] {
+            let r = verify_rigid_ring(n, 8.0, 0.3, 1e-3, 1.0, 0.0, cfg.as_ref());
+            println!(
+                "{name:>22} n={n:<4} surface/dx={:.3} velocity={:.2e} pressure={:.2e}",
+                r.surface_err_cells, r.velocity_err, r.pressure_err
+            );
+        }
+    }
 }

@@ -188,11 +188,17 @@ impl StaggeredMesh {
 /// direction: quadratic `3 q1 - 3 q2 + q3` where three interior values exist, else linear
 /// `2 q1 - q2`, else constant; directions of the best available order are averaged.
 pub fn extend(q: &mut [f64], layer: &[u8], n: usize, max_order: u8) {
-    extend_ordered(q, layer, n, &|_| max_order);
+    extend_ordered(q, layer, n, &|_| max_order, &|_| None);
 }
 
 /// Same with the highest extrapolation order chosen per node.
-pub fn extend_ordered(q: &mut [f64], layer: &[u8], n: usize, order_of: &dyn Fn(usize) -> u8) {
+pub fn extend_ordered(
+    q: &mut [f64],
+    layer: &[u8],
+    n: usize,
+    order_of: &dyn Fn(usize) -> u8,
+    bounded: &dyn Fn(usize) -> Option<f64>,
+) {
     let ok = |a: isize, b: isize| a >= 0 && b >= 0 && (a as usize) < n && (b as usize) < n;
     let depth_max = layer
         .iter()
@@ -216,14 +222,26 @@ pub fn extend_ordered(q: &mut [f64], layer: &[u8], n: usize, order_of: &dyn Fn(u
                 };
                 let mut best = (0u8, 0.0f64, 0.0f64);
                 for (di, dj) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
-                    let cand = match (at(1, di, dj), at(2, di, dj), at(3, di, dj)) {
+                    let (q1, q2, q3) = (at(1, di, dj), at(2, di, dj), at(3, di, dj));
+                    let mut cand = match (q1, q2, q3) {
                         (Some(a), Some(b), Some(c3)) if max_order >= 3 => {
                             Some((3u8, 3.0 * a - 3.0 * b + c3))
                         }
                         (Some(a), Some(b), _) if max_order >= 2 => Some((2, 2.0 * a - b)),
-                        (Some(a), None, _) => Some((1, a)),
+                        (Some(a), _, _) => Some((1, a)),
                         _ => None,
                     };
+                    if let Some(slack) = bounded(c) {
+                        // Monotone extrapolation: stay within the range of the data it comes
+                        // from, widened by `slack` times that range on both sides.
+                        let vals: Vec<f64> = [q1, q2, q3].iter().flatten().copied().collect();
+                        if let Some((o, val)) = cand {
+                            let lo = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+                            let hi = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                            let w = slack * (hi - lo);
+                            cand = Some((o, val.max(lo - w).min(hi + w)));
+                        }
+                    }
                     if let Some((order, val)) = cand {
                         if order > best.0 {
                             best = (order, val, 1.0);
@@ -307,6 +325,9 @@ pub struct Liquid {
     pub active_v: Vec<bool>,
     pub layer_u: Vec<u8>,
     pub layer_v: Vec<u8>,
+    /// Unit normals of the level set (pointing into the air) at the `u` and `v` nodes.
+    pub normal_u: Vec<(f64, f64)>,
+    pub normal_v: Vec<(f64, f64)>,
 }
 
 impl Liquid {
@@ -324,6 +345,8 @@ impl Liquid {
             active_v: sm.gv.fluid.clone(),
             layer_u: sm.layer_u.clone(),
             layer_v: sm.layer_v.clone(),
+            normal_u: vec![(0.0, 0.0); n * n],
+            normal_v: vec![(0.0, 0.0); n * n],
         }
     }
 
@@ -342,6 +365,8 @@ impl Liquid {
             active_v: vec![false; n * n],
             layer_u: Vec::new(),
             layer_v: Vec::new(),
+            normal_u: vec![(0.0, 0.0); n * n],
+            normal_v: vec![(0.0, 0.0); n * n],
         };
         let classify = |lo: usize, hi: usize, aperture: f64, cell: &[bool]| -> (u8, f64) {
             if aperture <= 0.0 {
@@ -371,6 +396,34 @@ impl Liquid {
         let open_v: Vec<bool> = out.kv.iter().map(|&k| k != 0).collect();
         out.layer_u = ghost_layers(&out.active_u, &open_u, n, 3);
         out.layer_v = ghost_layers(&out.active_v, &open_v, n, 3);
+        let at = |i: isize, j: isize| {
+            let m = n as isize - 1;
+            psi[(i.clamp(0, m) + n as isize * j.clamp(0, m)) as usize]
+        };
+        let dx = sm.dx();
+        let unit = |gx: f64, gy: f64| {
+            let g = (gx * gx + gy * gy).sqrt();
+            if g > 1e-12 {
+                (gx / g, gy / g)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+        for j in 0..n as isize {
+            for i in 0..n as isize {
+                let c = i as usize + n * j as usize;
+                // u node between cells (i-1, j) and (i, j).
+                let gx = (at(i, j) - at(i - 1, j)) / dx;
+                let gy = (at(i - 1, j + 1) + at(i, j + 1) - at(i - 1, j - 1) - at(i, j - 1))
+                    / (4.0 * dx);
+                out.normal_u[c] = unit(gx, gy);
+                // v node between cells (i, j-1) and (i, j).
+                let gy = (at(i, j) - at(i, j - 1)) / dx;
+                let gx = (at(i + 1, j - 1) + at(i + 1, j) - at(i - 1, j - 1) - at(i - 1, j))
+                    / (4.0 * dx);
+                out.normal_v[c] = unit(gx, gy);
+            }
+        }
         out
     }
 
@@ -426,18 +479,14 @@ pub struct StaggeredFlow<'a> {
     pub surface: Option<Surface>,
     /// Third-order upwind-biased advection instead of central differences.
     pub upwind: bool,
-    /// Always use backward Euler / AB1 (robustness over accuracy).
-    pub first_order: bool,
-    /// Highest polynomial order of the ghost extrapolation (3 quadratic, 2 linear, 1 constant).
-    pub ext_order: u8,
-    /// Same for nodes that are not part of the liquid topology (air side of a free surface).
-    pub air_order: u8,
-    /// Diagnostics: drop the convective term.
-    pub skip_advection: bool,
-    /// Incremental pressure form (previous pressure gradient in the predictor); off = pure projection.
-    pub incremental: bool,
-    /// First-order upwind advection (diagnostic / most robust).
-    pub upwind1: bool,
+    /// Air-side ghost values stay within this multiple of the range of the liquid data they are
+    /// extrapolated from (0 = clamp to that range).
+    pub bound_slack: f64,
+    /// Stress-free free-surface condition for the viscous solve (else zero normal derivative of
+    /// each Cartesian component).
+    pub stress_free_flux: bool,
+    /// Zero advective gradient where the upstream node is air.
+    pub zero_gradient_rule: bool,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -467,12 +516,9 @@ impl<'a> StaggeredFlow<'a> {
             liq,
             surface: None,
             upwind: false,
-            first_order: false,
-            ext_order: 3,
-            air_order: 3,
-            skip_advection: false,
-            incremental: true,
-            upwind1: false,
+            bound_slack: 0.0,
+            stress_free_flux: true,
+            zero_gradient_rule: true,
         }
     }
 
@@ -497,25 +543,21 @@ impl<'a> StaggeredFlow<'a> {
         self.helm = None;
     }
 
+    /// Ghost extension of a `u`-lattice field: quadratic extrapolation along the grid; on the air
+    /// side of a free surface the extrapolated value is clamped to the range of the liquid data
+    /// it comes from (`bound_slack` = 0). An unbounded extrapolation fed back through the interface
+    /// velocity and the advection stencils with a gain above one and made thin liquid sheets and
+    /// wall jets blow up; a normal (Aslam) continuation, which is more accurate, did too (see
+    /// docs/VERIFICATION.md, E2).
     fn extend_u(&self, q: &mut [f64]) {
-        let n = self.sm.n();
-        extend_ordered(q, &self.liq.layer_u, n, &|c| {
-            if self.liq.ku[c] != 0 {
-                self.ext_order
-            } else {
-                self.air_order
-            }
+        extend_ordered(q, &self.liq.layer_u, self.sm.n(), &|_| 3, &|c| {
+            (self.sm.gu.fluid[c] && !self.liq.active_u[c]).then_some(self.bound_slack)
         });
     }
 
     fn extend_v(&self, q: &mut [f64]) {
-        let n = self.sm.n();
-        extend_ordered(q, &self.liq.layer_v, n, &|c| {
-            if self.liq.kv[c] != 0 {
-                self.ext_order
-            } else {
-                self.air_order
-            }
+        extend_ordered(q, &self.liq.layer_v, self.sm.n(), &|_| 3, &|c| {
+            (self.sm.gv.fluid[c] && !self.liq.active_v[c]).then_some(self.bound_slack)
         });
     }
 
@@ -638,6 +680,91 @@ impl<'a> StaggeredFlow<'a> {
         phi
     }
 
+    /// Right-hand-side data (times `dx`) for the dropped free-surface links of the two Helmholtz
+    /// solves. A zero normal derivative of each Cartesian component is not the stress-free
+    /// condition (`(grad u + grad u^T) n = 0`): it damps the rigid rotation of a liquid ring at the
+    /// free surface by an error that does not shrink with the grid. Here the derivative along the
+    /// link direction `e` is built from the stress-free normal derivative
+    /// `n . grad u_i = -(grad u)^T n` and the tangential derivative `t . grad u_i` of the current
+    /// (lagged) velocity: `g = (e.n) (-sum_j n_j A_ji) + (e.t) (sum_j t_j A_ij)` with
+    /// `A_ij = d u_i / d x_j`.
+    fn free_surface_flux(&self) -> (Vec<f64>, Vec<f64>) {
+        let sm = self.sm;
+        let n = sm.n();
+        let dx = sm.dx();
+        let (u, v) = (&self.u, &self.v);
+        let mut fu = vec![0.0; n * n];
+        let mut fv = vec![0.0; n * n];
+        let dirs: [(f64, f64); 4] = [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)];
+        for j in 1..n - 1 {
+            for i in 1..n - 1 {
+                let c = i + n * j;
+                if self.liq.active_u[c] {
+                    // Velocity gradient A[row = component][col = direction] at the u node.
+                    let a = [
+                        [
+                            (u[c + 1] - u[c - 1]) / (2.0 * dx),
+                            (u[c + n] - u[c - n]) / (2.0 * dx),
+                        ],
+                        [
+                            (v[c] + v[c + n] - v[c - 1] - v[c - 1 + n]) / (2.0 * dx),
+                            0.5 * (v[c - 1 + n] - v[c - 1] + v[c + n] - v[c]) / dx,
+                        ],
+                    ];
+                    fu[c] = self.link_flux(&sm.gu, &self.liq.active_u, c, 0, &a, self.liq.normal_u[c], &dirs, dx);
+                }
+                if self.liq.active_v[c] {
+                    let a = [
+                        [
+                            0.5 * (u[c + 1] - u[c] + u[c + 1 - n] - u[c - n]) / dx,
+                            (u[c] + u[c + 1] - u[c - n] - u[c + 1 - n]) / (2.0 * dx),
+                        ],
+                        [
+                            (v[c + 1] - v[c - 1]) / (2.0 * dx),
+                            (v[c + n] - v[c - n]) / (2.0 * dx),
+                        ],
+                    ];
+                    fv[c] = self.link_flux(&sm.gv, &self.liq.active_v, c, 1, &a, self.liq.normal_v[c], &dirs, dx);
+                }
+            }
+        }
+        (fu, fv)
+    }
+
+    /// Sum over the dropped links of node `c` of `dx * g`, see [`Self::free_surface_flux`].
+    #[allow(clippy::too_many_arguments)]
+    fn link_flux(
+        &self,
+        grid: &FluidGrid,
+        active: &[bool],
+        c: usize,
+        comp: usize,
+        a: &[[f64; 2]; 2],
+        normal: (f64, f64),
+        dirs: &[(f64, f64); 4],
+        dx: f64,
+    ) -> f64 {
+        let (nx, ny) = normal;
+        if nx == 0.0 && ny == 0.0 {
+            return 0.0;
+        }
+        let (tx, ty) = (-ny, nx);
+        let mut total = 0.0;
+        for (k, link) in grid.links[c].iter().enumerate() {
+            if let Link::Fluid(nb) = *link {
+                if active[nb] {
+                    continue;
+                }
+                let (ex, ey) = dirs[k];
+                let normal_part = -(nx * a[0][comp] + ny * a[1][comp]);
+                let tangential_part = tx * a[comp][0] + ty * a[comp][1];
+                let g = (ex * nx + ey * ny) * normal_part + (ex * tx + ey * ty) * tangential_part;
+                total += dx * g;
+            }
+        }
+        total
+    }
+
     /// Face gradient of a cell field, `(dp/dx at u nodes, dp/dy at v nodes)`; air has `p = 0` at
     /// the interface fraction.
     fn pressure_gradient(&self, p: &[f64]) -> (Vec<f64>, Vec<f64>) {
@@ -668,27 +795,32 @@ impl<'a> StaggeredFlow<'a> {
 
     /// Convective terms `(U . grad) u` at `u` nodes and `(U . grad) v` at `v` nodes, for active
     /// nodes (zero elsewhere): central differences, or third-order upwind-biased ones when
-    /// `upwind` is set; the other velocity component is the 4-face average.
+    /// `upwind` is set; the other velocity component is the 4-face average. A node whose upstream
+    /// neighbour is air gets a zero gradient (no information comes from air).
     fn advection(&self, u: &[f64], v: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let sm = self.sm;
         let n = sm.n();
-        let inv1 = 1.0 / sm.dx();
-        let inv2 = 1.0 / (2.0 * sm.dx());
-        let inv6 = 1.0 / (6.0 * sm.dx());
-        let d = |q: &[f64], c: usize, stride: usize, vel: f64| -> f64 {
-            if self.upwind1 {
-                if vel > 0.0 {
-                    (q[c] - q[c - stride]) * inv1
-                } else {
-                    (q[c + stride] - q[c]) * inv1
-                }
-            } else if !self.upwind {
-                (q[c + stride] - q[c - stride]) * inv2
-            } else if vel > 0.0 {
-                (q[c - 2 * stride] - 6.0 * q[c - stride] + 3.0 * q[c] + 2.0 * q[c + stride]) * inv6
-            } else {
-                -(q[c + 2 * stride] - 6.0 * q[c + stride] + 3.0 * q[c] + 2.0 * q[c - stride]) * inv6
+        let dx = sm.dx();
+        let (inv2, inv6) = (0.5 / dx, 1.0 / (6.0 * dx));
+        let air_u: Vec<bool> = (0..n * n)
+            .map(|c| sm.gu.fluid[c] && !self.liq.active_u[c])
+            .collect();
+        let air_v: Vec<bool> = (0..n * n)
+            .map(|c| sm.gv.fluid[c] && !self.liq.active_v[c])
+            .collect();
+        let d = |q: &[f64], air: &[bool], c: usize, stride: usize, vel: f64| -> f64 {
+            if !self.upwind {
+                return (q[c + stride] - q[c - stride]) * inv2;
             }
+            let (up1, up2, dn, sign) = if vel > 0.0 {
+                (c - stride, c - 2 * stride, c + stride, 1.0)
+            } else {
+                (c + stride, c + 2 * stride, c - stride, -1.0)
+            };
+            if air[up1] && self.zero_gradient_rule {
+                return 0.0;
+            }
+            sign * (q[up2] - 6.0 * q[up1] + 3.0 * q[c] + 2.0 * q[dn]) * inv6
         };
         let mut au = vec![0.0; n * n];
         let mut av = vec![0.0; n * n];
@@ -697,11 +829,11 @@ impl<'a> StaggeredFlow<'a> {
                 let c = i + n * j;
                 if self.liq.active_u[c] {
                     let vb = 0.25 * (v[c - 1] + v[c] + v[c - 1 + n] + v[c + n]);
-                    au[c] = u[c] * d(u, c, 1, u[c]) + vb * d(u, c, n, vb);
+                    au[c] = u[c] * d(u, &air_u, c, 1, u[c]) + vb * d(u, &air_u, c, n, vb);
                 }
                 if self.liq.active_v[c] {
                     let ub = 0.25 * (u[c - n] + u[c + 1 - n] + u[c] + u[c + 1]);
-                    av[c] = ub * d(v, c, 1, ub) + v[c] * d(v, c, n, v[c]);
+                    av[c] = ub * d(v, &air_v, c, 1, ub) + v[c] * d(v, &air_v, c, n, v[c]);
                 }
             }
         }
@@ -788,19 +920,8 @@ impl<'a> StaggeredFlow<'a> {
             self.extend_v(&mut tmp);
             self.v = tmp;
         }
-        if self.first_order {
-            self.prev = None;
-        }
-        let (mut au, mut av) = self.advection(&self.u, &self.v);
-        if self.skip_advection {
-            au.fill(0.0);
-            av.fill(0.0);
-        }
-        let (mut gpx, mut gpy) = self.pressure_gradient(&self.p);
-        if !self.incremental {
-            gpx.fill(0.0);
-            gpy.fill(0.0);
-        }
+        let (au, av) = self.advection(&self.u, &self.v);
+        let (gpx, gpy) = self.pressure_gradient(&self.p);
         let bdf2 = matches!(&self.prev, Some(pv) if (pv.dt - dt).abs() < 1e-14 * dt);
         let sigma = if bdf2 { 1.5 } else { 1.0 } / (self.nu * dt);
         let (gx, gy) = gravity.unwrap_or((0.0, 0.0));
@@ -835,10 +956,15 @@ impl<'a> StaggeredFlow<'a> {
                 sm.gv.helmholtz_masked(sigma, &self.liq.active_v),
             ));
         }
+        let flux = (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
         let wv = &self.wall_velocity;
         if let Some((_, hu, hv)) = &self.helm {
-            hu.solve(&mut xu, Some(&su), |x, y| wv(x, y).0, TOL_VISCOUS);
-            hv.solve(&mut xv, Some(&sv), |x, y| wv(x, y).1, TOL_VISCOUS);
+            let (fu, fv) = match &flux {
+                Some((a, b)) => (Some(&a[..]), Some(&b[..])),
+                None => (None, None),
+            };
+            hu.solve_with_flux(&mut xu, Some(&su), fu, |x, y| wv(x, y).0, TOL_VISCOUS);
+            hv.solve_with_flux(&mut xv, Some(&sv), fv, |x, y| wv(x, y).1, TOL_VISCOUS);
         }
         self.extend_u(&mut xu);
         self.extend_v(&mut xv);
@@ -847,7 +973,7 @@ impl<'a> StaggeredFlow<'a> {
         let dt_eff = if bdf2 { dt * 2.0 / 3.0 } else { dt };
         let phi = self.project(dt_eff);
         for (p, f) in self.p.iter_mut().zip(&phi) {
-            *p = if self.incremental { *p + f } else { *f };
+            *p += f;
         }
         self.prev = Some(old);
         self.time += dt;

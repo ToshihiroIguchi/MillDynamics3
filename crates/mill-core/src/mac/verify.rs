@@ -309,6 +309,17 @@ pub fn verify_couette_mac_scheme(
     cfl: f64,
     upwind: bool,
 ) -> CouetteNs {
+    verify_couette_mac_flow(n, nu, t_end, cfl, &|f| f.upwind = upwind)
+}
+
+/// Hold test with the flow configured by `configure`.
+pub fn verify_couette_mac_flow(
+    n: usize,
+    nu: f64,
+    t_end: f64,
+    cfl: f64,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> CouetteNs {
     let (r1, r2, omega) = (0.25, 0.5, 1.0);
     let sm = StaggeredMesh::new(n, 0.55, |x, y| {
         let r = (x * x + y * y).sqrt();
@@ -328,7 +339,7 @@ pub fn verify_couette_mac_scheme(
         }
     };
     let mut flow = StaggeredFlow::new(&sm, nu, wall);
-    flow.upwind = upwind;
+    configure(&mut flow);
     flow.set_velocity(exact);
     let dx = sm.dx();
     let dt = cfl * dx / (omega * r1);
@@ -731,6 +742,19 @@ pub fn verify_sloshing_rect(
     t_end: f64,
     upwind: bool,
 ) -> Sloshing {
+    verify_sloshing_rect_with(n, width, depth, amp, nu, t_end, &|f| f.upwind = upwind)
+}
+
+/// [`verify_sloshing_rect`] with the flow configured by `configure`.
+pub fn verify_sloshing_rect_with(
+    n: usize,
+    width: f64,
+    depth: f64,
+    amp: f64,
+    nu: f64,
+    t_end: f64,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> Sloshing {
     let g = 9.81;
     let floor = -0.5 * width;
     let top = floor + 0.95;
@@ -738,7 +762,7 @@ pub fn verify_sloshing_rect(
         (x.abs() - 0.5 * width).max(floor - y).max(y - top)
     });
     let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
-    flow.upwind = upwind;
+    configure(&mut flow);
     let k = PI / width;
     let level = floor + depth;
     let ls = FsLevelSet::new(n, 0.55, |x, y| {
@@ -784,11 +808,22 @@ pub fn verify_sloshing_rect(
 /// time. The reference frequency is `sqrt(K g / R)` with `K R` from
 /// [`super::reference::half_disc_sloshing`].
 pub fn verify_sloshing_circle(n: usize, amp: f64, nu: f64, t_end: f64, upwind: bool) -> Sloshing {
+    verify_sloshing_circle_with(n, amp, nu, t_end, &|f| f.upwind = upwind)
+}
+
+/// [`verify_sloshing_circle`] with the flow configured by `configure`.
+pub fn verify_sloshing_circle_with(
+    n: usize,
+    amp: f64,
+    nu: f64,
+    t_end: f64,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> Sloshing {
     let radius = 0.5;
     let g = 9.81;
     let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
     let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
-    flow.upwind = upwind;
+    configure(&mut flow);
     let ls = FsLevelSet::new(n, 0.55, |x, y| y - amp * x / radius);
     flow.enable_free_surface(ls, (0.0, -g));
     let dx = sm.dx();
@@ -893,5 +928,470 @@ pub fn verify_dam_break(n: usize, a: f64, nu: f64, ts: &[f64], upwind: bool) -> 
         front,
         volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
         max_speed,
+    }
+}
+
+/// Outcome of the wall-impact reproduction.
+#[derive(Clone, Copy, Debug)]
+pub struct WallImpact {
+    pub steps: usize,
+    /// Time at which the speed exceeded 50 m/s, if it did.
+    pub blew_up_at: Option<f64>,
+    pub final_speed: f64,
+    pub volume_drift: f64,
+}
+
+/// A liquid layer of `h_cells` cells thickness on the floor of a tank (`x in [-0.5, 0]` at first),
+/// moving to the right with `u0` and hitting the wall at `x = wall_x`. `configure` tweaks the flow
+/// (diagnostic switches) before the run.
+pub fn verify_wall_impact(
+    n: usize,
+    h_cells: f64,
+    u0: f64,
+    nu: f64,
+    t_end: f64,
+    wall_x: f64,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> WallImpact {
+    let g = 9.81;
+    let left = -0.5;
+    let dx0 = 1.1 / n as f64;
+    let floor = if std::env::var("ALIGN").is_ok() {
+        -0.55 + (0.05 / dx0).round() * dx0
+    } else {
+        -0.5
+    };
+    let top = floor + 0.95;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        (x - wall_x).max(left - x).max(floor - y).max(y - top)
+    });
+    let dx = sm.dx();
+    let h = h_cells * dx;
+    let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
+    flow.upwind = true;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| (x - 0.0).max(-0.4 - x).max(y - (floor + h)));
+    flow.enable_free_surface(ls, (0.0, -g));
+    flow.surface.as_mut().expect("surface").ls.reinitialize(20);
+    configure(&mut flow);
+    flow.set_velocity(|x, y| {
+        if x < 0.02 && x > -0.42 && y < floor + h + 0.02 {
+            (u0, 0.0)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let dt = 0.2 * dx / (u0 + 2.0 * (g * h).sqrt()).max(1.0);
+    let steps = (t_end / dt).ceil() as usize;
+    let mut blew = None;
+    let mut speed = 0.0f64;
+    for s in 0..steps {
+        flow.step(dt);
+        speed = 0.0;
+        for c in 0..n * n {
+            if flow.liq.active_u[c] {
+                speed = speed.max(flow.u[c].abs());
+            }
+            if flow.liq.active_v[c] {
+                speed = speed.max(flow.v[c].abs());
+            }
+        }
+        if speed.is_nan() || speed >= 50.0 {
+            blew = Some((s + 1) as f64 * dt);
+            break;
+        }
+    }
+    let surf = flow.surface.as_ref().expect("surface");
+    WallImpact {
+        steps,
+        blew_up_at: blew,
+        final_speed: speed,
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
+    }
+}
+
+/// Rigid translation of a liquid block (side `side`) at `u0` in zero gravity inside a large
+/// tank: the exact solution keeps the velocity uniform and the pressure zero. Returns the largest
+/// deviation of the speed from `u0` over active nodes after `t_end`, or `None` on blow-up.
+pub fn verify_translation(
+    n: usize,
+    side: f64,
+    u0: f64,
+    nu: f64,
+    t_end: f64,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> Option<(f64, f64)> {
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| x.abs().max(y.abs()) - 0.5);
+    let mut flow = StaggeredFlow::new(&sm, nu, |_, _| (0.0, 0.0));
+    flow.upwind = true;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| (x + 0.25).abs().max(y.abs()) - 0.5 * side);
+    flow.enable_free_surface(ls, (0.0, 0.0));
+    flow.surface.as_mut().expect("surface").ls.reinitialize(20);
+    configure(&mut flow);
+    flow.set_velocity(|x, y| {
+        if (x + 0.25).abs().max(y.abs()) < 0.5 * side + 0.02 {
+            (u0, 0.0)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let dt = 0.2 * sm.dx() / u0;
+    let steps = (t_end / dt).ceil() as usize;
+    for _ in 0..steps {
+        flow.step(dt);
+    }
+    let mut dev = 0.0f64;
+    let mut vmax = 0.0f64;
+    for c in 0..n * n {
+        if flow.liq.active_u[c] {
+            dev = dev.max((flow.u[c] - u0).abs());
+        }
+        if flow.liq.active_v[c] {
+            vmax = vmax.max(flow.v[c].abs());
+        }
+    }
+    (dev.is_finite() && dev < 50.0).then_some((dev, vmax))
+}
+
+/// Like [`verify_wall_impact`] but reports the speed history only: time-averaged largest
+/// `|v|` over active nodes in windows of `t_end / 10`, to see whether the transverse velocity
+/// grows exponentially (instability) from the exact uniform-translation start.
+pub fn track_sheet_growth(
+    n: usize,
+    h_cells: f64,
+    u0: f64,
+    t_end: f64,
+    align: bool,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> Vec<(f64, f64, f64, (usize, usize))> {
+    let left = -0.5;
+    let dx0 = 1.1 / n as f64;
+    let floor = if align {
+        -0.55 + (0.05 / dx0).round() * dx0
+    } else {
+        -0.5
+    };
+    let top = floor + 0.95;
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        (x - 0.5).max(left - x).max(floor - y).max(y - top)
+    });
+    let dx = sm.dx();
+    let h = h_cells * dx;
+    let mut flow = StaggeredFlow::new(&sm, 1e-6, |_, _| (0.0, 0.0));
+    flow.upwind = true;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| (x - 0.0).max(-0.4 - x).max(y - (floor + h)));
+    flow.enable_free_surface(ls, (0.0, 0.0));
+    flow.surface.as_mut().expect("surface").ls.reinitialize(20);
+    configure(&mut flow);
+    flow.set_velocity(|x, y| {
+        if x < 0.02 && x > -0.42 && y < floor + h + 0.02 {
+            (u0, 0.0)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let dt = 0.2 * dx / u0;
+    let steps = (t_end / dt).ceil() as usize;
+    let mut out = Vec::new();
+    let every = (steps / 10).max(1);
+    for s in 0..steps {
+        flow.step(dt);
+        if s % every == every - 1 {
+            let (mut vmax, mut udev) = (0.0f64, 0.0f64);
+            let mut at = (0, 0);
+            for c in 0..n * n {
+                if flow.liq.active_v[c] {
+                    if flow.v[c].abs() > vmax {
+                        at = (c % n, c / n);
+                    }
+                    vmax = vmax.max(flow.v[c].abs());
+                }
+                if flow.liq.active_u[c] {
+                    udev = udev.max((flow.u[c] - u0).abs());
+                }
+            }
+            out.push(((s + 1) as f64 * dt, vmax, udev, at));
+            if vmax.is_nan() || udev.is_nan() || vmax >= 50.0 || udev >= 50.0 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Result of the rimming-flow test.
+#[derive(Clone, Debug)]
+pub struct Rimming {
+    pub steps: usize,
+    /// Polar angle from the bottom (counter-clockwise), simulated and thin-film film thickness.
+    pub phi: Vec<f64>,
+    pub h_sim: Vec<f64>,
+    pub h_theory: Vec<f64>,
+    pub max_rel_err: f64,
+    pub rms_rel_err: f64,
+    pub volume_drift: f64,
+    /// Thin-film flux `q` fitted to the liquid volume, over its maximum.
+    pub q_over_qmax: f64,
+    /// Largest film thickness over the drum radius.
+    pub h_over_r: f64,
+}
+
+/// Thin-film (Moffatt 1977) steady thickness `h(phi)` of a viscous film on the inside of a
+/// cylinder of radius `radius` rotating at `omega` (wall speed `u = omega radius`), for the flux
+/// `q`; lubrication limit `h << R`, `u^2 / (g R) << 1`. `phi` is measured from the bottom, in the
+/// direction of rotation.
+fn moffatt_thickness(g: f64, nu: f64, u: f64, q: f64, phi: f64) -> f64 {
+    let a = g * phi.sin() / (3.0 * nu);
+    let f = |h: f64| u * h - a * h * h * h - q;
+    let (mut lo, mut hi) = (
+        0.0,
+        if a > 1e-14 {
+            (u / (3.0 * a)).sqrt()
+        } else {
+            q / u
+        },
+    );
+    if f(hi) < 0.0 {
+        return f64::NAN; // no film solution at this flux
+    }
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if f(mid) < 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// A viscous liquid film in a horizontally rotating circular drum (radius 0.5), started from a
+/// uniform ring of thickness `h0` and integrated for `revs` revolutions; compares the final film
+/// thickness with the thin-film solution of the same liquid volume.
+pub fn verify_rimming(n: usize, nu: f64, omega: f64, h0: f64, revs: f64) -> Rimming {
+    let (radius, g) = (0.5, 9.81);
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
+    let mut flow = StaggeredFlow::new(&sm, nu, move |x, y| (-omega * y, omega * x));
+    flow.upwind = true;
+    let ls = FsLevelSet::new(n, 0.55, |x, y| (radius - h0) - (x * x + y * y).sqrt());
+    flow.enable_free_surface(ls, (0.0, -g));
+    flow.set_velocity(move |x, y| {
+        if (x * x + y * y).sqrt() > radius - h0 - 0.02 {
+            (-omega * y, omega * x)
+        } else {
+            (0.0, 0.0)
+        }
+    });
+    let dx = sm.dx();
+    let u_wall = omega * radius;
+    let dt = 0.2 * dx / u_wall;
+    let t_end = revs * 2.0 * PI / omega;
+    let steps = (t_end / dt).ceil() as usize;
+    let dt = t_end / steps as f64;
+    for _ in 0..steps {
+        flow.step(dt);
+    }
+    let surf = flow.surface.as_ref().expect("free surface enabled");
+    let ls = &surf.ls;
+    // Bilinear psi at a point (cell centres).
+    let psi_at = |x: f64, y: f64| -> f64 {
+        let (fx, fy) = ((x + 0.55) / dx - 0.5, (y + 0.55) / dx - 0.5);
+        let (i, j) = (fx.floor() as usize, fy.floor() as usize);
+        let (sx, sy) = (fx - i as f64, fy - j as f64);
+        let at = |a: usize, b: usize| ls.psi[a + n * b];
+        (1.0 - sx) * (1.0 - sy) * at(i, j)
+            + sx * (1.0 - sy) * at(i + 1, j)
+            + (1.0 - sx) * sy * at(i, j + 1)
+            + sx * sy * at(i + 1, j + 1)
+    };
+    let samples = 72;
+    let mut phi = Vec::new();
+    let mut h_sim = Vec::new();
+    for k in 0..samples {
+        let p = 2.0 * PI * (k as f64 + 0.5) / samples as f64;
+        let dir = (p.sin(), -p.cos());
+        // March inward from the wall until psi turns positive (air).
+        let mut r = radius - 0.25 * dx;
+        let mut h = f64::NAN;
+        let mut prev = psi_at(dir.0 * r, dir.1 * r);
+        while r > radius - 0.3 {
+            let rn = r - 0.05 * dx;
+            let cur = psi_at(dir.0 * rn, dir.1 * rn);
+            if prev < 0.0 && cur >= 0.0 {
+                let t = prev / (prev - cur);
+                h = radius - (r - t * 0.05 * dx);
+                break;
+            }
+            prev = cur;
+            r = rn;
+        }
+        phi.push(p);
+        h_sim.push(h);
+    }
+    // Fit the flux q to the liquid volume (annulus area = integral of (R h - h^2 / 2) dphi).
+    let volume = surf.volume0;
+    let u = u_wall;
+    let h_c = (nu * u / g).sqrt();
+    let q_max = 2.0 / 3.0 * u * h_c;
+    let area = |q: f64| -> f64 {
+        let m = 720;
+        (0..m)
+            .map(|k| {
+                let p = 2.0 * PI * (k as f64 + 0.5) / m as f64;
+                let h = moffatt_thickness(g, nu, u, q, p);
+                (radius * h - 0.5 * h * h) * 2.0 * PI / m as f64
+            })
+            .sum::<f64>()
+    };
+    let (mut lo, mut hi) = (0.0, q_max * (1.0 - 1e-9));
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if area(mid) < volume {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let q = 0.5 * (lo + hi);
+    let h_theory: Vec<f64> = phi
+        .iter()
+        .map(|&p| moffatt_thickness(g, nu, u, q, p))
+        .collect();
+    let rel: Vec<f64> = h_sim
+        .iter()
+        .zip(&h_theory)
+        .map(|(a, b)| (a - b).abs() / b)
+        .collect();
+    Rimming {
+        steps,
+        max_rel_err: rel.iter().cloned().fold(0.0, f64::max),
+        rms_rel_err: (rel.iter().map(|e| e * e).sum::<f64>() / rel.len() as f64).sqrt(),
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
+        q_over_qmax: q / q_max,
+        h_over_r: h_theory.iter().cloned().fold(0.0, f64::max) / radius,
+        phi,
+        h_sim,
+        h_theory,
+    }
+}
+
+/// Result of the rigid-rotation liquid ring test.
+#[derive(Clone, Copy, Debug)]
+pub struct RigidRing {
+    pub steps: usize,
+    /// Largest deviation of the free surface from the exact circle, in cells.
+    pub surface_err_cells: f64,
+    /// Largest velocity deviation from the rigid rotation over `omega R`.
+    pub velocity_err: f64,
+    /// Where it occurs: polar radius and angle (degrees).
+    pub velocity_err_at: (f64, f64),
+    /// Largest `|p - p_exact| / (rho omega^2 R^2 / 2)` over liquid cells.
+    pub pressure_err: f64,
+    pub volume_drift: f64,
+}
+
+/// Exact steady solution with a free surface: a liquid ring in rigid rotation at `omega` inside a
+/// drum of radius 0.5 rotating at `omega`, gravity downward. The pressure `p = omega^2 r^2 / 2 -
+/// g y + C` is constant on a circle of radius `r_i` centred at `(0, g / omega^2)`, so that circle
+/// is an exact free surface for any viscosity. The run starts from this state and checks that it
+/// is preserved.
+pub fn verify_rigid_ring(
+    n: usize,
+    omega: f64,
+    r_i: f64,
+    nu: f64,
+    t_end: f64,
+    g: f64,
+    configure: &dyn Fn(&mut StaggeredFlow),
+) -> RigidRing {
+    let radius = 0.5;
+    let e = g / (omega * omega);
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
+    let mut flow = StaggeredFlow::new(&sm, nu, move |x, y| (-omega * y, omega * x));
+    flow.upwind = true;
+    configure(&mut flow);
+    let ls = FsLevelSet::new(n, 0.55, move |x, y| r_i - (x * x + (y - e) * (y - e)).sqrt());
+    flow.enable_free_surface(ls, (0.0, -g));
+    flow.surface.as_mut().expect("surface").ls.reinitialize(20);
+    flow.set_velocity(move |x, y| (-omega * y, omega * x));
+    let dx = sm.dx();
+    let dt = 0.2 * dx / (omega * radius);
+    let steps = (t_end / dt).ceil() as usize;
+    let dt = t_end / steps as f64;
+    for _ in 0..steps {
+        flow.step(dt);
+    }
+    let surf = flow.surface.as_ref().expect("surface");
+    let ls = &surf.ls;
+    // Surface error: interface radius from the circle centre along rays.
+    let mut surface_err = 0.0f64;
+    let psi_at = |x: f64, y: f64| -> f64 {
+        let (fx, fy) = ((x + 0.55) / dx - 0.5, (y + 0.55) / dx - 0.5);
+        let (i, j) = (fx.floor() as usize, fy.floor() as usize);
+        let (sx, sy) = (fx - i as f64, fy - j as f64);
+        let at = |a: usize, b: usize| ls.psi[a + n * b];
+        (1.0 - sx) * (1.0 - sy) * at(i, j)
+            + sx * (1.0 - sy) * at(i + 1, j)
+            + (1.0 - sx) * sy * at(i, j + 1)
+            + sx * sy * at(i + 1, j + 1)
+    };
+    for k in 0..90 {
+        let a = 2.0 * PI * (k as f64 + 0.5) / 90.0;
+        let dir = (a.cos(), a.sin());
+        // March outward from inside the circle (air, psi > 0) until psi turns negative.
+        let (mut r, step) = (r_i - 0.2, 0.05 * dx);
+        let mut prev = psi_at(dir.0 * r, e + dir.1 * r);
+        while r < r_i + 0.2 {
+            let rn = r + step;
+            let (x, y) = (dir.0 * rn, e + dir.1 * rn);
+            if x.abs() > 0.5 || (x * x + y * y).sqrt() > radius {
+                break;
+            }
+            let cur = psi_at(x, y);
+            if prev >= 0.0 && cur < 0.0 {
+                let t = prev / (prev - cur);
+                surface_err = surface_err.max(((r + t * step) - r_i).abs() / dx);
+                break;
+            }
+            prev = cur;
+            r = rn;
+        }
+    }
+    let mut verr = 0.0f64;
+    let mut verr_at = (0.0, 0.0);
+    let mut perr = 0.0f64;
+    let top = e + r_i;
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            if flow.liq.active_u[c] {
+                let (x, y) = sm.gu.centre(i, j);
+                let d = (flow.u[c] + omega * y).abs();
+                if d > verr {
+                    verr = d;
+                    verr_at = ((x * x + y * y).sqrt(), y.atan2(x).to_degrees());
+                }
+            }
+            if flow.liq.active_v[c] {
+                let (x, y) = sm.gv.centre(i, j);
+                let d = (flow.v[c] - omega * x).abs();
+                if d > verr {
+                    verr = d;
+                    verr_at = ((x * x + y * y).sqrt(), y.atan2(x).to_degrees());
+                }
+            }
+            if flow.liq.cell[c] {
+                let (x, y) = ls.centre(i, j);
+                let exact = 0.5 * omega * omega * (x * x + y * y - top * top) - g * (y - top);
+                perr = perr.max((flow.p[c] - exact).abs());
+            }
+        }
+    }
+    RigidRing {
+        steps,
+        surface_err_cells: surface_err,
+        velocity_err: verr / (omega * radius),
+        velocity_err_at: verr_at,
+        pressure_err: perr / (0.5 * omega * omega * radius * radius),
+        volume_drift: surf.ls.volume() / surf.volume0 - 1.0,
     }
 }
