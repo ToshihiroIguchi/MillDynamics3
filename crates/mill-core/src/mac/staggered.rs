@@ -20,6 +20,7 @@ use super::flow::Mesh;
 use super::levelset::{weno5, LevelSet};
 use super::multigrid::PoissonSolver;
 use super::rheology::{alg2_update, HerschelBulkley, Sym};
+use super::variational::{pcg, ViscousOperator};
 use super::viscous::{FluidGrid, Helmholtz, Link};
 
 /// Geometry of the staggered discretisation.
@@ -621,8 +622,15 @@ pub struct StaggeredFlow<'a> {
     /// change below which the passes stop.
     pub alg_iterations: usize,
     pub alg_tolerance: f64,
+    /// Under-relaxation of the multiplier step.
+    pub alg_relax: f64,
     /// Passes the last step used.
     pub last_alg_passes: usize,
+    /// Symmetric (variational) stress discretisation, see `mac/variational.rs`.
+    pub variational: bool,
+    visc_op: Option<ViscousOperator>,
+    /// Diagnostic swirl body force `swirl * (-y, x)` (balanced only by stress).
+    pub swirl: f64,
 }
 
 /// Augmented-Lagrangian state of a generalised-Newtonian fluid: the multiplier (the stress) and
@@ -634,6 +642,9 @@ pub struct Rheo {
     pub law: HerschelBulkley,
     /// Augmentation parameter `r` (the implicit viscosity is `nu = r / 2`).
     pub r: f64,
+    /// Newtonian viscosity solved with the wall-exact Gibou operator in the variational mode
+    /// (the multiplier law then carries the remaining stress only).
+    pub nu_base: f64,
     pub lam_c: Vec<Sym>,
     pub lam_k: Vec<Sym>,
     pub s_c: Vec<Sym>,
@@ -660,6 +671,8 @@ pub struct FlowState {
     pub rheo: Option<Rheo>,
     pub alg_iterations: usize,
     pub alg_tolerance: f64,
+    pub alg_relax: f64,
+    pub variational: bool,
 }
 
 impl<'a> StaggeredFlow<'a> {
@@ -682,6 +695,8 @@ impl<'a> StaggeredFlow<'a> {
             rheo: self.rheo,
             alg_iterations: self.alg_iterations,
             alg_tolerance: self.alg_tolerance,
+            alg_relax: self.alg_relax,
+            variational: self.variational,
         }
     }
 
@@ -707,6 +722,8 @@ impl<'a> StaggeredFlow<'a> {
         flow.rheo = state.rheo;
         flow.alg_iterations = state.alg_iterations;
         flow.alg_tolerance = state.alg_tolerance;
+        flow.alg_relax = state.alg_relax;
+        flow.variational = state.variational;
         if let Some(mut surf) = state.surface {
             surf.ls.weight = sm.cell_fraction.clone();
             flow.liq = Liquid::from_level_set(sm, &surf.ls.psi, surf.theta_min);
@@ -819,7 +836,11 @@ impl<'a> StaggeredFlow<'a> {
             rheo: None,
             alg_iterations: 1,
             alg_tolerance: 1e-5,
+            alg_relax: 1.0,
             last_alg_passes: 0,
+            variational: false,
+            visc_op: None,
+            swirl: 0.0,
         }
     }
 
@@ -1285,6 +1306,46 @@ impl<'a> StaggeredFlow<'a> {
         out
     }
 
+    /// Copy of `q` whose solid-side neighbours of the fluid nodes carry wall-aware ghost values:
+    /// the linear extrapolation through the wall point (value `bval`) and the node, or, for a node
+    /// closer than a quarter spacing to the wall (where that amplifies by `1 / theta`), through the
+    /// wall point and the next node away from it. The strain rate computed from these values sees
+    /// the no-slip wall; extrapolating the interior alone does not.
+    fn wall_aware(g: &FluidGrid, q: &[f64], bval: impl Fn(f64, f64) -> f64) -> Vec<f64> {
+        let n = g.n;
+        let mut out = q.to_vec();
+        for c in 0..n * n {
+            if !g.fluid[c] {
+                continue;
+            }
+            for (k, link) in g.links[c].iter().enumerate() {
+                if let Link::Boundary { theta, bx, by } = *link {
+                    let nb = match k {
+                        0 => c.wrapping_sub(1),
+                        1 => c + 1,
+                        2 => c.wrapping_sub(n),
+                        _ => c + n,
+                    };
+                    if nb >= n * n || g.fluid[nb] {
+                        continue;
+                    }
+                    let wall = bval(bx, by);
+                    let opposite = match &g.links[c][k ^ 1] {
+                        Link::Fluid(o) => Some(*o),
+                        _ => None,
+                    };
+                    out[nb] = match opposite {
+                        Some(o) if theta < 0.25 => {
+                            wall + (wall - q[o]) * (1.0 - theta) / (1.0 + theta)
+                        }
+                        _ => wall + (wall - q[c]) * (1.0 - theta) / theta,
+                    };
+                }
+            }
+        }
+        out
+    }
+
     /// Pressure that balances the current acceleration `-(U.grad)u + nu lap u` (zero for a
     /// stationary state): the gradient part of the acceleration.
     pub fn init_pressure(&mut self) {
@@ -1360,6 +1421,17 @@ impl<'a> StaggeredFlow<'a> {
             self.time,
         );
         self.last_alg_passes = 0;
+        if self.variational && self.rheo.is_some() {
+            let wv = &self.wall_velocity;
+            self.visc_op = Some(ViscousOperator::build(
+                sm,
+                &self.liq.active_u,
+                &self.liq.active_v,
+                &self.liq.cell,
+                &sm.cell_fraction,
+                &|x, y| wv(x, y),
+            ));
+        }
         for pass in 0..passes {
             if pass > 0 {
                 (self.u, self.v, self.p, self.prev, self.time) = saved.clone();
@@ -1387,8 +1459,17 @@ impl<'a> StaggeredFlow<'a> {
                     ),
                     _ => (au[c], av[c], self.u[c], self.v[c]),
                 };
-                su[c] = (-eu - gpx[c] + gx + eddy_u[c] + sdu[c]) / self.nu;
-                sv[c] = (-ev - gpy[c] + gy + eddy_v[c] + sdv[c]) / self.nu;
+                let (fxs, fys) = if self.swirl != 0.0 {
+                    let (i, j) = (c % n, c / n);
+                    (
+                        -self.swirl * sm.gu.centre(i, j).1,
+                        self.swirl * sm.gv.centre(i, j).0,
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                su[c] = (-eu - gpx[c] + gx + eddy_u[c] + sdu[c] + fxs) / self.nu;
+                sv[c] = (-ev - gpy[c] + gy + eddy_v[c] + sdv[c] + fys) / self.nu;
                 xu[c] = pu;
                 xv[c] = pv;
             }
@@ -1409,7 +1490,79 @@ impl<'a> StaggeredFlow<'a> {
             let flux =
                 (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
             let wv = &self.wall_velocity;
-            if let Some((_, hu, hv)) = &self.helm {
+            if let (true, Some(op), Some(rh), Some((_, hu, hv))) =
+                (self.variational, &self.visc_op, &self.rheo, &self.helm)
+            {
+                let r = rh.r;
+                let nu_base = rh.nu_base;
+                let sigma_t = sigma * self.nu;
+                let mut b = vec![0.0; 2 * nn];
+                for c in 0..nn {
+                    b[c] = self.nu * (su[c] + sigma * xu[c]);
+                    b[nn + c] = self.nu * (sv[c] + sigma * xv[c]);
+                }
+                let s: Vec<[f64; 3]> = rh.s_c.iter().chain(rh.s_k.iter()).cloned().collect();
+                let mut bt = vec![0.0; 2 * nn];
+                op.transpose_with_wall(&s, r, &mut bt);
+                for (bi, ti) in b.iter_mut().zip(&bt) {
+                    *bi -= ti;
+                }
+                let mask: Vec<bool> = self
+                    .liq
+                    .active_u
+                    .iter()
+                    .chain(self.liq.active_v.iter())
+                    .copied()
+                    .collect();
+                let mut x: Vec<f64> = xu.iter().chain(xv.iter()).copied().collect();
+                // Warm start from the current velocity.
+                x[..nn].copy_from_slice(&self.u);
+                x[nn..].copy_from_slice(&self.v);
+                let nu = self.nu;
+                let zero_wall = |_: f64, _: f64| 0.0;
+                let apply = |x: &[f64], out: &mut [f64]| {
+                    op.apply(x, out);
+                    for i in 0..2 * nn {
+                        out[i] = sigma_t * x[i] + r * out[i];
+                    }
+                    if nu_base > 0.0 {
+                        let (lu, _) =
+                            Self::gibou_parts(&sm.gu, &x[..nn], &self.liq.active_u, &zero_wall);
+                        let (lv, _) =
+                            Self::gibou_parts(&sm.gv, &x[nn..], &self.liq.active_v, &zero_wall);
+                        for c in 0..nn {
+                            out[c] += nu_base * lu[c];
+                            out[nn + c] += nu_base * lv[c];
+                        }
+                    }
+                };
+                let precond = |res: &[f64], z: &mut [f64]| {
+                    let mut zu = vec![0.0; nn];
+                    let mut zv = vec![0.0; nn];
+                    let ru: Vec<f64> = res[..nn].iter().map(|v| v / nu).collect();
+                    let rv: Vec<f64> = res[nn..].iter().map(|v| v / nu).collect();
+                    hu.solve(&mut zu, Some(&ru), |_, _| 0.0, 1e-2);
+                    hv.solve(&mut zv, Some(&rv), |_, _| 0.0, 1e-2);
+                    z[..nn].copy_from_slice(&zu);
+                    z[nn..].copy_from_slice(&zv);
+                };
+                if nu_base > 0.0 {
+                    let (_, wu) =
+                        Self::gibou_parts(&sm.gu, &self.u, &self.liq.active_u, &|x, y| wv(x, y).0);
+                    let (_, wvv) =
+                        Self::gibou_parts(&sm.gv, &self.v, &self.liq.active_v, &|x, y| wv(x, y).1);
+                    for c in 0..nn {
+                        b[c] += nu_base * wu[c];
+                        b[nn + c] += nu_base * wvv[c];
+                    }
+                }
+                let (it, res) = pcg(&apply, &precond, &mask, &b, &mut x, 1e-9, 300);
+                if std::env::var("ALG_DEBUG").is_ok() {
+                    eprintln!("pcg {it} its, residual {res:.2e}");
+                }
+                xu.copy_from_slice(&x[..nn]);
+                xv.copy_from_slice(&x[nn..]);
+            } else if let Some((_, hu, hv)) = &self.helm {
                 let (fu, fv) = match &flux {
                     Some((a, b)) => (Some(&a[..]), Some(&b[..])),
                     None => (None, None),
@@ -1432,6 +1585,15 @@ impl<'a> StaggeredFlow<'a> {
             self.time += dt;
             self.last_alg_passes = pass + 1;
             let change = self.update_rheology();
+            if std::env::var("ALG_DEBUG").is_ok() {
+                let mut vm = 0.0f64;
+                for c in 0..nn {
+                    if self.liq.active_u[c] {
+                        vm = vm.max(self.u[c].abs());
+                    }
+                }
+                eprintln!("pass {pass} change {change:.3e} vmax {vm:.3e}");
+            }
             if pass > 0 && change < self.alg_tolerance {
                 break;
             }
@@ -1461,6 +1623,7 @@ impl<'a> StaggeredFlow<'a> {
         self.rheo = Some(Rheo {
             law,
             r,
+            nu_base: 0.0,
             lam_c: vec![[0.0; 3]; nn],
             lam_k: vec![[0.0; 3]; nn],
             s_c: vec![[0.0; 3]; nn],
@@ -1468,16 +1631,96 @@ impl<'a> StaggeredFlow<'a> {
         });
     }
 
+    /// Variational hybrid: the Newtonian viscosity `nu_base` stays in the wall-exact Gibou solve,
+    /// `law` (with `k` = 0 for a Bingham fluid whose plastic viscosity is `nu_base`) is handled by
+    /// the augmented Lagrangian with the symmetric operator of `mac/variational.rs`.
+    pub fn set_rheology_hybrid(&mut self, law: HerschelBulkley, r: f64, nu_base: f64) {
+        self.set_rheology(law, r);
+        self.variational = true;
+        if let Some(rh) = &mut self.rheo {
+            rh.nu_base = nu_base;
+        }
+        self.nu = nu_base + 0.5 * r;
+        self.helm = None;
+    }
+
+    /// `-lap x` of the Gibou operator on the active nodes with homogeneous walls (links to
+    /// inactive nodes dropped), and the wall-data part `sum bval / theta` of its right-hand side.
+    fn gibou_parts(
+        g: &FluidGrid,
+        x: &[f64],
+        active: &[bool],
+        bval: &dyn Fn(f64, f64) -> f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let dx2 = g.dx() * g.dx();
+        let mut neg_lap = vec![0.0; x.len()];
+        let mut wall = vec![0.0; x.len()];
+        for c in 0..x.len() {
+            if !g.fluid[c] || !active[c] {
+                continue;
+            }
+            let mut s = 0.0;
+            let mut w = 0.0;
+            for link in &g.links[c] {
+                match *link {
+                    Link::Fluid(nb) => {
+                        if active[nb] {
+                            s += x[c] - x[nb];
+                        }
+                    }
+                    Link::Boundary { theta, bx, by } => {
+                        s += x[c] / theta;
+                        w += bval(bx, by) / theta;
+                    }
+                }
+            }
+            neg_lap[c] = s / dx2;
+            wall[c] = w / dx2;
+        }
+        (neg_lap, wall)
+    }
+
     /// ALG2 d- and lambda-steps from the current velocity. Strain rates are compact MAC
     /// differences: `Dxx`, `Dyy` at cell centres, `Dxy` at corners; the missing components of the
     /// tensor at each location are the averages of the four surrounding values.
+    #[allow(clippy::needless_range_loop)]
     fn update_rheology(&mut self) -> f64 {
         let Some(mut rh) = self.rheo.take() else {
             return 0.0;
         };
         let n = self.sm.n();
+        if let (true, Some(op)) = (self.variational, &self.visc_op) {
+            let nn = n * n;
+            let x: Vec<f64> = self.u.iter().chain(self.v.iter()).copied().collect();
+            let strain = op.strain(&x);
+            let (law, r, omega) = (rh.law, rh.r, self.alg_relax);
+            let (mut delta, mut scale) = (0.0f64, 0.0f64);
+            for p in 0..2 * nn {
+                let (lam, s) = if p < nn {
+                    (&mut rh.lam_c[p], &mut rh.s_c[p])
+                } else {
+                    (&mut rh.lam_k[p - nn], &mut rh.s_k[p - nn])
+                };
+                if !op.valid(p) {
+                    *lam = [0.0; 3];
+                    *s = [0.0; 3];
+                    continue;
+                }
+                let old = *lam;
+                (*lam, *s) = alg2_update(&law, r, omega, &old, &strain[p]);
+                for k in 0..3 {
+                    delta = delta.max((lam[k] - old[k]).abs());
+                    scale = scale.max(lam[k].abs());
+                }
+            }
+            self.rheo = Some(rh);
+            return delta / scale.max(1e-300);
+        }
         let inv = 1.0 / self.sm.dx();
-        let (u, v) = (&self.u, &self.v);
+        let wv = &self.wall_velocity;
+        let uw = Self::wall_aware(&self.sm.gu, &self.u, |x, y| wv(x, y).0);
+        let vw = Self::wall_aware(&self.sm.gv, &self.v, |x, y| wv(x, y).1);
+        let (u, v) = (&uw, &vw);
         let (lu, lv) = (&self.liq.layer_u, &self.liq.layer_v);
         let known = |c: usize, cu: &[usize], cv: &[usize]| {
             cu.iter().all(|&k| lu[c + k] < 255) && cv.iter().all(|&k| lv[c + k] < 255)
@@ -1501,6 +1744,7 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         let (law, r) = (rh.law, rh.r);
+        let omega = self.alg_relax;
         let (mut delta, mut scale) = (0.0f64, 0.0f64);
         let (mut done_c, mut done_k) = (vec![false; n * n], vec![false; n * n]);
         for j in 2..n - 2 {
@@ -1522,7 +1766,7 @@ impl<'a> StaggeredFlow<'a> {
                     let d = [dxx[c], 0.25 * cxy.iter().sum::<f64>(), dyy[c]];
                     done_c[c] = self.sm.mesh.pressure_active[c];
                     let old = rh.lam_c[c];
-                    (rh.lam_c[c], rh.s_c[c]) = alg2_update(&law, r, &old, &d);
+                    (rh.lam_c[c], rh.s_c[c]) = alg2_update(&law, r, omega, &old, &d);
                     for k in [0, 2] {
                         delta = delta.max((rh.lam_c[c][k] - old[k]).abs());
                         scale = scale.max(rh.lam_c[c][k].abs());
@@ -1541,7 +1785,7 @@ impl<'a> StaggeredFlow<'a> {
                     let d = [mx, dxy[c], my];
                     done_k[c] = cells.iter().all(|&k| self.sm.mesh.pressure_active[k]);
                     let old = rh.lam_k[c];
-                    (rh.lam_k[c], rh.s_k[c]) = alg2_update(&law, r, &old, &d);
+                    (rh.lam_k[c], rh.s_k[c]) = alg2_update(&law, r, omega, &old, &d);
                     delta = delta.max((rh.lam_k[c][1] - old[1]).abs());
                     scale = scale.max(rh.lam_k[c][1].abs());
                 }
@@ -1580,6 +1824,9 @@ impl<'a> StaggeredFlow<'a> {
         let Some(rh) = &self.rheo else {
             return (au, av);
         };
+        if self.variational {
+            return (au, av);
+        }
         let inv = 1.0 / self.sm.dx();
         for j in 2..n - 2 {
             for i in 2..n - 2 {

@@ -58,6 +58,7 @@ fn main() {
         "E5g" => e5g(),
         "E6a" => e6a(),
         "E6d" => e6d(),
+        "E6s" => e6s(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -1398,5 +1399,33 @@ fn e6d() {
         for (t, v, slope, deep) in series {
             println!("{t:>8.3} {v:>12.3e} {slope:>9.4} {deep:>12.3e}");
         }
+    }
+}
+
+fn e6s() {
+    use mill_core::mac::rheology::HerschelBulkley;
+    use mill_core::mac::verify::verify_swirl_hold;
+    let arg = |name: &str, default: f64| -> f64 {
+        std::env::args()
+            .skip_while(|a| a != name)
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let n = arg("--n", 64.0) as usize;
+    let (tau, eps, r) = (arg("--tau", 1.0), arg("--eps", 2.0), arg("--r", 1.0));
+    let iters = arg("--iters", 20.0) as usize;
+    let t_end = arg("--t", 2.0);
+    let law = HerschelBulkley::bingham(tau, 0.01);
+    println!(
+        "E6s swirl hold: tau_y {tau}, eps {eps} (max stress {:.3}), r {r}, passes {iters}, n {n}",
+        eps * 0.5 / 3.0
+    );
+    let (series, ring) = verify_swirl_hold(n, law, r, eps, t_end, 0.01, iters, 8);
+    for (t, v) in series {
+        println!("{t:>8.3} {v:>12.3e}");
+    }
+    for (r, v) in ring {
+        println!("ring r={r:.3} max|u|={v:.2e}");
     }
 }

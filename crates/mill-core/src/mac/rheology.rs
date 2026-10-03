@@ -78,8 +78,9 @@ pub fn norm(t: &Sym) -> f64 {
 
 /// One ALG2 update at a node: given the multiplier `lam` and the strain-rate tensor `d_u`
 /// (`D(u)`), returns the new multiplier and the stress excess `S = lam_new - r d` whose divergence
-/// is the explicit right-hand side of the next velocity solve.
-pub fn alg2_update(law: &HerschelBulkley, r: f64, lam: &Sym, d_u: &Sym) -> (Sym, Sym) {
+/// is the explicit right-hand side of the next velocity solve. `omega` under-relaxes the
+/// multiplier step (1 = ALG2); the fixed point does not depend on it.
+pub fn alg2_update(law: &HerschelBulkley, r: f64, omega: f64, lam: &Sym, d_u: &Sym) -> (Sym, Sym) {
     let z = [
         lam[0] + r * d_u[0],
         lam[1] + r * d_u[1],
@@ -90,9 +91,9 @@ pub fn alg2_update(law: &HerschelBulkley, r: f64, lam: &Sym, d_u: &Sym) -> (Sym,
     let scale = if zn > 0.0 { rate / SQRT_2 / zn } else { 0.0 };
     let d = [z[0] * scale, z[1] * scale, z[2] * scale];
     let new = [
-        lam[0] + r * (d_u[0] - d[0]),
-        lam[1] + r * (d_u[1] - d[1]),
-        lam[2] + r * (d_u[2] - d[2]),
+        lam[0] + omega * r * (d_u[0] - d[0]),
+        lam[1] + omega * r * (d_u[1] - d[1]),
+        lam[2] + omega * r * (d_u[2] - d[2]),
     ];
     let s = [new[0] - r * d[0], new[1] - r * d[1], new[2] - r * d[2]];
     (new, s)

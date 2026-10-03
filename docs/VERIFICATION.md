@@ -684,3 +684,40 @@ within a few steps (the explicit stress and the implicit Laplacian are different
 near cut cells, an error that scales with r), r = 4 is stable and creeps at 4e-4 m/s.
 Gate (d) is NOT met. Tried: more passes, air masking, wall extrapolation of the stress, deviatoric
 strain, an exact same-operator cancellation (worse).
+
+### E6 follow-up: variational stress operator (2026-10-04)
+
+Diagnosis of the plug creep. A static test without a free surface (`grid_probe --exp E6s`: a drum
+filled with a Bingham fluid, driven only by the swirl force `eps (-y, x)`, exact solution `u = 0`)
+showed that the creep (3e-3 m/s at r = 1, falling only as 1/r) is not a free-surface effect and
+that more ALG2 passes made it worse: the strain operator `D(u)` and the stress divergence of the
+original scheme are not adjoint, so the multiplier winds up in the null space of the divergence.
+
+Fix: `mac/variational.rs`. The deviatoric strain at cell centres and corners (including
+no-slip ghost velocities through the wall point, corners that touch solid cells keep the cells
+that exist) is one sparse linear map `B`; the stress force is exactly `-B^T W g tau`, the implicit
+operator `B^T W g B` is solved by CG preconditioned with the scalar Gibou multigrid. Air needs no
+condition (points that touch air carry no stress). Used alone it is first order at walls (Stokes
+annulus velocity error 3.8 % / 1.2 % of `omega r1` at n = 64 / 128, the Gibou scheme is ~0.1 %), so
+the default is the **hybrid** (`set_rheology_hybrid`): the Newtonian (plastic) viscosity stays in
+the Gibou solve, only the yield stress goes through the variational augmented Lagrangian.
+
+Static swirl hold (n = 64, tau_y = 1, eps = 2, max speed after 1 s):
+
+| scheme | r | passes | max speed |
+|---|---|---|---|
+| original | 10 | 1 | 8e-7 (lagged, no hold of a real load) |
+| original | 10 | 20 | 1e-4..3e-4 |
+| variational | 100 | 8 | 4.7e-5 |
+| variational | 1000 | 8 | 5e-6 |
+| hybrid | 1000 | 6 | 2e-6 |
+
+Tilted surface (20 degrees, n = 64, 1 s, hybrid, r = 1000, 5 passes): tau_y/rho = 8: slope 0.3629
+(initial 0.3640), bulk speed 3.3e-5 m/s (was 5e-3) with interface-layer spikes of 1e-2 m/s for a few
+tenths of a second; tau_y/rho = 0.5 (partial yield) slumps steadily (slope 0.359 -> 0.295) and is
+stable at r = 1000 (the original scheme diverged for r >= 40). Bingham annulus (hybrid, n = 128):
+velocity error 0.7 %, speed in the plug 1.5e-6 m/s (was 2e-4).
+
+Gate (d) (<= 1e-5 m/s with a free surface) is still not met: 3.3e-5 bulk, interface spikes. Cost is
+the open issue: 5-20 passes of 200-400 CG iterations per step (the preconditioner ignores the yield
+operator), minutes per simulated second at n = 64.

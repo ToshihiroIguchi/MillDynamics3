@@ -194,3 +194,148 @@ fn bingham_annular_couette_holds_analytic_profile() {
         res.c_mean_err
     );
 }
+
+#[test]
+fn variational_operator_annulus_residual() {
+    use super::staggered::StaggeredMesh;
+    use super::variational::ViscousOperator;
+    let (r1, r2, omega) = (0.25, 0.5, 1.0);
+    let mut previous: Option<f64> = None;
+    for n in [64usize, 128] {
+        let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+            let r = (x * x + y * y).sqrt();
+            (r - r2).max(r1 - r)
+        });
+        let nn = n * n;
+        let wall = move |x: f64, y: f64| {
+            if (x * x + y * y).sqrt() < 0.5 * (r1 + r2) {
+                (-omega * y, omega * x)
+            } else {
+                (0.0, 0.0)
+            }
+        };
+        let ut = |r: f64| omega * r1 * r1 * (r2 * r2 / r - r) / (r2 * r2 - r1 * r1);
+        let exact = |x: f64, y: f64| {
+            let r = (x * x + y * y).sqrt();
+            let s = ut(r) / r;
+            (-s * y, s * x)
+        };
+        let frac: Vec<f64> = if std::env::var("FRAC_ONE").is_ok() {
+            sm.cell_fraction
+                .iter()
+                .map(|&f| f64::from(f > 0.0))
+                .collect()
+        } else {
+            sm.cell_fraction.clone()
+        };
+        let op = ViscousOperator::build(
+            &sm,
+            &sm.gu.fluid,
+            &sm.gv.fluid,
+            &sm.mesh.pressure_active,
+            &frac,
+            &wall,
+        );
+        let mut x = vec![0.0; 2 * nn];
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                let (px, py) = sm.gu.centre(i, j);
+                x[c] = exact(px, py).0;
+                let (px, py) = sm.gv.centre(i, j);
+                x[nn + c] = exact(px, py).1;
+            }
+        }
+        let strain = op.strain(&x);
+        let mut f = vec![0.0; 2 * nn];
+        op.transpose(&strain, &mut f);
+        // Residual force per node by distance to the nearest wall (in cells).
+        let dx = sm.dx();
+        let mut worst = [0.0f64; 4];
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                if sm.gu.fluid[c] {
+                    let (px, py) = sm.gu.centre(i, j);
+                    let r = (px * px + py * py).sqrt();
+                    let d = ((r - r1).min(r2 - r) / dx) as usize;
+                    // Exact solution has zero stress force: compare with the viscous scale 1/dx^2 * u.
+                    worst[d.min(3)] = worst[d.min(3)].max(f[c].abs() / (omega * r1));
+                }
+            }
+        }
+        // Active nodes that no valid point refers to carry no viscous coupling at all.
+        let mut seen = vec![false; 2 * nn];
+        let ones: Vec<[f64; 3]> = vec![[1.0; 3]; op.points()];
+        let mut probe = vec![0.0; 2 * nn];
+        op.transpose(&ones, &mut probe);
+        for (k, v) in probe.iter().enumerate() {
+            seen[k] = *v != 0.0;
+        }
+        let mut orphans = [0usize; 4];
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                for (lat, g) in [(0, &sm.gu), (1, &sm.gv)] {
+                    if g.fluid[c] && !seen[c + lat * nn] {
+                        let (px, py) = g.centre(i, j);
+                        let r = (px * px + py * py).sqrt();
+                        let d = ((r - r1).min(r2 - r) / dx) as usize;
+                        orphans[d.min(3)] += 1;
+                    }
+                }
+            }
+        }
+        // Stokes solve with the operator: A x = -B^T W g b0 (wall data), compare with the exact field.
+        {
+            use super::variational::pcg;
+            let zero = vec![[0.0; 3]; op.points()];
+            let mut rhs = vec![0.0; 2 * nn];
+            op.transpose_with_wall(&zero, -1.0, &mut rhs);
+            let mask: Vec<bool> = sm
+                .gu
+                .fluid
+                .iter()
+                .chain(sm.gv.fluid.iter())
+                .copied()
+                .collect();
+            let mut sol = x.clone();
+            for (k, m) in mask.iter().enumerate() {
+                if *m {
+                    sol[k] = 0.0;
+                }
+            }
+            let apply = |v: &[f64], out: &mut [f64]| op.apply(v, out);
+            let ident = |r: &[f64], z: &mut [f64]| z.copy_from_slice(r);
+            let (it, res) = pcg(&apply, &ident, &mask, &rhs, &mut sol, 1e-10, 20000);
+            let mut err = 0.0f64;
+            let mut at = (0usize, 0.0, 0.0);
+            for k in 0..2 * nn {
+                if mask[k] && (sol[k] - x[k]).abs() > err {
+                    err = (sol[k] - x[k]).abs();
+                    let c = k % nn;
+                    let g = if k < nn { &sm.gu } else { &sm.gv };
+                    let (px, py) = g.centre(c % n, c / n);
+                    at = (k / nn, px, py);
+                }
+            }
+            let rr = (at.1 * at.1 + at.2 * at.2).sqrt();
+            eprintln!(
+                "worst node lattice {} at ({:.3},{:.3}) r={rr:.4} (wall at 0.25/0.5)",
+                at.0, at.1, at.2
+            );
+            eprintln!(
+                "n={n} Stokes solve: {it} its, residual {res:.1e}, max velocity error {err:.3e}"
+            );
+            assert!(res < 1e-8, "CG did not converge");
+            let limit = if n == 64 { 0.06 } else { 0.02 };
+            assert!(err < limit * omega * r1 * 4.0, "n={n}: error {err}");
+            if let Some(p) = previous {
+                assert!(err < 0.6 * p, "error must fall with the grid: {p} -> {err}");
+            }
+            previous = Some(err);
+        }
+        eprintln!("orphan active nodes by distance 0,1,2,>=3: {orphans:?}");
+        eprintln!("n={n} residual force/(omega r1) by distance 0,1,2,>=3 cells: {worst:?}");
+    }
+}

@@ -2361,7 +2361,7 @@ pub fn verify_couette_hb(
         }
     };
     let mut flow = StaggeredFlow::new(&sm, 1.0, wall);
-    flow.set_rheology(law, r_aug);
+    set_rheology_env(&mut flow, law, r_aug);
     flow.stokes = true;
     flow.alg_iterations = alg_iters;
     if from_rest {
@@ -2474,7 +2474,7 @@ pub fn verify_slump(
     let g = 9.81;
     let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - radius);
     let mut flow = StaggeredFlow::new(&sm, 1.0, |_, _| (0.0, 0.0));
-    flow.set_rheology(law, r_aug);
+    set_rheology_env(&mut flow, law, r_aug);
     flow.alg_iterations = alg_iters;
     flow.upwind = true;
     flow.weno = true;
@@ -2513,4 +2513,85 @@ pub fn verify_slump(
         }
     }
     out
+}
+
+/// Static yield test without a free surface: a drum (radius 0.5) filled with a Herschel-Bulkley
+/// fluid at rest, driven only by the swirl body force `eps (-y, x)`. The stress `eps r / 3` holds
+/// it if that is below the yield stress (exact solution `u = 0`). Returns the largest speed at
+/// `samples` evenly spaced times.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn verify_swirl_hold(
+    n: usize,
+    law: HerschelBulkley,
+    r_aug: f64,
+    eps: f64,
+    t_end: f64,
+    dt: f64,
+    alg_iters: usize,
+    samples: usize,
+) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| (x * x + y * y).sqrt() - 0.5);
+    let mut flow = StaggeredFlow::new(&sm, 1.0, |_, _| (0.0, 0.0));
+    flow.set_rheology(law, r_aug);
+    flow.alg_iterations = alg_iters;
+    flow.swirl = eps;
+    flow.variational = std::env::var("VARIATIONAL").is_ok();
+    flow.alg_relax = std::env::var("ALG_RELAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    flow.stokes = true;
+    let steps = (t_end / dt).ceil() as usize;
+    let per = (steps / samples).max(1);
+    let mut out = Vec::new();
+    for s in 1..=steps {
+        flow.step(dt);
+        if s % per == 0 {
+            let mut vmax = 0.0f64;
+            for c in 0..n * n {
+                if sm.gu.fluid[c] {
+                    vmax = vmax.max(flow.u[c].abs());
+                }
+                if sm.gv.fluid[c] {
+                    vmax = vmax.max(flow.v[c].abs());
+                }
+            }
+            out.push((s as f64 * dt, vmax));
+        }
+    }
+    // Largest u speed per ring of width dx at the end.
+    let dx = sm.dx();
+    let mut ring = vec![0.0f64; (0.55 / dx) as usize + 2];
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            if sm.gu.fluid[c] {
+                let (x, y) = sm.gu.centre(i, j);
+                let k = ((x * x + y * y).sqrt() / dx) as usize;
+                ring[k] = ring[k].max(flow.u[c].abs());
+            }
+        }
+    }
+    let ring = ring
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| ((k as f64 + 0.5) * dx, v))
+        .collect();
+    (out, ring)
+}
+
+/// Experiment switch: `HYBRID` selects the variational yield stress with the Gibou Newtonian part
+/// (Bingham laws only), `VARIATIONAL` the fully variational operator, else the original scheme.
+fn set_rheology_env(flow: &mut StaggeredFlow, law: HerschelBulkley, r: f64) {
+    if std::env::var("HYBRID").is_ok() {
+        let plastic = HerschelBulkley {
+            tau_y: law.tau_y,
+            k: 0.0,
+            n: 1.0,
+        };
+        flow.set_rheology_hybrid(plastic, r, law.k);
+    } else {
+        flow.set_rheology(law, r);
+        flow.variational = std::env::var("VARIATIONAL").is_ok();
+    }
 }

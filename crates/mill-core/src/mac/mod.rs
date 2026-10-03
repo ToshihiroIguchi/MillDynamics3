@@ -13,6 +13,7 @@ pub mod multigrid;
 pub mod reference;
 pub mod rheology;
 pub mod staggered;
+pub mod variational;
 pub mod verify;
 pub mod viscous;
 
