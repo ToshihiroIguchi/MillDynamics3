@@ -22,22 +22,31 @@ pub struct Level {
     pub n: usize,
     pub wx: Vec<f64>,
     pub wy: Vec<f64>,
-    /// `sum w` per cell; cells at or below `MIN_DIAG` are decoupled and ignored.
+    /// Extra diagonal per cell (mass term, Dirichlet links); zero everywhere = singular Neumann.
+    pub extra: Vec<f64>,
+    /// `sum w + extra` per cell; cells at or below `MIN_DIAG` are decoupled and ignored.
     pub diag: Vec<f64>,
 }
 
 impl Level {
-    fn from_weights(n: usize, wx: Vec<f64>, wy: Vec<f64>) -> Self {
+    fn from_weights(n: usize, wx: Vec<f64>, wy: Vec<f64>, extra: Vec<f64>) -> Self {
         let mut diag = vec![0.0; n * n];
         for j in 0..n {
             for i in 0..n {
                 diag[i + n * j] = wx[i + (n + 1) * j]
                     + wx[i + 1 + (n + 1) * j]
                     + wy[i + n * j]
-                    + wy[i + n * (j + 1)];
+                    + wy[i + n * (j + 1)]
+                    + extra[i + n * j];
             }
         }
-        Self { n, wx, wy, diag }
+        Self {
+            n,
+            wx,
+            wy,
+            extra,
+            diag,
+        }
     }
 
     fn active(&self, c: usize) -> bool {
@@ -103,7 +112,16 @@ impl Level {
                 wy[ic + nc * jc] = self.wy[2 * ic + n * j] + self.wy[2 * ic + 1 + n * j];
             }
         }
-        Level::from_weights(nc, wx, wy)
+        let mut extra = vec![0.0; nc * nc];
+        for jc in 0..nc {
+            for ic in 0..nc {
+                extra[ic + nc * jc] = self.extra[2 * ic + n * 2 * jc]
+                    + self.extra[2 * ic + 1 + n * 2 * jc]
+                    + self.extra[2 * ic + n * (2 * jc + 1)]
+                    + self.extra[2 * ic + 1 + n * (2 * jc + 1)];
+            }
+        }
+        Level::from_weights(nc, wx, wy, extra)
     }
 }
 
@@ -116,20 +134,30 @@ pub struct SolveStats {
 
 pub struct PoissonSolver {
     levels: Vec<Level>,
+    /// No extra diagonal anywhere: pure Neumann, the mean is projected out.
+    singular: bool,
 }
 
 impl PoissonSolver {
     pub fn new(domain: &CircleDomain) -> Self {
-        let mut levels = vec![Level::from_weights(
+        Self::from_weights(
             domain.n,
             domain.wx.clone(),
             domain.wy.clone(),
-        )];
+            vec![0.0; domain.n * domain.n],
+        )
+    }
+
+    /// General operator `(A x)_c = extra_c x_c + sum_f w_f (x_c - x_nb)` on an `n x n` grid
+    /// (`wx`: `(n+1) x n` vertical faces, `wy`: `n x (n+1)` horizontal faces).
+    pub fn from_weights(n: usize, wx: Vec<f64>, wy: Vec<f64>, extra: Vec<f64>) -> Self {
+        let singular = extra.iter().all(|&e| e == 0.0);
+        let mut levels = vec![Level::from_weights(n, wx, wy, extra)];
         while levels.last().unwrap().n % 2 == 0 && levels.last().unwrap().n > 4 {
             let c = levels.last().unwrap().coarsen();
             levels.push(c);
         }
-        Self { levels }
+        Self { levels, singular }
     }
 
     pub fn fine(&self) -> &Level {
@@ -141,6 +169,9 @@ impl PoissonSolver {
     }
 
     fn project_mean(&self, level: usize, v: &mut [f64]) {
+        if !self.singular {
+            return;
+        }
         let lv = &self.levels[level];
         let (mut s, mut cnt) = (0.0, 0usize);
         for (c, x) in v.iter().enumerate() {

@@ -5,11 +5,15 @@
 //! multigrid-preconditioned CG solver for the weighted (variational) Poisson problem.
 
 pub mod embedded;
+pub mod flow;
 pub mod multigrid;
 pub mod verify;
+pub mod viscous;
 
 pub use embedded::CircleDomain;
+pub use flow::{Flow, Mesh};
 pub use multigrid::{Level, PoissonSolver, SolveStats};
+pub use viscous::{rigid_wall_torque_correction, FluidGrid, Helmholtz, Link, WallLoad};
 
 #[cfg(test)]
 mod tests;

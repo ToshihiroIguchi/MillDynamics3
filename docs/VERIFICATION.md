@@ -290,3 +290,49 @@ Gate change versus the plan: the multigrid is a piecewise-constant aggregation (
 coarse operators, over-correction 1.8) used as a CG preconditioner, so "residual reduction per
 V-cycle" is replaced by "PCG iteration count nearly grid independent" (12 -> 18 over 16x cells,
 slow log growth). Gate met; order alternates 1.8..2.5 with the cut-cell geometry.
+
+### E1 — Newtonian viscous flow (2026-10-03)
+
+**E1a, viscous operator alone: gate met.** Cell-centred componentwise Dirichlet Helmholtz
+(Gibou symmetric `1/theta` form) on the level-set region, multigrid-preconditioned CG.
+- Steady Stokes Taylor-Couette (R1 = 0.25, R2 = 0.5): max velocity error 4e-3 -> 2e-5 (n 32 -> 512,
+  second order); wall torque error 0.03 % at n = 32 and <= 0.03 % up to n = 512, both walls.
+- The wall load is the discrete link reaction `mu (u_b - u_c) / theta`. It is the traction of the
+  component-wise operator `mu grad(u).n`; the physical traction `mu (grad u + grad u^T).n` differs by
+  `-mu Omega t` on a rigid wall rotating at `Omega`, i.e. a torque `+-2 mu Omega A` (A = enclosed area,
+  `+` body in fluid, `-` drum enclosing fluid). Without it the inner torque is off by exactly
+  `-2 pi mu omega R1^2` (-37.5 % here). Check: fluid in rigid rotation exerts no torque.
+- Impulsive spin-up of a disc (BDF2, start-up by 32 backward-Euler substeps, previous level = rest):
+  `L(t)` error <= 0.2 % for `nu t/R^2 >= 0.05` and torque error <= 0.3 % for 0.05..0.1 at
+  `dt = 0.0025 R^2/nu`; second order in dt; identical for n = 64, 128, 256 (no spatial error).
+  (Torque at `nu t/R^2 >= 0.3` is a 1 % difference of large cancelling terms; not used as a gate.)
+
+**E1b, full Navier-Stokes hold test (exact Taylor-Couette state, integrate to t = 10): gate NOT met.**
+Cell-centred velocity, aperture-weighted exact face projection (E0 operator), IMEX BDF2/AB2,
+incremental pressure correction, two-layer ghost extension of the velocity, central advection.
+
+| n | Re | u err (of omega R1) | inner T | outer T |
+|---|---|---|---|---|
+| 64 / 128 / 256 | 10 | 9.1e-3 / 5.0e-3 / 2.8e-3 | -1.5 / +0.5 / -0.2 % | -3.9 / -2.7 / -1.8 % |
+| 64 / 128 / 256 | 1000 | 1.0e-2 / 7.6e-3 / 4.2e-3 | -0.7 / +6.2 / +2.2 % | -8.8 / -3.1 / -1.7 % |
+
+Velocity converges at first order (0.85), the outer torque at order ~0.5, the inner torque is noisy.
+Gate was torque <= 1 % with order >= 1.5. Face divergence is round-off (exact projection holds).
+
+Targeted fixes tried, in order (each judged on the same hold test):
+1. Cells whose centre is solid but that are mostly fluid (cut slivers) had no velocity and were
+   replaced by a neighbour value: max face divergence of the exact field 0.11. Filling them by
+   extrapolation: 3e-3. (Large gain.)
+2. Aperture-normalised / then central advection with ghost values: near-wall advection error of
+   the exact field 3.1e-2 -> 1.2e-2; interior second order. (Large gain.)
+3. Initial pressure from the projected acceleration (small gain, needed for a clean start).
+4. Quadratic instead of linear ghost extrapolation: ghost error max 1.1e-2 -> 5.1e-3, no gain in torque.
+5. Rotational incremental pressure form (`p += phi - nu div u*`): WORSE (u err 1.8e-1 at n = 256,
+   Re 0.1): the cut-cell divergence is too noisy. Reverted.
+
+Diagnosis: the viscous operator is superconvergent (E1a), the projection is exact in the face
+sense, but the collocated cell-velocity / face-flux pairing is inconsistent at cut walls. The
+centripetal balance `u.grad u = grad p` is violated by O(1) truncation error in cells whose centre is
+within ~dx of the wall (adv error max 1.1e-2 not decreasing with n; rms decreasing only ~dx^0.3),
+which feeds a first-order velocity error into the wall layer and hence the wall torque. Stopped here
+per the stop rule; options are reported to the user.
