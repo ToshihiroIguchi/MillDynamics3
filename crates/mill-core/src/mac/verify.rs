@@ -293,3 +293,128 @@ pub fn verify_couette_ns(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs {
         divergence: flow.max_face_divergence(),
     }
 }
+
+use super::staggered::{StaggeredFlow, StaggeredMesh};
+
+/// Same hold test as [`verify_couette_ns`] on the staggered face-velocity scheme.
+pub fn verify_couette_mac(n: usize, nu: f64, t_end: f64, cfl: f64) -> CouetteNs {
+    let (r1, r2, omega) = (0.25, 0.5, 1.0);
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        let r = (x * x + y * y).sqrt();
+        (r - r2).max(r1 - r)
+    });
+    let ut = |r: f64| omega * r1 * r1 * (r2 * r2 / r - r) / (r2 * r2 - r1 * r1);
+    let exact = |x: f64, y: f64| {
+        let r = (x * x + y * y).sqrt();
+        let s = ut(r) / r;
+        (-s * y, s * x)
+    };
+    let wall = move |x: f64, y: f64| {
+        if (x * x + y * y).sqrt() < 0.5 * (r1 + r2) {
+            (-omega * y, omega * x)
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    let mut flow = StaggeredFlow::new(&sm, nu, wall);
+    flow.set_velocity(exact);
+    let dx = sm.dx();
+    let dt = cfl * dx / (omega * r1);
+    let steps = (t_end / dt).ceil() as usize;
+    let dt = t_end / steps as f64;
+    let mut divergence = 0.0f64;
+    for _ in 0..steps {
+        flow.step(dt);
+        divergence = divergence.max(flow.projected_divergence);
+    }
+    let mut emax = 0.0f64;
+    for j in 0..n {
+        for i in 0..n {
+            let c = i + n * j;
+            if sm.gu.fluid[c] {
+                let (x, y) = sm.gu.centre(i, j);
+                emax = emax.max((flow.u[c] - exact(x, y).0).abs());
+            }
+            if sm.gv.fluid[c] {
+                let (x, y) = sm.gv.centre(i, j);
+                emax = emax.max((flow.v[c] - exact(x, y).1).abs());
+            }
+        }
+    }
+    let tag = |x: f64, y: f64| usize::from((x * x + y * y).sqrt() > 0.5 * (r1 + r2));
+    let loads = flow.wall_load(tag, 2);
+    let t_exact = 4.0 * PI * nu * omega * r1 * r1 * r2 * r2 / (r2 * r2 - r1 * r1);
+    CouetteNs {
+        steps,
+        u_err: emax / (omega * r1),
+        inner_torque_err: (loads[0].torque
+            + rigid_wall_torque_correction(nu, omega, PI * r1 * r1, false)
+            - t_exact)
+            / t_exact,
+        outer_torque_err: (-loads[1].torque - t_exact) / t_exact,
+        divergence,
+    }
+}
+
+/// Diagnostic: error history of the staggered hold test (`(step, max u err, max u err at
+/// ghost faces)` at the listed step counts, step 0 = right after `set_velocity`).
+pub fn diagnose_couette_mac(n: usize, nu: f64, cfl: f64, at: &[usize]) -> Vec<(usize, f64, f64)> {
+    let (r1, r2, omega) = (0.25, 0.5, 1.0);
+    let sm = StaggeredMesh::new(n, 0.55, |x, y| {
+        let r = (x * x + y * y).sqrt();
+        (r - r2).max(r1 - r)
+    });
+    let ut = |r: f64| omega * r1 * r1 * (r2 * r2 / r - r) / (r2 * r2 - r1 * r1);
+    let exact = |x: f64, y: f64| {
+        let r = (x * x + y * y).sqrt();
+        let s = ut(r) / r;
+        (-s * y, s * x)
+    };
+    let wall = move |x: f64, y: f64| {
+        if (x * x + y * y).sqrt() < 0.5 * (r1 + r2) {
+            (-omega * y, omega * x)
+        } else {
+            (0.0, 0.0)
+        }
+    };
+    let mut flow = StaggeredFlow::new(&sm, nu, wall);
+    flow.set_velocity(exact);
+    let dt = cfl * sm.dx() / (omega * r1);
+    let measure = |flow: &StaggeredFlow| {
+        let (mut fl, mut gh) = (0.0f64, 0.0f64);
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                if sm.au[c] > 0.0 {
+                    let (x, y) = sm.gu.centre(i, j);
+                    let e = (flow.u[c] - exact(x, y).0).abs();
+                    if sm.gu.fluid[c] {
+                        fl = fl.max(e);
+                    } else {
+                        gh = gh.max(e);
+                    }
+                }
+                if sm.av[c] > 0.0 {
+                    let (x, y) = sm.gv.centre(i, j);
+                    let e = (flow.v[c] - exact(x, y).1).abs();
+                    if sm.gv.fluid[c] {
+                        fl = fl.max(e);
+                    } else {
+                        gh = gh.max(e);
+                    }
+                }
+            }
+        }
+        (fl / (omega * r1), gh / (omega * r1))
+    };
+    let mut out = Vec::new();
+    let last = *at.last().unwrap();
+    for s in 0..=last {
+        if at.contains(&s) {
+            let (a, b) = measure(&flow);
+            out.push((s, a, b));
+        }
+        flow.step(dt);
+    }
+    out
+}

@@ -9,7 +9,7 @@ use super::viscous::FluidGrid;
 
 /// Aperture (fraction of the face segment inside the fluid) along the segment `p0 -> p1`, by
 /// sampling `phi < 0` with bisection refinement of the crossings.
-fn aperture(phi: &impl Fn(f64, f64) -> f64, p0: (f64, f64), p1: (f64, f64)) -> f64 {
+pub(super) fn aperture(phi: &impl Fn(f64, f64) -> f64, p0: (f64, f64), p1: (f64, f64)) -> f64 {
     const M: usize = 16;
     let at = |t: f64| (p0.0 + t * (p1.0 - p0.0), p0.1 + t * (p1.1 - p0.1));
     let inside = |t: f64| {

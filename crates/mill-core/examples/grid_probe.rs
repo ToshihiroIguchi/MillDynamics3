@@ -2,7 +2,8 @@
 //! grid_probe -- --exp E0`.
 
 use mill_core::mac::verify::{
-    verify_couette_ns, verify_couette_stokes, verify_manufactured, verify_spinup,
+    diagnose_couette_mac, verify_couette_mac, verify_couette_ns, verify_couette_stokes,
+    verify_manufactured, verify_spinup,
 };
 use std::time::Instant;
 
@@ -16,6 +17,9 @@ fn main() {
         "E1a" => e1a(),
         "E1s" => e1s(),
         "E1b" => e1b(),
+        "R0" => r0(),
+        "R2" => r2(),
+        "R2d" => r2d(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -99,6 +103,75 @@ fn e1b() {
                 100.0 * r.outer_torque_err,
                 r.divergence
             );
+        }
+    }
+}
+
+fn r0() {
+    println!("R0.1 hold test, time-step dependence (t_end = 10)");
+    println!(
+        "{:>5} {:>7} {:>6} {:>7} {:>10} {:>12} {:>12}",
+        "n", "Re", "cfl", "steps", "u err", "inner T", "outer T"
+    );
+    for re in [10.0f64, 1000.0] {
+        let nu = 0.25 * 0.25 / re;
+        for n in [64usize, 128] {
+            for cfl in [0.25f64, 0.0625] {
+                let r = verify_couette_ns(n, nu, 10.0, cfl);
+                println!(
+                    "{n:>5} {re:>7} {cfl:>6} {:>7} {:>10.2e} {:>11.3}% {:>11.3}%",
+                    r.steps,
+                    r.u_err,
+                    100.0 * r.inner_torque_err,
+                    100.0 * r.outer_torque_err
+                );
+            }
+        }
+    }
+}
+
+fn r2() {
+    println!("R2 staggered hold test from the exact state (t_end = 10, cfl 0.25)");
+    println!(
+        "{:>5} {:>7} {:>6} {:>10} {:>12} {:>12} {:>10} {:>9}",
+        "n", "Re", "steps", "u err", "inner T", "outer T", "div", "ms/step"
+    );
+    let ns: Vec<usize> = std::env::args()
+        .skip_while(|a| a != "--n")
+        .skip(1)
+        .map(|a| a.parse().unwrap())
+        .collect();
+    let ns = if ns.is_empty() {
+        vec![64, 128, 256]
+    } else {
+        ns
+    };
+    for re in [10.0f64, 1000.0] {
+        let nu = 0.25 * 0.25 / re;
+        for &n in &ns {
+            let t = Instant::now();
+            let r = verify_couette_mac(n, nu, 10.0, 0.25);
+            println!(
+                "{n:>5} {re:>7} {:>6} {:>10.2e} {:>11.3}% {:>11.3}% {:>10.1e} {:>9.2}",
+                r.steps,
+                r.u_err,
+                100.0 * r.inner_torque_err,
+                100.0 * r.outer_torque_err,
+                r.divergence,
+                t.elapsed().as_secs_f64() * 1e3 / r.steps as f64
+            );
+        }
+    }
+}
+
+fn r2d() {
+    println!("R2d error history (fluid-node / ghost-face max error, units of omega r1)");
+    for re in [10.0f64] {
+        let nu = 0.25 * 0.25 / re;
+        for n in [64usize, 128] {
+            for (s, a, b) in diagnose_couette_mac(n, nu, 0.25, &[0, 1, 2, 5, 20, 100, 400]) {
+                println!("n={n:<4} Re={re:<5} step {s:<4} fluid {a:.3e} ghost {b:.3e}");
+            }
         }
     }
 }

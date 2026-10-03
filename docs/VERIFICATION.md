@@ -336,3 +336,39 @@ centripetal balance `u.grad u = grad p` is violated by O(1) truncation error in 
 within ~dx of the wall (adv error max 1.1e-2 not decreasing with n; rms decreasing only ~dx^0.3),
 which feeds a first-order velocity error into the wall layer and hence the wall torque. Stopped here
 per the stop rule; options are reported to the user.
+
+### E1b remediation — R0 diagnostics and R2 staggered scheme (2026-10-03)
+
+**R0.1 (time-step dependence).** The cell-centred scheme (`mac/flow.rs`) was rerun at CFL 0.25 and
+0.0625 (n = 64/128, Re 10/1000): velocity error and wall torques are unchanged to within noise
+(e.g. n = 128, Re 1000: u err 7.60e-3 and torque +6.236 % / -3.135 % at both CFL). The error is
+therefore spatial, not fractional-step splitting, so R1 was dropped and R2 was built.
+
+**R2 (`mac/staggered.rs`, `grid_probe --exp R2`).** Face-normal velocities are the unknowns, Gibou
+Dirichlet Helmholtz on each face lattice, E0 weighted projection, quadratic ghost extension,
+central advection (AB2) and BDF2 viscosity. Two fixes were needed:
+1. ghost faces must carry the analytic/extrapolated value on the lattice before the first
+   projection (step-0 error);
+2. the face flux must be sampled at the centroid of the open part of a cut face:
+   `flux = aperture * (u_node + off * du/dt)`, with the correction held fixed during the projection
+   so it stays exact. Without it the steady error was O(1) in divergence at cut cells and did not
+   converge (u err 8e-3 at n = 64 and 128); with it 8e-4 / 3.5e-4.
+
+Hold test from the exact Taylor-Couette state, t_end = 10, CFL 0.25:
+
+| n | Re | u err | inner T | outer T | div | ms/step |
+|---|----|-------|---------|---------|-----|---------|
+| 64 | 10 | 7.98e-4 | -0.080 % | -0.102 % | 1e-16 | 3.1 |
+| 128 | 10 | 3.47e-4 | 0.055 % | -0.103 % | 8e-17 | 28 |
+| 256 | 10 | 8.72e-5 | 0.015 % | -0.330 % | 8e-17 | 153 |
+| 64 | 1000 | 4.68e-3 | 1.263 % | 0.013 % | 8e-17 | 4.4 |
+| 128 | 1000 | 2.71e-4 | 0.021 % | -0.075 % | 8e-17 | 18 |
+| 256 | 1000 | 7.79e-5 | 0.042 % | -0.345 % | 8e-17 | 88 |
+
+Gate: torque <= 1 % at mid resolution **met** (<= 0.11 % at n = 128), velocity order 1.2 (64->128)
+and 2.0 (128->256) at Re 10, 4.1 and 1.8 at Re 1000 (**met** on the finer pair), face divergence
+round-off **met**. Caveats: (a) the outer torque at n = 256 (-0.33 %) is slightly worse than at
+n = 128, still far inside 1 %; (b) the NS spin-up rerun on the staggered stepper is not done yet
+(the Stokes operator case is unchanged); (c) cost is dominated by rebuilding the multigrid
+hierarchies every step (88-153 ms/step at n = 256) and must be cached before E3; (d) advection is
+plain central, adequate for this smooth test but a robust scheme is still needed for water.

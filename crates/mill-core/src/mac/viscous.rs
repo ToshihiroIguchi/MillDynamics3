@@ -29,6 +29,9 @@ pub enum Link {
 pub struct FluidGrid {
     pub n: usize,
     pub half: f64,
+    /// Lattice offset in units of `dx`: node `(i, j)` sits at `(-half + (i + ox) dx, -half + (j + oy) dx)`.
+    pub ox: f64,
+    pub oy: f64,
     pub fluid: Vec<bool>,
     pub links: Vec<[Link; 4]>,
 }
@@ -45,9 +48,21 @@ pub struct WallLoad {
 impl FluidGrid {
     /// Fluid is where `phi < 0`. The region must stay away from the grid border.
     pub fn new(n: usize, half: f64, phi: impl Fn(f64, f64) -> f64) -> Self {
+        Self::with_offset(n, half, 0.5, 0.5, phi)
+    }
+
+    /// Same on a shifted lattice (`ox = oy = 0.5` are the cell centres; `(0, 0.5)` and `(0.5, 0)`
+    /// are the staggered `u` and `v` face lattices).
+    pub fn with_offset(
+        n: usize,
+        half: f64,
+        ox: f64,
+        oy: f64,
+        phi: impl Fn(f64, f64) -> f64,
+    ) -> Self {
         let dx = 2.0 * half / n as f64;
         let centre =
-            |i: usize, j: usize| (-half + (i as f64 + 0.5) * dx, -half + (j as f64 + 0.5) * dx);
+            |i: usize, j: usize| (-half + (i as f64 + ox) * dx, -half + (j as f64 + oy) * dx);
         let mut fluid = vec![false; n * n];
         for j in 0..n {
             for i in 0..n {
@@ -98,6 +113,8 @@ impl FluidGrid {
         Self {
             n,
             half,
+            ox,
+            oy,
             fluid,
             links,
         }
@@ -110,8 +127,8 @@ impl FluidGrid {
     pub fn centre(&self, i: usize, j: usize) -> (f64, f64) {
         let dx = self.dx();
         (
-            -self.half + (i as f64 + 0.5) * dx,
-            -self.half + (j as f64 + 0.5) * dx,
+            -self.half + (i as f64 + self.ox) * dx,
+            -self.half + (j as f64 + self.oy) * dx,
         )
     }
 

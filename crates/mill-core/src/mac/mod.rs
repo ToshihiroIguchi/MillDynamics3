@@ -7,6 +7,7 @@
 pub mod embedded;
 pub mod flow;
 pub mod multigrid;
+pub mod staggered;
 pub mod verify;
 pub mod viscous;
 
