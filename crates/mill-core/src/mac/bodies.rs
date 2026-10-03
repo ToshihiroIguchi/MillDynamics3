@@ -131,6 +131,8 @@ pub struct BodyFlow {
     prev_mesh: Option<StaggeredMesh>,
     /// Advection scheme of the trial steps.
     pub weno: bool,
+    /// Blend the force along the line of centres with the sub-grid squeeze film near the wall.
+    pub lubrication: bool,
 }
 
 impl BodyFlow {
@@ -143,6 +145,7 @@ impl BodyFlow {
             state: None,
             prev_mesh: None,
             weno: true,
+            lubrication: true,
         }
     }
 
@@ -181,6 +184,19 @@ impl BodyFlow {
         }
         flow.step(dt);
         let (fx, fy, torque) = disc_load(&flow, disc);
+        let (fx, fy) = if self.lubrication {
+            super::lubrication::wall_adjusted_load(
+                (fx, fy),
+                (disc.cx, disc.cy),
+                (disc.ux, disc.uy),
+                disc.r,
+                radius,
+                dx,
+                self.nu,
+            )
+        } else {
+            (fx, fy)
+        };
         let load = BodyLoad {
             fx,
             fy,

@@ -2,11 +2,12 @@
 //! grid_probe -- --exp E0`.
 
 use mill_core::mac::verify::{
-    diagnose_couette_mac, stokes_annulus_drag, track_sheet_growth, verify_buoyancy,
-    verify_couette_mac_scheme, verify_couette_ns, verify_couette_stokes, verify_dam_break,
-    verify_drum_slurry, verify_levelset_rotation, verify_manufactured, verify_moving_disc,
-    verify_rigid_ring, verify_rimming, verify_sloshing_circle, verify_sloshing_rect, verify_spinup,
-    verify_spinup_mac, verify_still_pool, verify_translation, verify_wall_impact,
+    diagnose_couette_mac, eccentric_squeeze_force, stokes_annulus_drag, track_sheet_growth,
+    verify_buoyancy, verify_couette_mac_scheme, verify_couette_ns, verify_couette_stokes,
+    verify_dam_break, verify_drum_slurry, verify_levelset_rotation, verify_manufactured,
+    verify_moving_disc, verify_rigid_ring, verify_rimming, verify_sloshing_circle,
+    verify_sloshing_rect, verify_spinup, verify_spinup_mac, verify_still_pool, verify_translation,
+    verify_wall_impact,
 };
 use std::time::Instant;
 
@@ -47,6 +48,11 @@ fn main() {
         "E4p" => e4p(),
         "E4y" => e4y(),
         "E4r" => e4rot(),
+        "E5a" => e5a(),
+        "E5b" => e5b(),
+        "E5t" => e5t(),
+        "E5c" => e5c(),
+        "E5d" => e5d(),
         other => eprintln!("unknown experiment {other}"),
     }
 }
@@ -872,6 +878,219 @@ fn e4e() {
             println!(
                 "n={n:<4} rho={ratio:<4} spin err {:+.3}%  max translation {v:.1e}  iters {it:.1}",
                 100.0 * err
+            );
+        }
+    }
+}
+
+/// Leading 2D squeeze-film force on a disc of radius `a` approaching the concave drum wall `b` at
+/// speed `u` across a gap `h` (Reynolds equation, parabolic gap): `3 sqrt(2) pi nu u R^1.5 / h^1.5`.
+fn squeeze_lub(a: f64, b: f64, u: f64, nu: f64, h: f64) -> f64 {
+    let r_eff = a * b / (b - a);
+    3.0 * 2f64.sqrt() * std::f64::consts::PI * nu * u * r_eff.powf(1.5) / h.powf(1.5)
+}
+
+fn e5a() {
+    let (a, nu, u) = (0.05, 1.0, 0.01);
+    let far = stokes_annulus_drag(a, 0.5, u, nu);
+    println!("E5a squeeze: disc a = {a} toward the drum wall (R = 0.5), nu = 1, U = {u}");
+    println!("concentric drag (far) = {far:.4e}");
+    for e in [1e-4, 0.01, 0.1, 0.3, 0.44, 0.449, 0.4499] {
+        println!(
+            "exact e = {e:<7} -> {:.5e}  (lub {:.5e}, h = {:.2e})",
+            eccentric_squeeze_force(a, 0.5, e, u, nu),
+            squeeze_lub(a, 0.5, u, nu, 0.45 - e),
+            0.45 - e
+        );
+    }
+    println!(
+        "{:>5} {:>6} {:>9} {:>11} {:>11} {:>9} {:>9}",
+        "n", "h/dx", "h/a", "drag", "exact", "ratio", "blended"
+    );
+    for n in [64usize, 128, 256] {
+        let dx = 1.1 / n as f64;
+        for f in [16.0, 8.0, 4.0, 2.0, 1.0, 0.5, 0.25] {
+            let h = f * dx;
+            let x0 = 0.5 - a - h;
+            let r = verify_moving_disc(n, a, x0, u, 0.0, nu, 2.0, 0.005, false);
+            let model = eccentric_squeeze_force(a, 0.5, x0, u, nu);
+            let blended = mill_core::mac::lubrication::blended_normal_force(
+                r.drag_mean,
+                mill_core::mac::lubrication::reduced_radius_wall(a, 0.5),
+                h,
+                dx,
+                nu,
+                u,
+            );
+            println!(
+                "{n:>5} {f:>6} {:>9.4} {:>11.4e} {:>11.4e} {:>9.3} {:>9.3}",
+                h / a,
+                r.drag_mean,
+                model,
+                r.drag_mean / model,
+                blended / model
+            );
+        }
+    }
+}
+
+fn e5b() {
+    let (a, nu, u) = (0.05, 1.0, 0.01);
+    println!("E5b squeeze vs eccentricity, a = {a}");
+    println!(
+        "{:>5} {:>6} {:>6} {:>11} {:>11} {:>9}",
+        "n", "e", "h/dx", "drag", "exact", "ratio"
+    );
+    for n in [128usize, 256] {
+        for e in [0.0, 0.1, 0.2, 0.3, 0.35, 0.4] {
+            let r = verify_moving_disc(n, a, e, u, 0.0, nu, 0.8, 0.01, false);
+            let ex = eccentric_squeeze_force(a, 0.5, e.max(1e-6), u, nu);
+            println!(
+                "{n:>5} {e:>6} {:>6.1} {:>11.4e} {:>11.4e} {:>9.4}",
+                (0.45 - e) / (1.1 / n as f64),
+                r.drag_mean,
+                ex,
+                r.drag_mean / ex
+            );
+        }
+    }
+}
+
+fn e5t() {
+    let (a, nu, u) = (0.05, 1.0, 0.01);
+    println!("E5t steadiness: squeeze, a = {a}, e = 0.4, n = 128");
+    for t_end in [0.4, 0.8, 1.6, 3.2] {
+        for dt in [0.01, 0.005] {
+            let r = verify_moving_disc(128, a, 0.4, u, 0.0, nu, t_end, dt, false);
+            let ex = eccentric_squeeze_force(a, 0.5, 0.4, u, nu);
+            println!(
+                "t_end {t_end:>4} dt {dt:<6} ratio {:.4} noise {:.2e}",
+                r.drag_mean / ex,
+                r.drag_noise
+            );
+        }
+    }
+}
+
+fn e5c() {
+    let (nu, u, b) = (1.0, 1.0, 0.5);
+    println!("E5c exact squeeze force over the leading lubrication term");
+    println!(
+        "{:>6} {:>9} {:>11} {:>11} {:>9} {:>9}",
+        "a", "h/Reff", "exact", "lead", "ex/lead", "(ex-far)/lead"
+    );
+    for a in [0.03, 0.05, 0.1] {
+        let r_eff = a * b / (b - a);
+        let far = stokes_annulus_drag(a, b, u, nu);
+        for eps in [0.003, 0.01, 0.03, 0.1, 0.2, 0.4, 0.8] {
+            let h = eps * r_eff;
+            let ex = eccentric_squeeze_force(a, b, b - a - h, u, nu);
+            let lead = squeeze_lub(a, b, u, nu, h);
+            println!(
+                "{a:>6} {eps:>9} {ex:>11.4e} {lead:>11.4e} {:>9.4} {:>9.4}",
+                ex / lead,
+                (ex - far) / lead
+            );
+        }
+    }
+}
+
+/// Time for a disc pushed by a constant force to close the gap from `h0` to `h` (quasi-steady
+/// Stokes motion with the exact squeeze resistance).
+fn squeeze_travel_time(a: f64, b: f64, nu: f64, force: f64, h0: f64, h: f64) -> f64 {
+    let steps = 4000;
+    let (l0, l1) = (h.ln(), h0.ln());
+    let mut t = 0.0;
+    for k in 0..steps {
+        let lx = l0 + (l1 - l0) * (k as f64 + 0.5) / steps as f64;
+        let hh = lx.exp();
+        // dt = c(h) dh / F with dh = h dlnh
+        t += eccentric_squeeze_force(a, b, b - a - hh, 1.0, nu) / force * hh * (l1 - l0)
+            / steps as f64;
+    }
+    t
+}
+
+fn e5d() {
+    use mill_core::mac::bodies::{Body, BodyFlow};
+    use mill_core::mac::staggered::Disc;
+    use mill_core::mac::verify::confined_added_mass;
+    let (a, b, nu, force, h0) = (0.05, 0.5, 1.0, 5.0, 0.06);
+    let levels = [
+        0.03, 0.02, 0.01, 0.005, 0.003, 0.002, 0.001, 0.0005, 0.0003, 0.0002,
+    ];
+    println!("E5d disc a = {a} pushed to the drum wall by F = {force}, nu = {nu}, rho_s = 1.2, h0 = {h0}");
+    for n in [64usize, 128] {
+        let dx = 1.1 / n as f64;
+        for lub in [true, false] {
+            let mut bf = BodyFlow::new(n, 0.55, b, nu);
+            bf.lubrication = lub;
+            let mass = 1.2 * std::f64::consts::PI * a * a;
+            let c0 = eccentric_squeeze_force(a, b, b - a - h0, 1.0, nu);
+            let mut body = Body {
+                disc: Disc {
+                    cx: b - a - h0,
+                    cy: 0.0,
+                    r: a,
+                    ux: force / c0,
+                    uy: 0.0,
+                    omega: 0.0,
+                },
+                mass,
+                inertia: 0.5 * mass * a * a,
+                accel: (0.0, 0.0),
+            };
+            let ma = confined_added_mass(a, b);
+            let dt = 0.005;
+            let mut t = 0.0;
+            let mut next = 0;
+            let mut iters = 0usize;
+            let mut steps = 0usize;
+            let start = Instant::now();
+            println!("n={n} (dx={dx:.4}) lubrication={lub}");
+            println!(
+                "{:>9} {:>8} {:>9} {:>9} {:>9}",
+                "gap", "gap/dx", "t_sim", "t_ref", "ratio"
+            );
+            while next < levels.len() && t < 12.0 {
+                let h_before = b - a - body.disc.cx;
+                let k = eccentric_squeeze_force(a, b, body.disc.cx, 1.0, nu);
+                let info = bf.step_coupled(
+                    &mut body,
+                    (force, 0.0, 0.0),
+                    dt,
+                    ma,
+                    k,
+                    4.0 * std::f64::consts::PI * nu * a * a,
+                    1e-3,
+                    40,
+                );
+                t += dt;
+                steps += 1;
+                iters += info.iterations;
+                let h = b - a - body.disc.cx;
+                while next < levels.len() && h <= levels[next] {
+                    let frac = (h_before - levels[next]) / (h_before - h).max(1e-15);
+                    let ts = t - dt + dt * frac;
+                    let tr = squeeze_travel_time(a, b, nu, force, h0, levels[next]);
+                    println!(
+                        "{:>9.4} {:>8.2} {:>9.4} {:>9.4} {:>9.3}",
+                        levels[next],
+                        levels[next] / dx,
+                        ts,
+                        tr,
+                        ts / tr
+                    );
+                    next += 1;
+                }
+                if h < 1e-4 || !h.is_finite() {
+                    break;
+                }
+            }
+            println!(
+                "  steps {steps}, mean iterations {:.1}, {:.1} s",
+                iters as f64 / steps.max(1) as f64,
+                start.elapsed().as_secs_f64()
             );
         }
     }

@@ -1771,6 +1771,42 @@ pub fn stokes_annulus_drag(a: f64, b: f64, u: f64, nu: f64) -> f64 {
     4.0 * PI * nu * x[3].abs()
 }
 
+/// Steady Stokes force (per unit density, `nu` the kinematic viscosity) on a disc of radius `a`
+/// translating at `u` along the line of centres inside a fixed cylinder of radius `b`, with the
+/// centres a distance `e` apart. Exact bipolar-coordinate solution: with `x + i y = i k cot(...)`
+/// the stream function is `psi = f(xi) sin(eta) / (cosh xi - cos eta)`, where only the first
+/// harmonic survives, `f = A (sinh 2 s - 2 s) + B (cosh 2 s - 1)` in `s = xi - xi_outer`; the
+/// force is the Stokeslet strength `4 pi nu |d| / k` of the term `d xi` in `f`, which gives
+/// `F = 8 pi nu u sinh(2 D) / (C^2 - S sinh(2 D))` with `D = xi_inner - xi_outer`,
+/// `C = cosh 2 D - 1`, `S = sinh 2 D - 2 D`. Depends on the bipolar distance `D` only.
+pub fn eccentric_squeeze_force(a: f64, b: f64, e: f64, u: f64, nu: f64) -> f64 {
+    // k from e = sqrt(k^2 + b^2) - sqrt(k^2 + a^2) (decreasing in k).
+    let (mut lo, mut hi) = (0.0f64, 1e9f64);
+    for _ in 0..200 {
+        let k = 0.5 * (lo + hi);
+        let ek = (k * k + b * b).sqrt() - (k * k + a * a).sqrt();
+        if ek > e {
+            lo = k;
+        } else {
+            hi = k;
+        }
+    }
+    let k = 0.5 * (lo + hi);
+    let delta = (k / a).asinh() - (k / b).asinh();
+    let t = 2.0 * delta;
+    let s2 = t.sinh();
+    let c = 2.0 * delta.sinh().powi(2);
+    // sinh t - t, by its series for small t (cancellation).
+    let s = if t < 0.2 {
+        let t2 = t * t;
+        t * t2 / 6.0
+            * (1.0 + t2 / 20.0 * (1.0 + t2 / 42.0 * (1.0 + t2 / 72.0 * (1.0 + t2 / 110.0))))
+    } else {
+        s2 - t
+    };
+    8.0 * PI * nu * u * s2 / (c * c - s * s2).abs()
+}
+
 /// Steps over which the force of a translating-disc run is averaged.
 const WINDOW: usize = 20;
 

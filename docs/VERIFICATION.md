@@ -584,3 +584,38 @@ Not done: a published 2D sedimentation benchmark (Glowinski 2001 / Wan & Turek 2
 reconstructed from memory. The Stokes terminal speed, Couette torque and added mass are exact references instead. Open items: several
 discs and disc-disc / disc-wall closeness (E5 lubrication), the disc inside a *free surface* flow (E8; the machinery is
 independent: `FlowState` carries the level set), and the cost of the mesh rebuild per step (about 5 ms at n = 128).
+
+## E5a — disc against the drum wall: squeeze film (2026-10-03, wall normal force PASSED)
+
+Reference: exact Stokes force on a disc translating along the line of centres inside an eccentric
+cylinder (`verify::eccentric_squeeze_force`, bipolar coordinates, only the first harmonic survives,
+force = Stokeslet strength `4 pi nu |d| / k`, `F = 8 pi nu u sinh 2D / (C^2 - S sinh 2D)`). Checked
+against the concentric solution (e -> 0, 5 digits) and the Reynolds asymptote `3 sqrt2 pi nu u
+R^1.5 h^-1.5` (ratio 1.002 at h = 1e-4). The exact/leading ratio is a function of eps = h/R_eff only:
+`1 + 1.1 eps + 0.06 eps^2` to 0.3 % for eps <= 0.4 (a = 0.03 ... 0.1, R = 0.5).
+
+Resolved solver (a = 0.05, nu = 1, U = 0.01, fixed position, dt = 0.005, t = 2; dt = 0.01 and
+t < 1.6 leave a 1-5 % time-splitting / start-up error, see E5t), force over exact:
+
+| h/dx | n=128 (a/dx 5.8) | n=256 (a/dx 11.6) |
+|---|---|---|
+| 16 | 0.987 | 1.001 |
+| 8 | 0.982 | 0.997 |
+| 4 | 0.965 | 0.972 |
+| 2 | 0.895 | 0.824 |
+| 1 | 0.34 | 0.29 |
+| 0.5, 0.25 | 0.1, 0.01 | 0.08, 0.03 |
+
+The resolved film is accurate to about 3 % down to a gap of 4 cells and saturates below (force
+plateau near the value of a 2-cell gap; at n = 64, a/dx = 2.9, it even goes negative).
+Sub-grid model (`mac/lubrication.rs`): the force along the line of centres is blended,
+`(1 - s) F_grid + s c(h) u_n`, `c = 3 sqrt2 pi nu R^1.5 h^-1.5 (1 + 1.1 eps + 0.06 eps^2)`, `s` a
+smoothstep from 0 at h = 8 dx to 1 at 3 dx. Blended force over exact: 0.978 ... 0.999 for all
+h/dx = 16 ... 0.25 at n = 128 and 256.
+
+E5d dynamic test: a disc (rho_s = 1.2) pushed to the wall by a constant force F = 5 (nu = 1),
+coupled solver, 3 iterations per step. Without the sub-grid film the disc reaches the wall in
+0.4 - 0.55 s (gap -> 0). With it the gap closes as the exact quasi-steady law: times to pass
+h = 0.03, 0.02, ..., 2e-4 differ from the exact ODE by a constant 0.006 - 0.03 s (the far field of
+a fluid started at rest needs about R^2/nu to build up, E5t) and the *intervals* agree to
+0.984 - 0.9997 (n = 64 and 128; the first interval, 3.5 -> 2.3 dx, is the worst).
