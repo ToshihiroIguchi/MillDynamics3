@@ -345,6 +345,73 @@ impl BodyFlow {
     }
 }
 
+type Vels = Vec<(f64, f64, f64)>;
+
+/// Number of previous iterates kept by the Anderson acceleration of the many-body coupling.
+const ANDERSON_DEPTH: usize = 5;
+
+/// Anderson mixing step for the fixed point `x = g(x)` from the history of `(x_k, g(x_k))`
+/// (last entry newest): minimises `|f_k - dF gamma|`, `f = g - x`, and returns
+/// `g_k - dG gamma` (plain relaxed step `x + alpha f` with a single entry).
+fn anderson_step(hist: &[(Vec<f64>, Vec<f64>)], alpha: f64) -> Vec<f64> {
+    let (xk, gk) = hist.last().expect("history");
+    let len = xk.len();
+    let fk: Vec<f64> = (0..len).map(|i| gk[i] - xk[i]).collect();
+    let m = hist.len() - 1;
+    if m == 0 {
+        return (0..len).map(|i| xk[i] + alpha * fk[i]).collect();
+    }
+    let f_of =
+        |h: &(Vec<f64>, Vec<f64>)| -> Vec<f64> { (0..len).map(|i| h.1[i] - h.0[i]).collect() };
+    // Columns: differences of consecutive residuals and images.
+    let mut df: Vec<Vec<f64>> = Vec::new();
+    let mut dg: Vec<Vec<f64>> = Vec::new();
+    for w in hist.windows(2) {
+        let (f0, f1) = (f_of(&w[0]), f_of(&w[1]));
+        df.push((0..len).map(|i| f1[i] - f0[i]).collect());
+        dg.push((0..len).map(|i| w[1].1[i] - w[0].1[i]).collect());
+    }
+    // Normal equations with a small Tikhonov term.
+    let mut a = vec![vec![0.0; m]; m];
+    let mut b = vec![0.0; m];
+    for i in 0..m {
+        for j in 0..m {
+            a[i][j] = df[i].iter().zip(&df[j]).map(|(p, q)| p * q).sum();
+        }
+        b[i] = df[i].iter().zip(&fk).map(|(p, q)| p * q).sum();
+    }
+    let tr: f64 = (0..m).map(|i| a[i][i]).sum::<f64>() / m as f64;
+    for (i, row) in a.iter_mut().enumerate() {
+        row[i] += 1e-10 * tr.max(1e-300);
+    }
+    // Gaussian elimination with partial pivoting.
+    for c in 0..m {
+        let piv = (c..m)
+            .max_by(|&p, &q| a[p][c].abs().total_cmp(&a[q][c].abs()))
+            .unwrap();
+        a.swap(c, piv);
+        b.swap(c, piv);
+        if a[c][c].abs() < 1e-300 {
+            return (0..len).map(|i| xk[i] + alpha * fk[i]).collect();
+        }
+        for r in c + 1..m {
+            let f = a[r][c] / a[c][c];
+            for k in c..m {
+                a[r][k] -= f * a[c][k];
+            }
+            b[r] -= f * b[c];
+        }
+    }
+    let mut gamma = vec![0.0; m];
+    for c in (0..m).rev() {
+        let s: f64 = (c + 1..m).map(|k| a[c][k] * gamma[k]).sum();
+        gamma[c] = (b[c] - s) / a[c][c];
+    }
+    (0..len)
+        .map(|i| gk[i] - (0..m).map(|j| gamma[j] * dg[j][i]).sum::<f64>())
+        .collect()
+}
+
 /// Per-body linear preconditioner data of the many-body coupling.
 #[derive(Clone, Copy, Debug)]
 pub struct BodyStiffness {
@@ -561,7 +628,16 @@ impl BodyFlow {
         } else {
             Vec::new()
         };
-        let mut vel: Vec<(f64, f64, f64)> = start.clone();
+        // Initial guess: the previous velocity advanced with the previous linear acceleration.
+        let mut vel: Vec<(f64, f64, f64)> = (0..nb)
+            .map(|i| {
+                (
+                    start[i].0 + dt * bodies[i].accel.0,
+                    start[i].1 + dt * bodies[i].accel.1,
+                    start[i].2,
+                )
+            })
+            .collect();
         let mut kx: Vec<f64> = setup
             .iter()
             .map(|s| s.added_mass / dt + s.drag_stiffness)
@@ -575,7 +651,7 @@ impl BodyFlow {
         // Under-relaxation, halved whenever the residual jumps up (a dense, lubricated cluster
         // can make the plain fixed point diverge); restarts from the best iterate so far.
         let mut alpha = 1.0f64;
-        type Vels = Vec<(f64, f64, f64)>;
+        let mut hist: Vec<(Vec<f64>, Vec<f64>)> = Vec::new();
         let mut best: Option<(f64, Vels, Vels)> = None;
         for it in 1..=max_iter {
             let discs: Vec<Disc> = (0..nb)
@@ -609,7 +685,10 @@ impl BodyFlow {
                     )
                 })
                 .collect();
-            if let Some((pvel, ptot)) = &last {
+            // The secant stiffness is frozen after a few iterations: a map that changes from
+            // iteration to iteration defeats the Anderson acceleration.
+            let freeze = it > 3;
+            if let (false, Some((pvel, ptot))) = (freeze, &last) {
                 let sec = |df: f64, du: f64, fb: f64, k0: f64, u: f64| {
                     let k = -df / du;
                     if du.abs() > 1e-9 * (1.0 + u.abs()) && k.is_finite() && k > 0.0 {
@@ -668,6 +747,7 @@ impl BodyFlow {
                     + (new_t[i].1 - start[i].1).powi(2)
                     + (rr * (wn - start[i].2)).powi(2))
                 .sqrt()
+                .max(0.05 * (new_t[i].0.powi(2) + new_t[i].1.powi(2) + (rr * wn).powi(2)).sqrt())
                 .max(1e-12);
                 let r = ((new_t[i].0 - vel[i].0).powi(2)
                     + (new_t[i].1 - vel[i].1).powi(2)
@@ -677,33 +757,42 @@ impl BodyFlow {
                 residual = residual.max(r);
                 new_vel[i] = (new_t[i].0, new_t[i].1, wn);
             }
-            let mut next_vel = new_vel.clone();
-            match &best {
+            if std::env::var_os("MILL_DEBUG_ITER").is_some() {
+                eprintln!("    it {it}: residual {residual:.3e} alpha {alpha}");
+            }
+            let flat = |v: &Vels| -> Vec<f64> {
+                v.iter()
+                    .enumerate()
+                    .flat_map(|(i, w)| [w.0, w.1, radii[i] * w.2])
+                    .collect()
+            };
+            let unflat = |x: &[f64]| -> Vels {
+                (0..nb)
+                    .map(|i| (x[3 * i], x[3 * i + 1], x[3 * i + 2] / radii[i]))
+                    .collect()
+            };
+            let (xk, gk) = (flat(&vel), flat(&new_vel));
+            let next_vel = match &best {
                 Some((br, bv, bn)) if residual > 2.0 * br && it >= 3 => {
                     alpha = (alpha * 0.5).max(0.1);
-                    for i in 0..nb {
-                        next_vel[i] = (
-                            bv[i].0 + alpha * (bn[i].0 - bv[i].0),
-                            bv[i].1 + alpha * (bn[i].1 - bv[i].1),
-                            bv[i].2 + alpha * (bn[i].2 - bv[i].2),
-                        );
-                    }
+                    hist.clear();
+                    let (bx, bg) = (flat(bv), flat(bn));
+                    let x: Vec<f64> = (0..3 * nb)
+                        .map(|k| bx[k] + alpha * (bg[k] - bx[k]))
+                        .collect();
+                    unflat(&x)
                 }
                 _ => {
                     if best.as_ref().is_none_or(|b| residual < b.0) {
                         best = Some((residual, vel.clone(), new_vel.clone()));
                     }
-                    if alpha < 1.0 {
-                        for i in 0..nb {
-                            next_vel[i] = (
-                                vel[i].0 + alpha * (new_vel[i].0 - vel[i].0),
-                                vel[i].1 + alpha * (new_vel[i].1 - vel[i].1),
-                                vel[i].2 + alpha * (new_vel[i].2 - vel[i].2),
-                            );
-                        }
+                    hist.push((xk.clone(), gk.clone()));
+                    if hist.len() > ANDERSON_DEPTH + 1 {
+                        hist.remove(0);
                     }
+                    unflat(&anderson_step(&hist, alpha))
                 }
-            }
+            };
             vel = next_vel;
             let loads: Vec<BodyLoad> = (0..nb)
                 .map(|i| BodyLoad {

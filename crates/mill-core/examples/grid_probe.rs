@@ -1686,6 +1686,36 @@ fn e8a() {
             );
         }
     }
+    if args.iter().any(|a| a == "--noise") {
+        let dt = dt;
+        let base: Vec<Disc> = bodies
+            .iter()
+            .map(|b| Disc {
+                cx: b.disc.cx + dt * b.disc.ux,
+                cy: b.disc.cy + dt * b.disc.uy,
+                ..b.disc
+            })
+            .collect();
+        let (f0, _, _, _) = bf.trial_many(&base, dt);
+        println!("noise test on body 0: base load {:?}", f0[0]);
+        for eps in [1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 1e-4, 1e-5] {
+            for (name, dir) in [("ux", 0usize), ("uy", 1), ("om", 2)] {
+                let mut d = base.clone();
+                match dir {
+                    0 => d[0].ux += eps,
+                    1 => d[0].uy += eps,
+                    _ => d[0].omega += eps / d[0].r,
+                }
+                let (f1, _, _, _) = bf.trial_many(&d, dt);
+                println!(
+                    "eps {eps:.0e} {name}: dFx/eps {:+.4e} dFy/eps {:+.4e} dT/eps {:+.4e}",
+                    (f1[0].0 - f0[0].0) / eps,
+                    (f1[0].1 - f0[0].1) / eps,
+                    (f1[0].2 - f0[0].2) / eps
+                );
+            }
+        }
+    }
     println!(
         "mean over 2nd half: wall torque {:.5e}, gravity moment {:.5e}; {:.1} s",
         sum_w / cnt as f64,
