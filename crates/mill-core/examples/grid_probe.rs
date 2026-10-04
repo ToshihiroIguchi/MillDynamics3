@@ -1480,7 +1480,7 @@ fn e7b() {
     let n = get("--n", 110.0) as usize;
     let nu = get("--nu", 1.0);
     let t_end = get("--t", 0.3);
-    let (a, rho, g) = (get("--a", 0.04), 2.0, 50.0);
+    let (a, rho, g) = (get("--a", 0.04), get("--rho", 2.0), 50.0);
     let dx = 1.1 / n as f64;
     // 20 hexagonal-lattice sites closest to the centre, spacing 2.4 a.
     let pitch = 2.4 * a;
@@ -1583,7 +1583,7 @@ fn e8a() {
     let omega = get("--omega", 2.0);
     let t_end = get("--t", 2.0);
     let dt = get("--dt", 0.005);
-    let (a, rho, g) = (get("--a", 0.04), 2.0, 50.0);
+    let (a, rho, g) = (get("--a", 0.04), get("--rho", 2.0), 50.0);
     let count = get("--m", 12.0) as usize;
     let dx = 1.1 / n as f64;
     let pitch = 2.4 * a;
@@ -1631,6 +1631,14 @@ fn e8a() {
     let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
     bf.drum_omega = omega;
     bf.tol_scale = get("--tol", 1000.0);
+    let mu = get("--mu", -1.0);
+    if mu >= 0.0 {
+        bf.contact = Some(mill_core::mac::contact::ContactParams {
+            gap0: get("--gap0", 0.01) * a,
+            beta: get("--beta", 0.2),
+            mu,
+        });
+    }
     println!(
         "E8a n = {n} (d/dx = {:.1}), nu = {nu}, omega = {omega}, {count} discs a = {a}, dt = {dt}",
         2.0 * a / dx
@@ -1669,8 +1677,8 @@ fn e8a() {
                 .map(|b| b.disc.ux.hypot(b.disc.uy))
                 .fold(0.0, f64::max);
             println!(
-                "  s={s} wall gap {:.2e} pair gap {:.2e} vmax {:.3} iters {} res {:.1e} links {}",
-                wg, pg, vmax, info.iterations, info.residual, info.links
+                "  s={s} wall gap {:.2e} pair gap {:.2e} vmax {:.3} iters {} res {:.1e} links {} contacts {}",
+                wg, pg, vmax, info.iterations, info.residual, info.links, info.contacts
             );
         }
         if s % report == 0 || s == steps {

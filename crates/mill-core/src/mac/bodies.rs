@@ -137,6 +137,8 @@ pub struct BodyFlow {
     pub drum_omega: f64,
     /// Multiplier of the fluid solver's linear tolerances in the many-body trials.
     pub tol_scale: f64,
+    /// Solid contact below the lubrication film (None: lubrication only).
+    pub contact: Option<super::contact::ContactParams>,
     /// Torque of the fluid on the drum wall in the last trial (per unit density).
     wall_torque: std::cell::Cell<f64>,
 }
@@ -154,6 +156,7 @@ impl BodyFlow {
             lubrication: true,
             drum_omega: 0.0,
             tol_scale: 1.0,
+            contact: None,
             wall_torque: std::cell::Cell::new(0.0),
         }
     }
@@ -432,6 +435,8 @@ pub struct CoupledManyInfo {
     pub loads: Vec<BodyLoad>,
     /// Number of lubricated contacts (disc-disc and disc-wall) in the step.
     pub links: usize,
+    /// Number of solid contacts in the step.
+    pub contacts: usize,
     /// Torque of the fluid on the drum wall (per unit density; zero for a drum at rest).
     pub wall_torque: f64,
 }
@@ -470,19 +475,16 @@ fn solve_lubricated(
     base: &[(f64, f64)],
     diag: &[(f64, f64)],
     links: &[super::lubrication::Link],
+    contacts: &[ActiveContact],
     guess: &[(f64, f64)],
 ) -> Vec<(f64, f64)> {
     let n = base.len();
     let mut a: Vec<[f64; 4]> = diag.iter().map(|d| [d.0, 0.0, 0.0, d.1]).collect();
     let mut nbr: Vec<Vec<(usize, [f64; 4])>> = vec![Vec::new(); n];
+    let outer =
+        |n: (f64, f64), w: f64| [w * n.0 * n.0, w * n.0 * n.1, w * n.0 * n.1, w * n.1 * n.1];
     for l in links {
-        let w = l.weight * l.c;
-        let nn = [
-            w * l.n.0 * l.n.0,
-            w * l.n.0 * l.n.1,
-            w * l.n.0 * l.n.1,
-            w * l.n.1 * l.n.1,
-        ];
+        let nn = outer(l.n, l.weight * l.c);
         for (k, v) in nn.iter().enumerate() {
             a[l.i][k] += v;
         }
@@ -495,30 +497,85 @@ fn solve_lubricated(
         }
     }
     let mut u = guess.to_vec();
-    for _ in 0..2000 {
-        let mut change = 0.0f64;
-        let mut size = 1e-30f64;
-        for i in 0..n {
-            let mut r = base[i];
-            for (j, nn) in &nbr[i] {
-                r.0 += nn[0] * u[*j].0 + nn[1] * u[*j].1;
-                r.1 += nn[2] * u[*j].0 + nn[3] * u[*j].1;
+    // One-sided contacts: the active set (closing faster than the push-out speed) is re-evaluated
+    // from the latest velocities after each converged pass of the linear system.
+    let mut active: Vec<bool> = contacts
+        .iter()
+        .map(|c| contact_closing(c, &u) > 0.0)
+        .collect();
+    for _pass in 0..8 {
+        let mut a2 = a.clone();
+        let mut nbr2 = nbr.clone();
+        let mut base2 = base.to_vec();
+        for (c, on) in contacts.iter().zip(&active) {
+            if !*on {
+                continue;
             }
-            let m = a[i];
-            let det = m[0] * m[3] - m[1] * m[2];
-            let new = (
-                (m[3] * r.0 - m[1] * r.1) / det,
-                (m[0] * r.1 - m[2] * r.0) / det,
-            );
-            change = change.max((new.0 - u[i].0).abs().max((new.1 - u[i].1).abs()));
-            size = size.max(new.0.abs().max(new.1.abs()));
-            u[i] = new;
+            let k = &c.contact;
+            let nn = outer(k.n, c.gamma);
+            for (m, v) in nn.iter().enumerate() {
+                a2[k.i][m] += v;
+            }
+            base2[k.i].0 -= c.gamma * c.push * k.n.0;
+            base2[k.i].1 -= c.gamma * c.push * k.n.1;
+            if let Some(j) = k.j {
+                for (m, v) in nn.iter().enumerate() {
+                    a2[j][m] += v;
+                }
+                base2[j].0 += c.gamma * c.push * k.n.0;
+                base2[j].1 += c.gamma * c.push * k.n.1;
+                nbr2[k.i].push((j, nn));
+                nbr2[j].push((k.i, nn));
+            }
         }
-        if change < 1e-13 * size {
+        for _ in 0..2000 {
+            let mut change = 0.0f64;
+            let mut size = 1e-30f64;
+            for i in 0..n {
+                let mut r = base2[i];
+                for (j, nn) in &nbr2[i] {
+                    r.0 += nn[0] * u[*j].0 + nn[1] * u[*j].1;
+                    r.1 += nn[2] * u[*j].0 + nn[3] * u[*j].1;
+                }
+                let m = a2[i];
+                let det = m[0] * m[3] - m[1] * m[2];
+                let new = (
+                    (m[3] * r.0 - m[1] * r.1) / det,
+                    (m[0] * r.1 - m[2] * r.0) / det,
+                );
+                change = change.max((new.0 - u[i].0).abs().max((new.1 - u[i].1).abs()));
+                size = size.max(new.0.abs().max(new.1.abs()));
+                u[i] = new;
+            }
+            if change < 1e-13 * size {
+                break;
+            }
+        }
+        let next: Vec<bool> = contacts
+            .iter()
+            .map(|c| contact_closing(c, &u) > 0.0)
+            .collect();
+        if next == active {
             break;
         }
+        active = next;
     }
     u
+}
+
+/// A contact with its implicit-normal data for one step.
+#[derive(Clone, Copy, Debug)]
+struct ActiveContact {
+    contact: super::contact::Contact,
+    gamma: f64,
+    push: f64,
+}
+
+/// Closing speed beyond the push-out target (positive: the contact pushes back).
+fn contact_closing(c: &ActiveContact, u: &[(f64, f64)]) -> f64 {
+    let k = &c.contact;
+    let uj = k.j.map_or((0.0, 0.0), |j| u[j]);
+    (u[k.i].0 - uj.0) * k.n.0 + (u[k.i].1 - uj.1) * k.n.1 + c.push
 }
 
 impl BodyFlow {
@@ -624,6 +681,21 @@ impl BodyFlow {
         } else {
             Vec::new()
         };
+        let masses: Vec<f64> = bodies.iter().map(|b| b.mass).collect();
+        let contact_list = match &self.contact {
+            Some(p) => super::contact::contacts(&pos, &radii, &masses, self.drum_radius, p),
+            None => Vec::new(),
+        };
+        let beta = self.contact.map_or(0.0, |p| p.beta);
+        let active: Vec<ActiveContact> = contact_list
+            .iter()
+            .map(|c| ActiveContact {
+                contact: *c,
+                gamma: c.dashpot(dt),
+                push: c.push_out(beta, dt),
+            })
+            .collect();
+        let wall_speed = self.drum_omega * self.drum_radius;
         // Initial guess: the previous velocity advanced with the previous linear acceleration.
         let mut vel: Vec<(f64, f64, f64)> = (0..nb)
             .map(|i| {
@@ -675,12 +747,16 @@ impl BodyFlow {
                 );
             }
             let forces: Vec<(f64, f64)> = raw.iter().map(|l| (l.0, l.1)).collect();
+            let fric = match &self.contact {
+                Some(p) => super::contact::friction_loads(&contact_list, &vel, p, dt, wall_speed),
+                None => vec![(0.0, 0.0, 0.0); nb],
+            };
             let total: Vec<(f64, f64, f64)> = (0..nb)
                 .map(|i| {
                     (
-                        forces[i].0 + external[i].0,
-                        forces[i].1 + external[i].1,
-                        raw[i].2 + external[i].2,
+                        forces[i].0 + external[i].0 + fric[i].0,
+                        forces[i].1 + external[i].1 + fric[i].1,
+                        raw[i].2 + external[i].2 + fric[i].2,
                     )
                 })
                 .collect();
@@ -735,7 +811,7 @@ impl BodyFlow {
                 .map(|i| (bodies[i].mass / dt + kx[i], bodies[i].mass / dt + ky[i]))
                 .collect();
             let guess: Vec<(f64, f64)> = vel.iter().map(|v| (v.0, v.1)).collect();
-            let new_t = solve_lubricated(&base, &diag, &lk, &guess);
+            let new_t = solve_lubricated(&base, &diag, &lk, &active, &guess);
             let mut residual = 0.0f64;
             let mut new_vel = vel.clone();
             for i in 0..nb {
@@ -795,8 +871,8 @@ impl BodyFlow {
             vel = next_vel;
             let loads: Vec<BodyLoad> = (0..nb)
                 .map(|i| BodyLoad {
-                    fx: total[i].0 - external[i].0,
-                    fy: total[i].1 - external[i].1,
+                    fx: total[i].0 - external[i].0 - fric[i].0,
+                    fy: total[i].1 - external[i].1 - fric[i].1,
                     torque: raw[i].2,
                     divergence: div,
                 })
@@ -824,6 +900,7 @@ impl BodyFlow {
             residual,
             loads,
             links: lk.len(),
+            contacts: contact_list.len(),
             wall_torque: self.wall_torque.get(),
         }
     }

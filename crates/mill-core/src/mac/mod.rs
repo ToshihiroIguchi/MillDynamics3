@@ -5,6 +5,7 @@
 //! multigrid-preconditioned CG solver for the weighted (variational) Poisson problem.
 
 pub mod bodies;
+pub mod contact;
 pub mod embedded;
 pub mod flow;
 pub mod levelset;
