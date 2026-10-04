@@ -898,3 +898,21 @@ leave a slow creep). Verdict: stable, physically plausible, not a quantitative g
   (the pressure-driven part changes the net shear force) and must not be guessed.
 - The dynamic pile is not grid-converged (n 110 -> 128: -16 %); find the source (sliding speed vs
   grid) before any +-3 % claim.
+
+### E8d grid study at constant physical shrink (1.5e-3 m), rho_s = 8, mu = 0.5, t = 2 s
+
+| n (d/dx) | shrink (cells) | gravity moment, mean t = 1..2 | at t = 2 | pile angle at t = 2 |
+|---|---|---|---|---|
+| 96 (7.0) | 0.131 | -4.73 | -4.71 | 0.60 |
+| 110 (8.0) | 0.150 | -6.42 | -6.82 | 0.93 |
+| 128 (9.3) | 0.175 | -5.72 | -6.05 | 0.80 |
+| 160 (11.6) | 0.218 | -6.71 | -7.71 | 1.15 |
+
+Not converged (spread -4.7 .. -6.7, not monotone at n = 110): the pile climbs the wall faster
+the finer the grid. Making the shrink a fixed physical length did not remove the trend (n = 128:
+-5.39 -> -5.72), so the shrink bias is not the main cause. What differs with n is how much of the
+wall/pair gap is carried by the grid and how much by the sub-grid film models (blend near dx), and
+the tangential film is the uncalibrated part: the sliding resistance of the pile, hence its climb
+speed, is set there. Conclusion: the tangential film calibration (needs a trusted reference) is the
+blocking item for any +-3 % statement on the dynamic pile; further grid or dt sweeps before it would
+only re-measure the same scatter.
