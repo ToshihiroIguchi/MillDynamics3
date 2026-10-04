@@ -881,3 +881,20 @@ All five runs finish without NaN, but the spread is about +-9 % (mean) and the p
 climbing the wall (angle not steady), so a window mean of a transient is not a +-3 % metric. The
 largest shift comes from the grid (n 110 -> 128: -16 %), i.e. the sliding pile is not grid-converged
 yet; shrink and dt matter less (<= 7 %). Gate NOT met.
+
+### E8d static benchmark: 12 heavy discs settling in a still drum (omega = 0)
+
+`grid_probe --exp E8a --rho 8 --mu 0.5 --split --omega 0 --t 2 --shrink 0.15`, n = 96 / 110 / 128:
+no NaN, 8-17 coupling iterations typical (peaks 27-40), the pile settles to the drum bottom (angle
+|0.05| rad or less). Residual gravity moment (window mean t = 1..2): -0.036 / +0.168 / +0.090, i.e.
+|moment| <= 0.2 against ~6 in the rotating case (<= 3 %), but it does not converge to zero: the
+pile keeps rocking by a few hundredths of a radian over 2 s (contact projection + sub-grid film
+leave a slow creep). Verdict: stable, physically plausible, not a quantitative gate yet.
+
+### Open after E8d
+- Tangential/rotational film (step 2) is still the uncalibrated Couette leading term. A calibration
+  needs a trusted reference (exact bipolar-coordinate solution of a cylinder translating/rotating
+  next to a wall); it was not done unattended because the 2D lubrication coefficient is subtle
+  (the pressure-driven part changes the net shear force) and must not be guessed.
+- The dynamic pile is not grid-converged (n 110 -> 128: -16 %); find the source (sliding speed vs
+  grid) before any +-3 % claim.
