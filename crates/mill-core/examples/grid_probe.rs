@@ -1642,6 +1642,7 @@ fn e8a() {
     bf.hydro_shrink = get("--shrink", 0.0);
     bf.split_contact = args.iter().any(|a| a == "--split");
     bf.weno = !args.iter().any(|a| a == "--central");
+    bf.lubrication = !args.iter().any(|a| a == "--nolub");
     let tau = get("--tau", 0.0);
     if tau > 0.0 {
         let law = mill_core::mac::rheology::HerschelBulkley::bingham(tau, nu);

@@ -1036,3 +1036,8 @@ dt = 0.005, shrink 1.5e-3 m, t = 1.2 s, n = 96 vs 128. Gravity moment at the end
 The whole trajectory agrees within about 2 % (tau = 10: 1.8 % at t = 1.2). The gate is met for a paste in the
 viscous range (nu >= 0.1); the water-like limit stays open (see above). Not tested: Herschel-Bulkley exponent
 n != 1, hybrid/variational mode, yield stress with the free surface.
+
+Further switches at nu = 0.01 (n = 96, probe `--nolub` disables the sub-grid film): without the film the run fails
+earlier (NaN before t = 0.16, as expected: discs overlap the wall); with a 0.4 dx hydrodynamic shrink instead of 0.131
+it still fails (wall torque 2e2 at t = 0.24, NaN by 0.32). So neither the film nor sliver cells explain the failure;
+the water-like regime is parked together with E2 (stop rule: more than two attempts without meeting the gate).
