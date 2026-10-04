@@ -1479,7 +1479,7 @@ fn e7b() {
     let n = get("--n", 110.0) as usize;
     let nu = get("--nu", 1.0);
     let t_end = get("--t", 0.3);
-    let (a, rho, g) = (0.04, 2.0, 50.0);
+    let (a, rho, g) = (get("--a", 0.04), 2.0, 50.0);
     let dx = 1.1 / n as f64;
     // 20 hexagonal-lattice sites closest to the centre, spacing 2.4 a.
     let pitch = 2.4 * a;

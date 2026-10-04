@@ -749,3 +749,22 @@ there scatters with disc size and position). Not done: tangential lubrication, t
 
 D2 so far: resolved coupling is within 3 % only for d/dx >= 8 (isolated) and d/dx >= 16 (dense, gap < a/2);
 below d/dx ~ 4 it fails. n = 440 with 20 discs costs about 700 s for 0.1 s.
+
+### E7c — k-consistency of the resolved coupling (2026-10-04)
+
+Same area, same total force, same cluster footprint, different coarse-graining: 28 discs of
+radius a = 0.04 (d/dx = 16, n = 220) against 7 discs of radius 2a = 0.08 (d/dx = 32, n = 220),
+hex pitch 2.4 radius, nu = 1, rho_s = 2, mean settling speed at t = 0.1:
+
+| case | mean vy | note |
+|---|---|---|
+| 28 x a   | -0.0558 | d/dx = 16: about -2 % from the d/dx = 32 value (E7b) |
+| 7 x 2a   | -0.0579 | |
+
+The k = 2 coarse-grained cluster settles 3.7 % faster raw, about 1.5 % after correcting the
+fine case for its own grid error. A dense cluster (gap 0.4 radius) behaves as a nearly
+impermeable blob, so permeability (which scales with the radius squared) matters little here;
+a dilute or fluid-dominated charge would show the radius-squared dependence and is not covered.
+Consequence for D2: coarse-graining raises d/dx, so the resolved coupling needs no unresolved
+(porosity + drag) model as long as k is chosen to keep d/dx >= 8 (isolated) or 16 (dense); k = 2 is
+k-consistent to about 2-4 % in the dense case. Open: k = 4, dilute charges, rotation/tangential lubrication.
