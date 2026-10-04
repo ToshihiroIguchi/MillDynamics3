@@ -866,3 +866,18 @@ Result (rho_s = 8, mu = 0.5, n = 110, d/dx = 8, nu = 0.1, omega = 2, 12 discs, s
 run of the heavy pile to t = 2 s without NaN; the pile slides up to ~0.93 rad, gravity moment
 settles near -6.8 (mean over the 2nd half -6.42). No sensitivity study yet (shrink, grid, dt), so
 no +-3 % statement; the shrink biases the displaced volume by ~2 shrink dx / d.
+
+### E8d sensitivity (rho_s = 8, mu = 0.5, split contacts, t = 2 s)
+
+| variant | gravity moment, mean t = 1..2 | at t = 2 | pile angle at t = 2 |
+|---|---|---|---|
+| n = 110, shrink 0.10 | -5.98 | -6.19 | 0.82 |
+| n = 110, shrink 0.15 | -6.42 | -6.82 | 0.93 |
+| n = 110, shrink 0.25 | -5.93 | -6.47 | 0.87 |
+| n = 110, shrink 0.15, dt = 0.0025 | -6.30 | -6.82 | 0.95 |
+| n = 128, shrink 0.15 | -5.39 | -5.64 | 0.74 |
+
+All five runs finish without NaN, but the spread is about +-9 % (mean) and the pile is still
+climbing the wall (angle not steady), so a window mean of a transient is not a +-3 % metric. The
+largest shift comes from the grid (n 110 -> 128: -16 %), i.e. the sliding pile is not grid-converged
+yet; shrink and dt matter less (<= 7 %). Gate NOT met.
