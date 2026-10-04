@@ -1059,3 +1059,13 @@ Settling 8 instead of 2 revolutions changes nothing (n = 64, 128: < 0.1 %), so t
 spans 0.1815-0.2073 (+-7 %), falling to n = 128 and rising again; the +-3 % gate is not met for the pure-slurry drum.
 The steady film is only 2-5 cells thick at n <= 128 and not converged. Pure-slurry E3 is closed as not met; the
 full-system E8 sweep (nu >= 0.1) is the accepted evidence for the power metric.
+
+### Grid track status summary (2026-10-05)
+
+| item | status |
+|---|---|
+| E0, E1, E4, E5, E7 | gates met |
+| E6 (yield stress) | Couette gate met; plug creep 3e-5 against the 1e-5 gate (hybrid mode), closed as practically sufficient; fixing it needs a yield-aware preconditioner for the variational solve |
+| E8 full system, nu >= 0.1 (slurry, Bingham paste) | peak gravity moment within 2 % between n = 96 and n = 128 (gate +-3 % met) |
+| E8, nu = 0.01 (water-like) | NaN; joins E2 (high-Re / free-surface robustness) |
+| E2, E3 (pure slurry) | gates not met (see sections above) |
