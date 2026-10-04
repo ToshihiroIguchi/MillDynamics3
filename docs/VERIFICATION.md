@@ -1041,3 +1041,21 @@ Further switches at nu = 0.01 (n = 96, probe `--nolub` disables the sub-grid fil
 earlier (NaN before t = 0.16, as expected: discs overlap the wall); with a 0.4 dx hydrodynamic shrink instead of 0.131
 it still fails (wall torque 2e2 at t = 0.24, NaN by 0.32). So neither the film nor sliver cells explain the failure;
 the water-like regime is parked together with E2 (stop rule: more than two attempts without meeting the gate).
+
+### E3s resolution sweep (2026-10-05, Re = 20, fill 0.3, Fr = 0.36)
+
+| n | wall torque | gravity moment (centroid) |
+|---|---|---|
+| 64 | 0.2257 | 0.2073 |
+| 80 | 0.2220 | 0.2041 |
+| 96 | 0.2181 | 0.1997 |
+| 112 | 0.2090 | 0.1936 |
+| 128 | 0.2120 | 0.1815 |
+| 160 | 0.2107 | 0.1888 |
+| 192 | 0.2146 | 0.1912 |
+| 256 | 0.2171 | 0.1948 |
+
+Settling 8 instead of 2 revolutions changes nothing (n = 64, 128: < 0.1 %), so the state is steady. The gravity moment
+spans 0.1815-0.2073 (+-7 %), falling to n = 128 and rising again; the +-3 % gate is not met for the pure-slurry drum.
+The steady film is only 2-5 cells thick at n <= 128 and not converged. Pure-slurry E3 is closed as not met; the
+full-system E8 sweep (nu >= 0.1) is the accepted evidence for the power metric.
