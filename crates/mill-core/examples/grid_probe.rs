@@ -1642,6 +1642,11 @@ fn e8a() {
     bf.hydro_shrink = get("--shrink", 0.0);
     bf.split_contact = args.iter().any(|a| a == "--split");
     bf.weno = !args.iter().any(|a| a == "--central");
+    let tau = get("--tau", 0.0);
+    if tau > 0.0 {
+        let law = mill_core::mac::rheology::HerschelBulkley::bingham(tau, nu);
+        bf.rheology = Some((law, get("--r", 2.0 * nu)));
+    }
     println!(
         "E8a n = {n} (d/dx = {:.1}), nu = {nu}, omega = {omega}, {count} discs a = {a}, dt = {dt}",
         2.0 * a / dx

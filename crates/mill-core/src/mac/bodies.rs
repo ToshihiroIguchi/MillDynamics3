@@ -144,6 +144,9 @@ pub struct BodyFlow {
     /// Hydrodynamic radius reduction (in cells) of the discs seen by the fluid mesh, so that
     /// sub-grid gaps never form sliver cells (lubrication and contact use the true radius).
     pub hydro_shrink: f64,
+    /// Yield-stress law (and ALG2 augmentation) applied to the fluid; the lubrication film keeps the
+    /// plastic viscosity `nu`.
+    pub rheology: Option<(super::rheology::HerschelBulkley, f64)>,
     /// Jacobian of the resolved fluid loads, kept between Newton steps.
     jacobian: Option<Jacobian>,
     /// Torque of the fluid on the drum wall in the last trial (per unit density).
@@ -166,6 +169,7 @@ impl BodyFlow {
             contact: None,
             split_contact: false,
             hydro_shrink: 0.0,
+            rheology: None,
             jacobian: None,
             wall_torque: std::cell::Cell::new(0.0),
         }
@@ -226,6 +230,9 @@ impl BodyFlow {
                 let mut f = StaggeredFlow::new(&sm, self.nu, wall);
                 f.weno = self.weno;
                 f.upwind = self.weno;
+                if let Some((law, r)) = self.rheology {
+                    f.set_rheology(law, r);
+                }
                 self.rotate_initial(&mut f, &sm);
                 f
             }
@@ -634,6 +641,9 @@ impl BodyFlow {
                 let mut f = StaggeredFlow::new(sm, self.nu, wall);
                 f.weno = self.weno;
                 f.upwind = self.weno;
+                if let Some((law, r)) = self.rheology {
+                    f.set_rheology(law, r);
+                }
                 self.rotate_initial(&mut f, sm);
                 f
             }

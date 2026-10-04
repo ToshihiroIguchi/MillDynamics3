@@ -1021,3 +1021,18 @@ speed (1 m/s) with wall gaps of order -1e-4 m, disc spins chatter in sign from s
 iterations) a few steps before the NaN. At nu = 0.1 the film damps the spins and the same setup is
 stable. So the water-like regime is not met; the likely cause is the non-smooth (sub-grid gap, 1/sqrt(h)
 film) response combined with weak viscous damping, which a linear fluid Jacobian cannot represent.
+
+#### E8e Bingham paste (2026-10-05)
+
+`BodyFlow::rheology` (ALG2 Bingham, plastic viscosity nu = 0.1, augmentation r = 2 nu; the lubrication film keeps
+the plastic viscosity) and probe `--tau` (kinematic yield stress). Setup: `--newton --split`, rho_s = 8, mu = 0.5,
+dt = 0.005, shrink 1.5e-3 m, t = 1.2 s, n = 96 vs 128. Gravity moment at the end / peak of the window:
+
+| tau_y/rho (m^2/s^2) | n = 96 | n = 128 | difference |
+|---|---|---|---|
+| 2.5 (Bn ~ 1) | -7.558 (still rising) | -7.681 | 1.6 % |
+| 10 (Bn ~ 4) | -6.491 (peak at t = 0.96) | -6.496 | 0.1 % |
+
+The whole trajectory agrees within about 2 % (tau = 10: 1.8 % at t = 1.2). The gate is met for a paste in the
+viscous range (nu >= 0.1); the water-like limit stays open (see above). Not tested: Herschel-Bulkley exponent
+n != 1, hybrid/variational mode, yield stress with the free surface.
