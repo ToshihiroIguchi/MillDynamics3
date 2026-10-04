@@ -801,3 +801,25 @@ contact (normal spring, Coulomb friction), tangential/rotational lubrication, a 
 (the E2/E3 gates are open), and a configuration that settles to a steady state. Earlier 2 s runs
 (n = 110/165/220, before the coupling fixes) gave a mean moment over t = 1..2 of
 -0.968/-0.965/-0.950 (transient, not a steady state).
+
+
+## E8b — solid contact and a jammed pile (2026-10-04)
+
+Added `mac/contact.rs`: one-sided implicit normal constraint (allowed approach `gap/dt`, Baumgarte
+fraction `beta` of an existing overlap, stiffness 100 `m_eff/dt`, solved with the lubrication links by
+projected Gauss-Seidel) and regularised Coulomb friction (explicit in the coupling iteration, its
+stiffness added to the preconditioner). `grid_probe --exp E8a --mu <friction> [--gap0 --beta --rho]`.
+
+Results (n = 128, d/dx = 9.3, nu = 0.1, omega = 2, 12 discs, dt = 0.005):
+- rho_s = 2 (light discs orbit with the fluid): with contact, 6 s runs finish without NaN (before: NaN
+  at t ~ 5 when the cluster reaches the wall). Mean gravity moment over t = 3..6: -0.3736 (mu = 0) and
+  -0.3739 (mu = 0.5); the cluster still orbits (period ~3.5 s), no steady state.
+- rho_s = 8 (the pile sits at the bottom, angle ~0.55 rad): NaN at t ~ 0.8-1.2 s for mu = 0 and 0.5,
+  for every contact variant tried (soft dashpot: wall penetration under the stack weight; stiff
+  constraint: the many-body fixed point stops converging in one step, 40 iterations, residual 1.8,
+  then overlap). With friction the discs also spun up to 10-40 rad/s (explicit friction gain > 1)
+  until the friction stiffness went into the preconditioner; mu = 0 fails anyway, so the cause is
+  the stiff jammed contact network inside the fixed point, not friction.
+
+Verdict: stop rule reached (two targeted fixes). The contact model works for a free cluster, but the
+fixed-point coupling cannot handle a jammed pile. No +-3 % statement yet.
