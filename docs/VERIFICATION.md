@@ -983,3 +983,20 @@ t = 2.0), dt <= 0.005 is within ~5 % (t = 1.6) and the spread at t = 2.0 (-4.45 
 cascade regime. Gate on the peak metric: MET for dt in [0.0025, 0.01], shrink x0.5..x2, mu 0.3..0.8,
 n = 96..160 at rho_s = 8, nu = 0.1. Still open: rho_s = 2, other viscosities, Bingham, post-peak
 trajectory (use dt <= 0.005).
+
+### E8e fluid sweep (2026-10-05)
+
+`--newton --split`, dt = 0.005, shrink 1.5e-3 m, mu = 0.5; n = 96 (d/dx 7) vs n = 128 (d/dx 9.3).
+Peak gravity moment (n=96 / n=128):
+
+| rho_s | nu | peak | difference |
+|---|---|---|---|
+| 2 | 0.1 | -1.052 / -1.059 | 0.6 % |
+| 8 | 1.0 (slurry-like) | -7.10 / -7.22 | 1.7 % |
+| 8 | 0.01 (water-like) | NaN / NaN | both runs fail by t = 0.4 |
+
+At rho_s = 2 and nu = 1 the peak is grid-converged within the +-3 % gate (trajectories agree to
+~2 % up to t = 1.2; after the peak they diverge as in the nu = 0.1 case). At nu = 0.01 the run goes
+NaN at both resolutions (vmax ~ 2.6 m/s, persistent pair overlap -1.9e-3 m with the split contact
+list reporting 0 coupled contacts): the water-like regime is NOT met and joins E2 (high-Re /
+free-surface jet robustness) as an open item. Bingham not yet run.
