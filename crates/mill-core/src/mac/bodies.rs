@@ -396,8 +396,9 @@ fn anderson_step(hist: &[(Vec<f64>, Vec<f64>)], alpha: f64) -> Vec<f64> {
         }
         for r in c + 1..m {
             let f = a[r][c] / a[c][c];
-            for k in c..m {
-                a[r][k] -= f * a[c][k];
+            let pivot_row = a[c].clone();
+            for (x, p) in a[r].iter_mut().zip(&pivot_row).skip(c) {
+                *x -= f * p;
             }
             b[r] -= f * b[c];
         }

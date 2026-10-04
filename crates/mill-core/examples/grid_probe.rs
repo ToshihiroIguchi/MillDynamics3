@@ -1687,7 +1687,6 @@ fn e8a() {
         }
     }
     if args.iter().any(|a| a == "--noise") {
-        let dt = dt;
         let base: Vec<Disc> = bodies
             .iter()
             .map(|b| Disc {
