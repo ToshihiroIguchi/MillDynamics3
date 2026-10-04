@@ -1653,7 +1653,11 @@ fn e8a() {
     let verbose = args.iter().any(|a| a == "--verbose");
     let (mut sum_w, mut sum_g, mut cnt) = (0.0, 0.0, 0usize);
     for s in 1..=steps {
-        let info = bf.step_coupled_many(&mut bodies, &ext, &setup, dt, 1e-3, 40);
+        let info = if args.iter().any(|a| a == "--newton") {
+            bf.step_newton(&mut bodies, &ext, dt, 1e-3, 20)
+        } else {
+            bf.step_coupled_many(&mut bodies, &ext, &setup, dt, 1e-3, 40)
+        };
         let tg: f64 = bodies.iter().map(|b| -force * b.disc.cx).sum();
         if s as f64 * dt > 0.5 * t_end {
             sum_w += info.wall_torque;

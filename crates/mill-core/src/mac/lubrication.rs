@@ -40,6 +40,13 @@ pub fn squeeze_coefficient(k1: f64, k2: f64, h: f64, nu: f64) -> f64 {
     3.0 * 2f64.sqrt() * PI * nu * r.powf(1.5) / h.powf(1.5) * (1.0 + c1 * eps + c2 * eps * eps)
 }
 
+/// Shear (Couette) damping of a sliding film: force per unit relative surface speed,
+/// `nu pi sqrt(2 r / h)` with `r = 1 / (k1 + k2)` (leading order for small gaps).
+pub fn tangential_coefficient(k1: f64, k2: f64, h: f64, nu: f64) -> f64 {
+    let r = 1.0 / (k1 + k2);
+    nu * PI * (2.0 * r / h).sqrt()
+}
+
 /// Weight of the model in the blend, `0` for gaps of at least `H_START` cells and `1` below
 /// `H_FULL` cells (smoothstep in between).
 pub fn model_weight(h: f64, dx: f64) -> f64 {
@@ -140,6 +147,8 @@ pub struct Link {
     pub n: (f64, f64),
     pub weight: f64,
     pub c: f64,
+    /// Shear coefficient (force per unit tangential slip speed, before `weight`).
+    pub ct: f64,
     pub gap: f64,
 }
 
@@ -163,6 +172,12 @@ pub fn links(centres: &[(f64, f64)], radii: &[f64], drum: f64, dx: f64, nu: f64)
                 weight: 1.0 - resolved_ratio(gap / dx),
                 c: squeeze_coefficient(disc_curvature(radii[i]), disc_curvature(radii[j]), h, nu),
                 gap,
+                ct: tangential_coefficient(
+                    disc_curvature(radii[i]),
+                    disc_curvature(radii[j]),
+                    h,
+                    nu,
+                ),
             });
         }
         let (cx, cy) = centres[i];
@@ -177,6 +192,7 @@ pub fn links(centres: &[(f64, f64)], radii: &[f64], drum: f64, dx: f64, nu: f64)
                 weight: 1.0 - resolved_ratio(gap / dx),
                 c: squeeze_coefficient(disc_curvature(radii[i]), wall_curvature(drum), h, nu),
                 gap,
+                ct: tangential_coefficient(disc_curvature(radii[i]), wall_curvature(drum), h, nu),
             });
         }
     }

@@ -823,3 +823,27 @@ Results (n = 128, d/dx = 9.3, nu = 0.1, omega = 2, 12 discs, dt = 0.005):
 
 Verdict: stop rule reached (two targeted fixes). The contact model works for a free cluster, but the
 fixed-point coupling cannot handle a jammed pile. No +-3 % statement yet.
+
+
+## E8c — Newton coupling of all bodies and tangential lubrication (2026-10-04)
+
+`BodyFlow::step_newton` (+ `mac/newton.rs`): one Newton iteration on all body velocities `(ux, uy,
+r omega)`; the fluid load is linearised with a dense, symmetrised Jacobian (finite differences every
+8 steps, Broyden updates between) and the dense system with the squeeze-film links, the one-sided
+contacts (active set), Coulomb friction (stick/slip set) and the new tangential film shear
+(`lubrication::tangential_coefficient`, `nu pi sqrt(2 r / h)`, weighted like the normal film) is solved
+exactly; step cap 0.3 m/s per iteration. Probe: `grid_probe --exp E8a --newton`.
+
+- Light discs (rho_s = 2, 1.2 s): Newton and fixed-point coupling agree (gravity moment -1.0347 vs
+  -1.0360, 0.1 %), cost about equal.
+- Heavy pile (rho_s = 8, mu = 0 and 0.5): still NaN. Time of failure: 1.0 s (no tangential film) ->
+  1.14 s (with it) -> ~1.1 s (symmetrised Jacobian, step cap). A finite-difference Jacobian at every step
+  (1 h run) fails at the same time, so staleness of K is not the cause; the iteration stops
+  converging (residual 1-5 for 20 iterations) while the pile slides up the wall with gaps of
+  2e-5..5e-5 m = 0.003 dx, i.e. far below the grid scale, where the model is a sum of lubrication
+  laws (sub-grid) and one-sided contacts, a non-smooth system.
+- Before the tangential film was added the discs spun at 10-15 rad/s even with mu = 0; this is gone.
+
+Verdict: stop rule reached again. Open causes: non-smooth active-set cycling, accuracy of the
+tangential/rotational film at gaps << dx (only the leading Couette term, not calibrated against the
+exact bipolar solution as the normal film was), the unresolved fluid in the pores of a pile.

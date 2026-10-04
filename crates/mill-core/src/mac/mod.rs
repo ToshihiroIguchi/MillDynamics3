@@ -11,6 +11,7 @@ pub mod flow;
 pub mod levelset;
 pub mod lubrication;
 pub mod multigrid;
+pub mod newton;
 pub mod reference;
 pub mod rheology;
 pub mod staggered;

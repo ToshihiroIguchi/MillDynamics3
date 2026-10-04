@@ -139,6 +139,8 @@ pub struct BodyFlow {
     pub tol_scale: f64,
     /// Solid contact below the lubrication film (None: lubrication only).
     pub contact: Option<super::contact::ContactParams>,
+    /// Jacobian of the resolved fluid loads, kept between Newton steps.
+    jacobian: Option<Jacobian>,
     /// Torque of the fluid on the drum wall in the last trial (per unit density).
     wall_torque: std::cell::Cell<f64>,
 }
@@ -157,6 +159,7 @@ impl BodyFlow {
             drum_omega: 0.0,
             tol_scale: 1.0,
             contact: None,
+            jacobian: None,
             wall_torque: std::cell::Cell::new(0.0),
         }
     }
@@ -902,6 +905,252 @@ impl BodyFlow {
                 ..bodies[i].disc
             };
         }
+        CoupledManyInfo {
+            iterations,
+            residual,
+            loads,
+            links: lk.len(),
+            contacts: contact_list.len(),
+            wall_torque: self.wall_torque.get(),
+        }
+    }
+}
+
+/// Dense `-dF/dV` of the resolved fluid loads with respect to the body velocities `(ux, uy, r omega)`.
+struct Jacobian {
+    k: Vec<f64>,
+    age: usize,
+}
+
+/// Steps between full finite-difference refreshes of the fluid Jacobian.
+const JACOBIAN_REFRESH: usize = 8;
+/// Velocity perturbation (m/s) of the finite-difference Jacobian.
+const JACOBIAN_EPS: f64 = 0.02;
+/// Largest change of one velocity component (m/s) in a single Newton iteration.
+const NEWTON_MAX_STEP: f64 = 0.3;
+
+/// The fluid resistance is symmetric (Stokes reciprocity); remove the finite-difference noise.
+fn symmetrise(k: &mut [f64], n: usize) {
+    for r in 0..n {
+        for c in r + 1..n {
+            let m = 0.5 * (k[r * n + c] + k[c * n + r]);
+            k[r * n + c] = m;
+            k[c * n + r] = m;
+        }
+    }
+}
+
+impl BodyFlow {
+    /// Fluid loads in the unknowns' units: force and torque / radius.
+    fn scaled_loads(raw: &[(f64, f64, f64)], radii: &[f64]) -> Vec<f64> {
+        raw.iter()
+            .zip(radii)
+            .flat_map(|(l, r)| [l.0, l.1, l.2 / r])
+            .collect()
+    }
+
+    /// As `step_coupled_many`, but a Newton iteration on all body velocities at once: the fluid
+    /// response is linearised with a dense Jacobian (finite differences every few steps, Broyden
+    /// updates in between) and the linear system with the squeeze films, the one-sided contacts
+    /// and the friction is solved exactly, so that a jammed, stiffly coupled pile converges.
+    pub fn step_newton(
+        &mut self,
+        bodies: &mut [Body],
+        external: &[(f64, f64, f64)],
+        dt: f64,
+        tol: f64,
+        max_iter: usize,
+    ) -> CoupledManyInfo {
+        use super::newton::{solve_step, StepData};
+        let nb = bodies.len();
+        let n = 3 * nb;
+        let dx = 2.0 * self.half / self.n as f64;
+        let radii: Vec<f64> = bodies.iter().map(|b| b.disc.r).collect();
+        let masses: Vec<f64> = bodies.iter().map(|b| b.mass).collect();
+        let pos: Vec<(f64, f64)> = bodies
+            .iter()
+            .map(|b| {
+                (
+                    b.disc.cx + dt * (b.disc.ux + 0.5 * dt * b.accel.0),
+                    b.disc.cy + dt * (b.disc.uy + 0.5 * dt * b.accel.1),
+                )
+            })
+            .collect();
+        let start: Vec<f64> = bodies
+            .iter()
+            .flat_map(|b| [b.disc.ux, b.disc.uy, b.disc.r * b.disc.omega])
+            .collect();
+        let mass: Vec<f64> = bodies
+            .iter()
+            .flat_map(|b| [b.mass, b.mass, b.inertia / (b.disc.r * b.disc.r)])
+            .collect();
+        let ext: Vec<f64> = external
+            .iter()
+            .zip(&radii)
+            .flat_map(|(e, r)| [e.0, e.1, e.2 / r])
+            .collect();
+        let lk = if self.lubrication {
+            super::lubrication::links(&pos, &radii, self.drum_radius, dx, self.nu)
+        } else {
+            Vec::new()
+        };
+        let contact_list = match &self.contact {
+            Some(p) => super::contact::contacts(&pos, &radii, &masses, self.drum_radius, p),
+            None => Vec::new(),
+        };
+        let wall_speed = self.drum_omega * self.drum_radius;
+        let discs_of = |v: &[f64]| -> Vec<Disc> {
+            (0..nb)
+                .map(|i| Disc {
+                    cx: pos[i].0,
+                    cy: pos[i].1,
+                    ux: v[3 * i],
+                    uy: v[3 * i + 1],
+                    omega: v[3 * i + 2] / radii[i],
+                    ..bodies[i].disc
+                })
+                .collect()
+        };
+        let mut v: Vec<f64> = (0..n)
+            .map(|k| match k % 3 {
+                0 => start[k] + dt * bodies[k / 3].accel.0,
+                1 => start[k] + dt * bodies[k / 3].accel.1,
+                _ => start[k],
+            })
+            .collect();
+        let refresh = std::env::var("MILL_JAC_REFRESH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(JACOBIAN_REFRESH);
+        let mut jac = self
+            .jacobian
+            .take()
+            .filter(|j| j.k.len() == n * n && j.age < refresh);
+        let mut mesh = self.build_mesh(&discs_of(&v));
+        let mut prev: Option<(Vec<f64>, Vec<f64>)> = None;
+        let mut result = None;
+        let mut best = f64::INFINITY;
+        let mut alpha = 1.0f64;
+        for it in 1..=max_iter {
+            let discs = discs_of(&v);
+            let (raw, div, state) = self.trial_many_on(&mut mesh, &discs, dt);
+            let f = Self::scaled_loads(&raw, &radii);
+            if jac.is_none() {
+                let mut k = vec![0.0; n * n];
+                for col in 0..n {
+                    let mut vp = v.clone();
+                    vp[col] += JACOBIAN_EPS;
+                    let (rp, _, _) = self.trial_many_on(&mut mesh, &discs_of(&vp), dt);
+                    let fp = Self::scaled_loads(&rp, &radii);
+                    for row in 0..n {
+                        k[row * n + col] = -(fp[row] - f[row]) / JACOBIAN_EPS;
+                    }
+                }
+                symmetrise(&mut k, n);
+                jac = Some(Jacobian { k, age: 0 });
+            } else if let (Some((pv, pf)), Some(j)) = (&prev, jac.as_mut()) {
+                // Good Broyden update of K = -dF/dV.
+                let dv: Vec<f64> = (0..n).map(|k| v[k] - pv[k]).collect();
+                let dd: f64 = dv.iter().map(|x| x * x).sum();
+                if dd > 1e-24 {
+                    let y: Vec<f64> = (0..n)
+                        .map(|r| {
+                            -(f[r] - pf[r]) - (0..n).map(|c| j.k[r * n + c] * dv[c]).sum::<f64>()
+                        })
+                        .collect();
+                    for (r, yr) in y.iter().enumerate() {
+                        for (c, dc) in dv.iter().enumerate() {
+                            j.k[r * n + c] += yr * dc / dd;
+                        }
+                    }
+                    symmetrise(&mut j.k, n);
+                }
+            }
+            let k = &jac.as_ref().expect("jacobian").k;
+            let data = StepData {
+                nb,
+                mass: &mass,
+                dt,
+                start: &start,
+                fluid: &f,
+                stiffness: k,
+                point: &v,
+                external: &ext,
+                links: &lk,
+                contacts: &contact_list,
+                params: self.contact,
+                wall_speed,
+            };
+            let Some(vnew) = solve_step(&data, &v) else {
+                result = Some((it, f64::INFINITY, raw, div, state));
+                break;
+            };
+            let mut residual = 0.0f64;
+            for i in 0..nb {
+                let b = 3 * i;
+                let dist = |a: &[f64], c: &[f64]| {
+                    (0..3)
+                        .map(|q| (a[b + q] - c[b + q]).powi(2))
+                        .sum::<f64>()
+                        .sqrt()
+                };
+                let speed = (0..3).map(|q| vnew[b + q].powi(2)).sum::<f64>().sqrt();
+                let scale = dist(&vnew, &start).max(0.05 * speed).max(1e-12);
+                residual = residual.max(dist(&vnew, &v) / scale);
+            }
+            if std::env::var_os("MILL_DEBUG_ITER").is_some() {
+                eprintln!("    newton it {it}: residual {residual:.3e} alpha {alpha}");
+            }
+            prev = Some((v.clone(), f));
+            if residual > 2.0 * best && it >= 3 {
+                alpha = (alpha * 0.5).max(0.1);
+            } else if residual < best {
+                best = residual;
+            }
+            // Trust region: no velocity component moves by more than `NEWTON_MAX_STEP` per iteration.
+            let big = (0..n).map(|q| (vnew[q] - v[q]).abs()).fold(0.0, f64::max);
+            let cap = if big > NEWTON_MAX_STEP {
+                NEWTON_MAX_STEP / big
+            } else {
+                1.0
+            };
+            for q in 0..n {
+                v[q] += alpha * cap * (vnew[q] - v[q]);
+            }
+            result = Some((it, residual, raw, div, state));
+            if residual < tol {
+                break;
+            }
+        }
+        let (iterations, residual, raw, div, state) = result.expect("at least one iteration");
+        if let Some(mut j) = jac {
+            j.age = if iterations > 6 { refresh } else { j.age + 1 };
+            self.jacobian = Some(j);
+        }
+        self.commit(state, mesh);
+        for i in 0..nb {
+            bodies[i].accel = (
+                (v[3 * i] - start[3 * i]) / dt,
+                (v[3 * i + 1] - start[3 * i + 1]) / dt,
+            );
+            bodies[i].disc = Disc {
+                cx: pos[i].0,
+                cy: pos[i].1,
+                ux: v[3 * i],
+                uy: v[3 * i + 1],
+                omega: v[3 * i + 2] / radii[i],
+                ..bodies[i].disc
+            };
+        }
+        let loads = raw
+            .iter()
+            .map(|l| BodyLoad {
+                fx: l.0,
+                fy: l.1,
+                torque: l.2,
+                divergence: div,
+            })
+            .collect();
         CoupledManyInfo {
             iterations,
             residual,
