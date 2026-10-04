@@ -1000,3 +1000,24 @@ At rho_s = 2 and nu = 1 the peak is grid-converged within the +-3 % gate (trajec
 NaN at both resolutions (vmax ~ 2.6 m/s, persistent pair overlap -1.9e-3 m with the split contact
 list reporting 0 coupled contacts): the water-like regime is NOT met and joins E2 (high-Re /
 free-surface jet robustness) as an open item. Bingham not yet run.
+
+#### E8e low-viscosity diagnosis (2026-10-05)
+
+Setup as the fluid sweep (`--newton --split`, rho_s = 8, mu = 0.5, n = 96, shrink 0.131 dx). Boundary and
+switches at nu = 0.01 (water-like):
+
+| variant | result |
+|---|---|
+| nu = 0.03 | runs, gravity moment -7.72 at t = 1.0 |
+| nu = 0.01 | NaN at t ~ 0.3-0.4 |
+| nu = 0.01, dt = 0.0025 | NaN earlier (t < 0.2) |
+| nu = 0.01, mu = 0 or 0.1 | NaN at t ~ 0.3 (friction is not the cause) |
+| nu = 0.01, central advection (`--central`) | NaN (the WENO scheme is not the cause) |
+| nu = 0.01, Jacobian refreshed every step | NaN at t ~ 0.35 (Jacobian staleness is not the cause) |
+
+Mechanism seen in the per-disc dump: the pile slides along the bottom of the drum at about the wall
+speed (1 m/s) with wall gaps of order -1e-4 m, disc spins chatter in sign from step to step (|w| up to
+6 rad/s, then growing to 1e2 rad/s), and the Newton solve stops converging (residual ~1 at 20
+iterations) a few steps before the NaN. At nu = 0.1 the film damps the spins and the same setup is
+stable. So the water-like regime is not met; the likely cause is the non-smooth (sub-grid gap, 1/sqrt(h)
+film) response combined with weak viscous damping, which a linear fluid Jacobian cannot represent.
