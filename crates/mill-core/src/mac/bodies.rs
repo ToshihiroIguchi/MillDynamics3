@@ -706,13 +706,23 @@ impl BodyFlow {
                 )
             })
             .collect();
+        let fk = match &self.contact {
+            Some(p) if p.mu > 0.0 => super::contact::friction_preconditioner(&contact_list, nb, dt),
+            _ => vec![(0.0, 0.0); nb],
+        };
         let mut kx: Vec<f64> = setup
             .iter()
-            .map(|s| s.added_mass / dt + s.drag_stiffness)
+            .zip(&fk)
+            .map(|(s, f)| s.added_mass / dt + s.drag_stiffness + f.0)
             .collect();
         let mut ky = kx.clone();
         let k0 = kx.clone();
-        let mut kw: Vec<f64> = setup.iter().map(|s| s.spin_stiffness).collect();
+        let mut kw: Vec<f64> = setup
+            .iter()
+            .zip(&fk)
+            .map(|(s, f)| s.spin_stiffness + f.1)
+            .collect();
+        let kw0 = kw.clone();
         type Iterate = (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>);
         let mut last: Option<Iterate> = None;
         let mut result = None;
@@ -790,10 +800,7 @@ impl BodyFlow {
                     let dw = vel[i].2 - pvel[i].2;
                     let kk = -(total[i].2 - ptot[i].2) / dw;
                     if dw.abs() > 1e-9 * (1.0 + vel[i].2.abs()) && kk.is_finite() && kk > 0.0 {
-                        kw[i] = kk.clamp(
-                            0.1 * setup[i].spin_stiffness,
-                            100.0 * setup[i].spin_stiffness.max(1e-12),
-                        );
+                        kw[i] = kk.clamp(0.1 * kw0[i], 100.0 * kw0[i].max(1e-12));
                     }
                 }
             }

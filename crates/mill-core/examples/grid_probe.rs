@@ -1634,7 +1634,7 @@ fn e8a() {
     let mu = get("--mu", -1.0);
     if mu >= 0.0 {
         bf.contact = Some(mill_core::mac::contact::ContactParams {
-            gap0: get("--gap0", 0.01) * a,
+            gap0: get("--gap0", 0.05) * a,
             beta: get("--beta", 0.2),
             mu,
         });
@@ -1680,6 +1680,20 @@ fn e8a() {
                 "  s={s} wall gap {:.2e} pair gap {:.2e} vmax {:.3} iters {} res {:.1e} links {} contacts {}",
                 wg, pg, vmax, info.iterations, info.residual, info.links, info.contacts
             );
+        }
+        if verbose
+            && std::env::var_os("E8_DUMP_FROM").is_some_and(|v| {
+                v.to_str()
+                    .and_then(|t| t.parse::<usize>().ok())
+                    .is_some_and(|f| s >= f)
+            })
+        {
+            for (k, b) in bodies.iter().enumerate() {
+                println!(
+                    "    b{k} x {:.5} y {:.5} u {:.4} v {:.4} w {:.3}",
+                    b.disc.cx, b.disc.cy, b.disc.ux, b.disc.uy, b.disc.omega
+                );
+            }
         }
         if s % report == 0 || s == steps {
             let m = bodies.len() as f64;

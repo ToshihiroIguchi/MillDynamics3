@@ -6,12 +6,15 @@
 //! with a Baumgarte-type push-out of the penetration, solved with the lubrication links) and
 //! Coulomb friction with a regularised stick (explicit in the coupling iteration).
 
+/// Penalty stiffness of the normal constraint relative to `m_eff / dt`.
+pub const STIFFNESS: f64 = 100.0;
+
 /// Material parameters of a contact.
 #[derive(Clone, Copy, Debug)]
 pub struct ContactParams {
-    /// Roughness gap (m) below which solid contact starts.
+    /// Gap (m) below which a contact is considered (the constraint itself acts at gap 0).
     pub gap0: f64,
-    /// Fraction of the penetration removed per step.
+    /// Fraction of an existing overlap removed per step.
     pub beta: f64,
     /// Coulomb friction coefficient (0 disables friction).
     pub mu: f64,
@@ -24,8 +27,8 @@ pub struct Contact {
     pub j: Option<usize>,
     /// Unit vector from `i` towards the partner (outward for the wall).
     pub n: (f64, f64),
-    /// Penetration below `gap0` (m, >= 0).
-    pub depth: f64,
+    /// Surface gap (m); negative when overlapping.
+    pub gap: f64,
     /// Effective mass (per unit density) of the pair.
     pub m_eff: f64,
     pub ri: f64,
@@ -53,7 +56,7 @@ pub fn contacts(
                 i,
                 j: Some(j),
                 n: (ex / dist, ey / dist),
-                depth: p.gap0 - gap,
+                gap,
                 m_eff: masses[i] * masses[j] / (masses[i] + masses[j]),
                 ri: radii[i],
                 rj: radii[j],
@@ -67,7 +70,7 @@ pub fn contacts(
                 i,
                 j: None,
                 n: (cx / dist, cy / dist),
-                depth: p.gap0 - gap,
+                gap,
                 m_eff: masses[i],
                 ri: radii[i],
                 rj: 0.0,
@@ -85,13 +88,20 @@ impl Contact {
         (vi.0 - vj.0) * self.n.0 + (vi.1 - vj.1) * self.n.1
     }
 
-    /// Normal push-out speed target (m/s) and dashpot coefficient for a step of `dt`.
+    /// Push-out speed (m/s): the contact allows an approach of at most `gap / dt` (no overlap at
+    /// the end of the step) and removes a fraction `beta` of an existing overlap per step.
     pub fn push_out(&self, beta: f64, dt: f64) -> f64 {
-        beta * self.depth / dt
+        if self.gap >= 0.0 {
+            -self.gap / dt
+        } else {
+            -beta * self.gap / dt
+        }
     }
 
+    /// Stiffness of the normal constraint (force per unit speed beyond the allowed approach):
+    /// `STIFFNESS` times the mass that stops in one step.
     pub fn dashpot(&self, dt: f64) -> f64 {
-        self.m_eff / dt
+        STIFFNESS * self.m_eff / dt
     }
 
     /// Tangential slip speed at the contact point; `wall_speed` is the drum surface speed
@@ -107,6 +117,28 @@ impl Contact {
             None => vi.0 * t.0 + vi.1 * t.1 + self.ri * vi.2 - wall_speed,
         }
     }
+}
+
+/// Stiffness of the regularised friction (force per unit slip speed).
+pub fn friction_stiffness(c: &Contact, dt: f64) -> f64 {
+    0.5 * c.m_eff / dt
+}
+
+/// Per-disc linear stiffness `(translation, rotation)` of the friction of all contacts; it is added
+/// to the coupling's preconditioner so that the explicit friction does not make the fixed point
+/// overshoot.
+pub fn friction_preconditioner(list: &[Contact], count: usize, dt: f64) -> Vec<(f64, f64)> {
+    let mut out = vec![(0.0, 0.0); count];
+    for c in list {
+        let k = friction_stiffness(c, dt);
+        out[c.i].0 += k;
+        out[c.i].1 += c.ri * c.ri * k;
+        if let Some(j) = c.j {
+            out[j].0 += k;
+            out[j].1 += c.rj * c.rj * k;
+        }
+    }
+    out
 }
 
 /// Contact forces and torques on every disc for the velocities `v`: Coulomb friction with a
@@ -128,7 +160,7 @@ pub fn friction_loads(
         if fnorm <= 0.0 {
             continue;
         }
-        let kappa = 0.5 * c.m_eff / dt;
+        let kappa = friction_stiffness(c, dt);
         let slip = c.slip(v, wall_speed);
         let ft = (kappa * slip).clamp(-p.mu * fnorm, p.mu * fnorm);
         let t = (-c.n.1, c.n.0);
