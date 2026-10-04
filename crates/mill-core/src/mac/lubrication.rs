@@ -40,11 +40,15 @@ pub fn squeeze_coefficient(k1: f64, k2: f64, h: f64, nu: f64) -> f64 {
     3.0 * 2f64.sqrt() * PI * nu * r.powf(1.5) / h.powf(1.5) * (1.0 + c1 * eps + c2 * eps * eps)
 }
 
-/// Shear (Couette) damping of a sliding film: force per unit relative surface speed,
-/// `nu pi sqrt(2 r / h)` with `r = 1 / (k1 + k2)` (leading order for small gaps).
+/// Tangential film scale `K = 2 pi nu sqrt(2 r / h)` with `r = 1 / (k1 + k2)`: the leading term of
+/// the exact bipolar-coordinate solution for a cylinder next to a wall (Jeffrey and Onishi,
+/// `F = 2^(3/2) pi mu U sqrt(a / h)`). Derived from the lubrication film with zero net pressure:
+/// in the frame of the contact point the force on surface `i` is `K (phi_i (V_i + V_j) - V_i)`
+/// and the torque `-K r_i V_i` (surface speeds `V` relative to the contact point, `phi_i = k_i /
+/// (k_i + k_j)`); see `newton.rs`.
 pub fn tangential_coefficient(k1: f64, k2: f64, h: f64, nu: f64) -> f64 {
     let r = 1.0 / (k1 + k2);
-    nu * PI * (2.0 * r / h).sqrt()
+    2.0 * nu * PI * (2.0 * r / h).sqrt()
 }
 
 /// Weight of the model in the blend, `0` for gaps of at least `H_START` cells and `1` below
@@ -149,6 +153,8 @@ pub struct Link {
     pub c: f64,
     /// Shear coefficient (force per unit tangential slip speed, before `weight`).
     pub ct: f64,
+    /// Curvature share `phi_i = k_i / (k_i + k_j)` of body `i` in the film geometry.
+    pub phi: f64,
     pub gap: f64,
 }
 
@@ -172,6 +178,7 @@ pub fn links(centres: &[(f64, f64)], radii: &[f64], drum: f64, dx: f64, nu: f64)
                 weight: 1.0 - resolved_ratio(gap / dx),
                 c: squeeze_coefficient(disc_curvature(radii[i]), disc_curvature(radii[j]), h, nu),
                 gap,
+                phi: radii[j] / (radii[i] + radii[j]),
                 ct: tangential_coefficient(
                     disc_curvature(radii[i]),
                     disc_curvature(radii[j]),
@@ -192,6 +199,7 @@ pub fn links(centres: &[(f64, f64)], radii: &[f64], drum: f64, dx: f64, nu: f64)
                 weight: 1.0 - resolved_ratio(gap / dx),
                 c: squeeze_coefficient(disc_curvature(radii[i]), wall_curvature(drum), h, nu),
                 gap,
+                phi: disc_curvature(radii[i]) / (disc_curvature(radii[i]) + wall_curvature(drum)),
                 ct: tangential_coefficient(disc_curvature(radii[i]), wall_curvature(drum), h, nu),
             });
         }

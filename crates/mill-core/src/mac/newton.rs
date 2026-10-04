@@ -101,26 +101,50 @@ pub fn solve_step(d: &StepData, guess: &[f64]) -> Option<Vec<f64>> {
             h.push((3 * j + 1, -l.n.1));
         }
         add_rank_one(&mut a0, &mut b0, n, &h, l.weight * l.c, 0.0);
-        // Shear of the film: load -ct (g . v - ws) g with g = (t, 1) on i and (-t, 1) on j.
+        // Tangential film (see `lubrication::tangential_coefficient`): unknowns x = (u_i.t, w_i,
+        // u_j.t, w_j); V_i, V_j are the surface speeds relative to the contact point.
         let t = (-l.n.1, l.n.0);
-        let mut g = vec![(3 * l.i, t.0), (3 * l.i + 1, t.1), (3 * l.i + 2, 1.0)];
-        let ws = match l.j {
+        let (pi, pj) = (l.phi, 1.0 - l.phi);
+        let vi = [1.0 - pi, 1.0, -pj, 0.0];
+        let vj = [-pi, 0.0, pi, -1.0];
+        let mut row = [[0.0f64; 4]; 4];
+        for c in 0..4 {
+            row[0][c] = pi * (vi[c] + vj[c]) - vi[c];
+            row[1][c] = -vi[c];
+            row[2][c] = -row[0][c];
+            row[3][c] = vj[c];
+        }
+        let mut gs: Vec<Vec<(usize, f64)>> = vec![
+            vec![(3 * l.i, t.0), (3 * l.i + 1, t.1)],
+            vec![(3 * l.i + 2, 1.0)],
+        ];
+        // Constant parts of V_j (wall surface speed) enter the force on i and the torque of j.
+        let mut cst = [0.0f64; 4];
+        let nx = match l.j {
             Some(j) => {
-                g.push((3 * j, -t.0));
-                g.push((3 * j + 1, -t.1));
-                g.push((3 * j + 2, 1.0));
-                0.0
+                gs.push(vec![(3 * j, t.0), (3 * j + 1, t.1)]);
+                gs.push(vec![(3 * j + 2, 1.0)]);
+                4
             }
-            None => d.wall_speed,
+            None => {
+                cst[0] = pi * d.wall_speed;
+                cst[3] = d.wall_speed;
+                2
+            }
         };
-        add_rank_one(
-            &mut a0,
-            &mut b0,
-            n,
-            &g,
-            l.weight * l.ct,
-            l.weight * l.ct * ws,
-        );
+        let k = l.weight * l.ct;
+        for r in 0..nx {
+            for c in 0..nx {
+                for &(p, cp) in &gs[r] {
+                    for &(q, cq) in &gs[c] {
+                        a0[p * n + q] -= k * row[r][c] * cp * cq;
+                    }
+                }
+            }
+            for &(p, cp) in &gs[r] {
+                b0[p] += k * cst[r] * cp;
+            }
+        }
     }
     let Some(p) = d.params else {
         let mut a = a0;

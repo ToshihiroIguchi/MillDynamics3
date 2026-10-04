@@ -1023,9 +1023,12 @@ impl BodyFlow {
         } else {
             Vec::new()
         };
+        let split = self.split_contact && self.contact.is_some();
         let contact_list = match &self.contact {
-            Some(p) => super::contact::contacts(&pos, &radii, &masses, self.drum_radius, p),
-            None => Vec::new(),
+            Some(p) if !split => {
+                super::contact::contacts(&pos, &radii, &masses, self.drum_radius, p)
+            }
+            _ => Vec::new(),
         };
         let wall_speed = self.drum_omega * self.drum_radius;
         let discs_of = |v: &[f64]| -> Vec<Disc> {
@@ -1036,7 +1039,7 @@ impl BodyFlow {
                     ux: v[3 * i],
                     uy: v[3 * i + 1],
                     omega: v[3 * i + 2] / radii[i],
-                    ..bodies[i].disc
+                    r: radii[i] - self.hydro_shrink * dx,
                 })
                 .collect()
         };
@@ -1107,7 +1110,7 @@ impl BodyFlow {
                 external: &ext,
                 links: &lk,
                 contacts: &contact_list,
-                params: self.contact,
+                params: if split { None } else { self.contact },
                 wall_speed,
             };
             let Some(vnew) = solve_step(&data, &v) else {
@@ -1157,6 +1160,29 @@ impl BodyFlow {
             self.jacobian = Some(j);
         }
         self.commit(state, mesh);
+        let mut pos = pos;
+        let mut split_contacts = 0;
+        if let (true, Some(p)) = (split, self.contact) {
+            let x0: Vec<(f64, f64)> = bodies.iter().map(|b| (b.disc.cx, b.disc.cy)).collect();
+            let mut vel: Vec<(f64, f64, f64)> = (0..nb)
+                .map(|i| (v[3 * i], v[3 * i + 1], v[3 * i + 2] / radii[i]))
+                .collect();
+            let vmax = vel.iter().map(|w| w.0.hypot(w.1)).fold(0.0f64, f64::max);
+            let reach = super::contact::ContactParams {
+                gap0: p.gap0 + 2.0 * dt * vmax,
+                ..p
+            };
+            let list = super::contact::contacts(&x0, &radii, &masses, self.drum_radius, &reach);
+            let inertia: Vec<f64> = bodies.iter().map(|b| b.inertia).collect();
+            super::contact::project(&list, &mut vel, &masses, &inertia, &p, dt, wall_speed, 200);
+            split_contacts = list.len();
+            for i in 0..nb {
+                pos[i] = (x0[i].0 + dt * vel[i].0, x0[i].1 + dt * vel[i].1);
+                v[3 * i] = vel[i].0;
+                v[3 * i + 1] = vel[i].1;
+                v[3 * i + 2] = radii[i] * vel[i].2;
+            }
+        }
         for i in 0..nb {
             bodies[i].accel = (
                 (v[3 * i] - start[3 * i]) / dt,
@@ -1185,7 +1211,7 @@ impl BodyFlow {
             residual,
             loads,
             links: lk.len(),
-            contacts: contact_list.len(),
+            contacts: contact_list.len() + split_contacts,
             wall_torque: self.wall_torque.get(),
         }
     }

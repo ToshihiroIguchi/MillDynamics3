@@ -916,3 +916,45 @@ the tangential film is the uncalibrated part: the sliding resistance of the pile
 speed, is set there. Conclusion: the tangential film calibration (needs a trusted reference) is the
 blocking item for any +-3 % statement on the dynamic pile; further grid or dt sweeps before it would
 only re-measure the same scatter.
+
+
+## E8e — calibrated tangential film, Newton path with split contacts (2026-10-04)
+
+Finding: the tangential film existed only in the Newton path (`newton.rs`); every earlier
+`step_coupled_many` pile run (E8b, E8d tables above) had NO tangential film, and its grid scatter
+was the missing sliding/spin resistance.
+
+Derivation (2D lubrication, film `h = h0 + x^2/(2 r)`, `r = 1/(k_i + k_j)`, unbounded fluid so
+`int p' dx = 0`, steady in the frame of the contact point): flux `Q = (2/3)(V_i + V_j) h0`, and with
+`K = 2 pi nu sqrt(2 r / h0)` the tangential force on surface `i` is `K (phi_i (V_i + V_j) - V_i)`
+(`phi_i = k_i / (k_i + k_j)`), the force on `j` is minus that (no net film force), and the torque on
+`i` is `-K r_i V_i` (pressure acts through the centre). `V` are surface speeds relative to the
+contact point `c = phi_i u_i + phi_j u_j` (tangential). For a cylinder next to a flat wall this gives
+`F = 2 pi mu sqrt(2a/h) U = 2^(3/2) pi mu U sqrt(a/h)`, the leading term of the exact bipolar
+solution (Jeffrey and Onishi 1981), and a torque that depends only on the spin. The resistance matrix
+is symmetric (checked by hand, e.g. `dF_i/dw_j = dT_j/du_i = -K phi_i r_j`). The previous code used
+`nu pi sqrt(2r/h)` on the slip speed only: half the exact scale and wrong coupling.
+The reciprocity of the 4x4 block was checked algebraically, not by a unit test; the 2D
+exact-solution comparison is the asymptote above, not a numerical evaluation of the full series.
+
+Implementation: `lubrication::tangential_coefficient` (2 pi), `Link::phi`, film block in
+`newton::solve_step`; `step_newton` now also supports `split_contact` and `hydro_shrink`.
+
+Heavy pile, `--newton --split --mu 0.5 --rho 8`, constant physical shrink 1.5e-3 m, t = 2 s,
+gravity moment (iterations per step 4-10, no NaN):
+
+| t | n = 96 | n = 110 | n = 128 |
+|---|---|---|---|
+| 0.6 | -5.48 | -5.47 | -5.30 |
+| 1.0 | -7.77 | -7.78 | -7.77 |
+| 1.2 | -8.01 | -8.08 | -8.21 |
+| 1.4 | -7.81 | -7.84 | -8.10 |
+| 2.0 | -4.82 | -4.86 | -5.12 |
+
+Compared with E8d (spread -4.7..-6.7 on the window mean, trajectories not alike) the grid
+dependence is now small: up to t = 1.2 the three grids agree within 3.3 % (peak gravity moment
+-8.01 / -8.08 / -8.21, spread 2.4 %), later up to ~6 % as the pile goes over the top (angle > 2 rad,
+a cascade). The window mean of E8d is not a valid metric here (the pile is a transient); the peak
+gravity moment and the trajectory up to the peak are. Gate: MET for the pre-peak window and the peak
+on n = 96..128 (d/dx = 7..9.3) for rho_s = 8, mu = 0.5, nu = 0.1; NOT yet shown for dt, shrink,
+other mu, rho_s = 2, water / 50 Pa.s / Bingham, or n > 128.
