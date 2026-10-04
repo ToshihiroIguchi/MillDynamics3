@@ -120,6 +120,13 @@ fn open_centroid(phi: &impl Fn(f64, f64) -> f64, p0: (f64, f64), p1: (f64, f64))
         let (x, y) = at(t);
         phi(x, y) < 0.0
     };
+    // A segment farther from the boundary than its own length is entirely on one side
+    // (phi is a distance-like, 1-Lipschitz field): the centroid is the midpoint.
+    let seg = (p1.0 - p0.0).hypot(p1.1 - p0.1);
+    let (mx, my) = at(0.5);
+    if phi(mx, my).abs() > seg {
+        return 0.5;
+    }
     let (mut len, mut mom) = (0.0, 0.0);
     for k in 0..M {
         let (ta, tb) = (k as f64 / M as f64, (k + 1) as f64 / M as f64);
@@ -215,6 +222,13 @@ impl StaggeredMesh {
         const SUB: usize = 8;
         for j in 0..n {
             for i in 0..n {
+                // Cells far from the boundary are entirely in or out (phi is 1-Lipschitz for
+                // the signed-distance-like fields used here, so |phi| > half a diagonal decides).
+                let phi_c = phi(-half + (i as f64 + 0.5) * dx, -half + (j as f64 + 0.5) * dx);
+                if phi_c.abs() > 0.75 * dx {
+                    cell_fraction[i + n * j] = if phi_c < 0.0 { 1.0 } else { 0.0 };
+                    continue;
+                }
                 let mut inside = 0usize;
                 for b in 0..SUB {
                     for a in 0..SUB {
@@ -576,6 +590,8 @@ impl Liquid {
 pub struct StaggeredFlow<'a> {
     pub sm: &'a StaggeredMesh,
     pub nu: f64,
+    /// Multiplier of the linear-solver tolerances (1e-9 relative at 1).
+    pub tol_scale: f64,
     pub u: Vec<f64>,
     pub v: Vec<f64>,
     pub p: Vec<f64>,
@@ -811,6 +827,7 @@ impl<'a> StaggeredFlow<'a> {
         Self {
             sm,
             nu,
+            tol_scale: 1.0,
             u: vec![0.0; n * n],
             v: vec![0.0; n * n],
             p: vec![0.0; n * n],
@@ -964,7 +981,9 @@ impl<'a> StaggeredFlow<'a> {
             }
         }
         let mut phi = vec![0.0; n * n];
-        let st = self.poisson.solve(&rhs, &mut phi, TOL_PROJECT, 300);
+        let st = self
+            .poisson
+            .solve(&rhs, &mut phi, TOL_PROJECT * self.tol_scale, 300);
         self.last_solve = (st.iterations, st.residual);
         let k = dt_eff / dx;
         for j in 0..n {
@@ -1377,6 +1396,8 @@ impl<'a> StaggeredFlow<'a> {
     /// free surface the liquid topology is rebuilt from the level set first, and the level set is
     /// advected with the new velocity at the end.
     pub fn step(&mut self, dt: f64) {
+        let prof = std::env::var_os("MILL_PROFILE").is_some();
+        let t0 = std::time::Instant::now();
         let sm = self.sm;
         let n = sm.n();
         let nn = n * n;
@@ -1437,6 +1458,7 @@ impl<'a> StaggeredFlow<'a> {
                 (self.u, self.v, self.p, self.prev, self.time) = saved.clone();
             }
             let (au, av) = self.advection(&self.u, &self.v);
+            let t_adv = t0.elapsed();
             let (eddy_u, eddy_v) = if self.smagorinsky > 0.0 {
                 self.eddy_acceleration()
             } else {
@@ -1487,6 +1509,7 @@ impl<'a> StaggeredFlow<'a> {
                     sm.gv.helmholtz_masked(sigma, &self.liq.active_v),
                 ));
             }
+            let t_helm = t0.elapsed();
             let flux =
                 (self.surface.is_some() && self.stress_free_flux).then(|| self.free_surface_flux());
             let wv = &self.wall_velocity;
@@ -1567,9 +1590,22 @@ impl<'a> StaggeredFlow<'a> {
                     Some((a, b)) => (Some(&a[..]), Some(&b[..])),
                     None => (None, None),
                 };
-                hu.solve_with_flux(&mut xu, Some(&su), fu, |x, y| wv(x, y).0, TOL_VISCOUS);
-                hv.solve_with_flux(&mut xv, Some(&sv), fv, |x, y| wv(x, y).1, TOL_VISCOUS);
+                hu.solve_with_flux(
+                    &mut xu,
+                    Some(&su),
+                    fu,
+                    |x, y| wv(x, y).0,
+                    TOL_VISCOUS * self.tol_scale,
+                );
+                hv.solve_with_flux(
+                    &mut xv,
+                    Some(&sv),
+                    fv,
+                    |x, y| wv(x, y).1,
+                    TOL_VISCOUS * self.tol_scale,
+                );
             }
+            let t_solve = t0.elapsed();
             self.extend_u(&mut xu);
             self.extend_v(&mut xv);
             self.u_star = xu.clone();
@@ -1580,6 +1616,15 @@ impl<'a> StaggeredFlow<'a> {
             let phi = self.project(dt_eff);
             for (p, f) in self.p.iter_mut().zip(&phi) {
                 *p += f;
+            }
+            if prof {
+                eprintln!(
+                    "STEP adv {:.1} helm-build {:.1} helm-solve {:.1} project {:.1} ms",
+                    t_adv.as_secs_f64() * 1e3,
+                    (t_helm - t_adv).as_secs_f64() * 1e3,
+                    (t_solve - t_helm).as_secs_f64() * 1e3,
+                    (t0.elapsed() - t_solve).as_secs_f64() * 1e3
+                );
             }
             self.prev = Some(old);
             self.time += dt;

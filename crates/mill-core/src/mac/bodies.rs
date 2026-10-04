@@ -135,6 +135,8 @@ pub struct BodyFlow {
     pub lubrication: bool,
     /// Angular velocity of the drum wall (rad/s, counter-clockwise).
     pub drum_omega: f64,
+    /// Multiplier of the fluid solver's linear tolerances in the many-body trials.
+    pub tol_scale: f64,
     /// Torque of the fluid on the drum wall in the last trial (per unit density).
     wall_torque: std::cell::Cell<f64>,
 }
@@ -151,6 +153,7 @@ impl BodyFlow {
             weno: true,
             lubrication: true,
             drum_omega: 0.0,
+            tol_scale: 1.0,
             wall_torque: std::cell::Cell::new(0.0),
         }
     }
@@ -433,6 +436,21 @@ pub struct CoupledManyInfo {
     pub wall_torque: f64,
 }
 
+/// Smallest signed distance to any of the discs; discs that cannot beat the current minimum are
+/// rejected on the squared distance without a square root.
+fn min_sdf(discs: &[Disc], x: f64, y: f64) -> f64 {
+    let mut best = f64::INFINITY;
+    for d in discs {
+        let d2 = (x - d.cx).powi(2) + (y - d.cy).powi(2);
+        let reach = best + d.r;
+        if reach > 0.0 && d2 >= reach * reach {
+            continue;
+        }
+        best = best.min(d2.sqrt() - d.r);
+    }
+    best
+}
+
 /// Nearest-surface velocity of a set of discs at a point (used for wall values and fresh nodes):
 /// distance to the nearest surface and the rigid-body velocity there.
 fn nearest_velocity(discs: &[Disc], x: f64, y: f64) -> (f64, f64, f64) {
@@ -512,68 +530,44 @@ impl BodyFlow {
         discs: &[Disc],
         dt: f64,
     ) -> (Vec<(f64, f64, f64)>, f64, FlowState, StaggeredMesh) {
+        let mut sm = self.build_mesh(discs);
+        let (loads, divergence, state) = self.trial_many_on(&mut sm, discs, dt);
+        (loads, divergence, state, sm)
+    }
+
+    /// Cut-cell mesh of the drum with the given discs removed (geometry only: it depends on the
+    /// disc positions, not on their velocities, so it can be reused while only velocities change).
+    pub fn build_mesh(&self, discs: &[Disc]) -> StaggeredMesh {
         let (n, half, radius) = (self.n, self.half, self.drum_radius);
-        let ds: Vec<Disc> = discs.to_vec();
-        let ds_sdf = ds.clone();
-        let mut sm = StaggeredMesh::new(n, half, move |x, y| {
-            let inner = ds_sdf
-                .iter()
-                .map(|d| d.sdf(x, y))
-                .fold(f64::INFINITY, f64::min);
+        let ds_sdf = discs.to_vec();
+        StaggeredMesh::new(n, half, move |x, y| {
+            let inner = min_sdf(&ds_sdf, x, y);
             ((x * x + y * y).sqrt() - radius).max(-inner)
-        });
+        })
+    }
+
+    /// As `trial_many` on a mesh from `build_mesh` for the same disc positions.
+    pub fn trial_many_on(
+        &self,
+        sm: &mut StaggeredMesh,
+        discs: &[Disc],
+        dt: f64,
+    ) -> (Vec<(f64, f64, f64)>, f64, FlowState) {
+        let radius = self.drum_radius;
+        let ds: Vec<Disc> = discs.to_vec();
         sm.set_body_flux(&ds);
+        let sm: &StaggeredMesh = sm;
         let dx = sm.dx();
-        if std::env::var_os("MILL_DEBUG_POCKETS").is_some() {
-            let nn = sm.n();
-            let mut seen = vec![false; nn * nn];
-            let mut comps = Vec::new();
-            for c0 in 0..nn * nn {
-                if seen[c0] || sm.cell_fraction[c0] <= 0.0 {
-                    continue;
-                }
-                let mut stack = vec![c0];
-                seen[c0] = true;
-                let mut size = 0;
-                while let Some(c) = stack.pop() {
-                    size += 1;
-                    let (i, j) = (c % nn, c / nn);
-                    let mut nb = Vec::new();
-                    if i > 0 && sm.au[c] > 0.0 {
-                        nb.push(c - 1);
-                    }
-                    if i + 1 < nn && sm.au[c + 1] > 0.0 {
-                        nb.push(c + 1);
-                    }
-                    if j > 0 && sm.av[c] > 0.0 {
-                        nb.push(c - nn);
-                    }
-                    if j + 1 < nn && sm.av[c + nn] > 0.0 {
-                        nb.push(c + nn);
-                    }
-                    for q in nb {
-                        if !seen[q] && sm.cell_fraction[q] > 0.0 {
-                            seen[q] = true;
-                            stack.push(q);
-                        }
-                    }
-                }
-                comps.push(size);
-            }
-            if comps.len() > 1 {
-                eprintln!("pockets: component sizes {comps:?}");
-            }
-        }
         let ds_wall = ds.clone();
         let wall =
             |x: f64, y: f64| self.wall_velocity(x, y, dx, Some(nearest_velocity(&ds_wall, x, y)));
         let mut flow = match self.state.clone() {
-            Some(s) => StaggeredFlow::from_state(&sm, s, wall),
+            Some(s) => StaggeredFlow::from_state(sm, s, wall),
             None => {
-                let mut f = StaggeredFlow::new(&sm, self.nu, wall);
+                let mut f = StaggeredFlow::new(sm, self.nu, wall);
                 f.weno = self.weno;
                 f.upwind = self.weno;
-                self.rotate_initial(&mut f, &sm);
+                self.rotate_initial(&mut f, sm);
                 f
             }
         };
@@ -584,6 +578,7 @@ impl BodyFlow {
                 (ux, uy)
             });
         }
+        flow.tol_scale = self.tol_scale;
         flow.step(dt);
         let loads: Vec<(f64, f64, f64)> = discs.iter().map(|d| disc_load(&flow, d)).collect();
         let divergence = flow.projected_divergence;
@@ -592,7 +587,7 @@ impl BodyFlow {
                 .set(flow.rotating_wall_torque_of(self.drum_omega, radius - 0.25 * dx));
         }
         let state = flow.into_state();
-        (loads, divergence, state, sm)
+        (loads, divergence, state)
     }
 
     /// Advances fluid and several discs together over `dt`: like `step_coupled`, a per-body
@@ -649,6 +644,8 @@ impl BodyFlow {
         type Iterate = (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>);
         let mut last: Option<Iterate> = None;
         let mut result = None;
+        // The cut-cell mesh depends on the (predicted, fixed) positions only: built once.
+        let mut mesh: Option<StaggeredMesh> = None;
         // Under-relaxation, halved whenever the residual jumps up (a dense, lubricated cluster
         // can make the plain fixed point diverge); restarts from the best iterate so far.
         let mut alpha = 1.0f64;
@@ -666,7 +663,8 @@ impl BodyFlow {
                     d
                 })
                 .collect();
-            let (raw, div, state, mesh) = self.trial_many(&discs, dt);
+            let mesh = mesh.get_or_insert_with(|| self.build_mesh(&discs));
+            let (raw, div, state) = self.trial_many_on(mesh, &discs, dt);
             if std::env::var_os("MILL_DEBUG_ITER").is_some() {
                 let fm = raw.iter().map(|l| l.0.hypot(l.1)).fold(0.0f64, f64::max);
                 let um = state.u.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -803,13 +801,13 @@ impl BodyFlow {
                     divergence: div,
                 })
                 .collect();
-            result = Some((it, residual, loads, state, mesh));
+            result = Some((it, residual, loads, state));
             if residual < tol {
                 break;
             }
         }
-        let (iterations, residual, loads, state, mesh) = result.expect("at least one iteration");
-        self.commit(state, mesh);
+        let (iterations, residual, loads, state) = result.expect("at least one iteration");
+        self.commit(state, mesh.expect("mesh built"));
         for i in 0..nb {
             bodies[i].accel = ((vel[i].0 - start[i].0) / dt, (vel[i].1 - start[i].1) / dt);
             bodies[i].disc = Disc {

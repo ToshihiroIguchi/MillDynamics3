@@ -16,6 +16,14 @@ pub(super) fn aperture(phi: &impl Fn(f64, f64) -> f64, p0: (f64, f64), p1: (f64,
         let (x, y) = at(t);
         phi(x, y) < 0.0
     };
+    // A segment farther from the boundary than its own length lies entirely on one side
+    // (phi is a distance-like, 1-Lipschitz field).
+    let seg = (p1.0 - p0.0).hypot(p1.1 - p0.1);
+    let (mx, my) = at(0.5);
+    let pm = phi(mx, my);
+    if pm.abs() > seg {
+        return if pm < 0.0 { 1.0 } else { 0.0 };
+    }
     let mut total = 0.0;
     for k in 0..M {
         let (ta, tb) = (k as f64 / M as f64, (k + 1) as f64 / M as f64);

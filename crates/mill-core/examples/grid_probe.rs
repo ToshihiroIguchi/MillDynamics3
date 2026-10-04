@@ -1630,6 +1630,7 @@ fn e8a() {
     ];
     let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
     bf.drum_omega = omega;
+    bf.tol_scale = get("--tol", 1000.0);
     println!(
         "E8a n = {n} (d/dx = {:.1}), nu = {nu}, omega = {omega}, {count} discs a = {a}, dt = {dt}",
         2.0 * a / dx
