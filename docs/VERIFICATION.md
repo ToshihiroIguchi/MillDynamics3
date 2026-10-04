@@ -958,3 +958,28 @@ a cascade). The window mean of E8d is not a valid metric here (the pile is a tra
 gravity moment and the trajectory up to the peak are. Gate: MET for the pre-peak window and the peak
 on n = 96..128 (d/dx = 7..9.3) for rho_s = 8, mu = 0.5, nu = 0.1; NOT yet shown for dt, shrink,
 other mu, rho_s = 2, water / 50 Pa.s / Bingham, or n > 128.
+
+### E8e sensitivity (2026-10-04)
+
+Base case n = 110, dt = 0.005, shrink 1.5e-3 m, mu = 0.5, rho_s = 8, nu = 0.1, `--newton --split`;
+one knob changed per run. Gravity moment:
+
+| run | t=0.6 | t=1.0 | t=1.2 (peak) | t=1.6 | t=2.0 |
+|---|---|---|---|---|---|
+| base (n=110) | -5.47 | -7.78 | -8.08 | -7.31 | -4.86 |
+| dt = 0.0025 | -5.42 | -7.81 | -8.15 | -7.10 | -4.45 |
+| dt = 0.01 | -5.59 | -7.86 | -8.00 | -6.59 | -4.00 |
+| shrink x0.5 | -5.38 | -7.76 | -8.09 | -7.31 | -5.19 |
+| shrink x2 | -5.50 | -7.88 | -8.26 | -7.38 | -5.03 |
+| mu = 0.3 | -5.47 | -7.77 | -8.06 | -7.35 | -5.06 |
+| mu = 0.8 | -5.47 | -7.78 | -8.07 | -7.35 | -5.06 |
+| n = 160 (d/dx 12.4) | -5.37 | -7.82 | -8.14 | -7.43 | -4.76 |
+
+Peak gravity moment over all runs (incl. n = 96 and 128 from above): -7.997 .. -8.261, i.e. within
++-1.7 % of the mean (3.3 % full range); the largest single deviation from base is shrink x2 (+2.3 %).
+Up to t = 1.0 all runs lie within 2 %. Friction coefficient barely matters in this scenario.
+After the peak the trajectory is sensitive to dt: dt = 0.01 is 10 % off at t = 1.6 (and 18 % at
+t = 2.0), dt <= 0.005 is within ~5 % (t = 1.6) and the spread at t = 2.0 (-4.45 .. -5.19) is the
+cascade regime. Gate on the peak metric: MET for dt in [0.0025, 0.01], shrink x0.5..x2, mu 0.3..0.8,
+n = 96..160 at rho_s = 8, nu = 0.1. Still open: rho_s = 2, other viscosities, Bingham, post-peak
+trajectory (use dt <= 0.005).
