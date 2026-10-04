@@ -1639,6 +1639,8 @@ fn e8a() {
             mu,
         });
     }
+    bf.hydro_shrink = get("--shrink", 0.0);
+    bf.split_contact = args.iter().any(|a| a == "--split");
     println!(
         "E8a n = {n} (d/dx = {:.1}), nu = {nu}, omega = {omega}, {count} discs a = {a}, dt = {dt}",
         2.0 * a / dx

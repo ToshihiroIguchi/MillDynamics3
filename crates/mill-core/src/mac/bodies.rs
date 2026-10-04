@@ -139,6 +139,11 @@ pub struct BodyFlow {
     pub tol_scale: f64,
     /// Solid contact below the lubrication film (None: lubrication only).
     pub contact: Option<super::contact::ContactParams>,
+    /// Solve the contacts by a velocity projection after the fluid coupling instead of inside it.
+    pub split_contact: bool,
+    /// Hydrodynamic radius reduction (in cells) of the discs seen by the fluid mesh, so that
+    /// sub-grid gaps never form sliver cells (lubrication and contact use the true radius).
+    pub hydro_shrink: f64,
     /// Jacobian of the resolved fluid loads, kept between Newton steps.
     jacobian: Option<Jacobian>,
     /// Torque of the fluid on the drum wall in the last trial (per unit density).
@@ -159,6 +164,8 @@ impl BodyFlow {
             drum_omega: 0.0,
             tol_scale: 1.0,
             contact: None,
+            split_contact: false,
+            hydro_shrink: 0.0,
             jacobian: None,
             wall_torque: std::cell::Cell::new(0.0),
         }
@@ -685,9 +692,12 @@ impl BodyFlow {
             Vec::new()
         };
         let masses: Vec<f64> = bodies.iter().map(|b| b.mass).collect();
+        let split = self.split_contact && self.contact.is_some();
         let contact_list = match &self.contact {
-            Some(p) => super::contact::contacts(&pos, &radii, &masses, self.drum_radius, p),
-            None => Vec::new(),
+            Some(p) if !split => {
+                super::contact::contacts(&pos, &radii, &masses, self.drum_radius, p)
+            }
+            _ => Vec::new(),
         };
         let beta = self.contact.map_or(0.0, |p| p.beta);
         let active: Vec<ActiveContact> = contact_list
@@ -745,6 +755,7 @@ impl BodyFlow {
                     d.omega = vel[i].2;
                     d.cx = pos[i].0;
                     d.cy = pos[i].1;
+                    d.r -= self.hydro_shrink * dx;
                     d
                 })
                 .collect();
@@ -894,6 +905,24 @@ impl BodyFlow {
         }
         let (iterations, residual, loads, state) = result.expect("at least one iteration");
         self.commit(state, mesh.expect("mesh built"));
+        let mut pos = pos;
+        let mut split_contacts = 0;
+        if let (true, Some(p)) = (split, self.contact) {
+            let x0: Vec<(f64, f64)> = bodies.iter().map(|b| (b.disc.cx, b.disc.cy)).collect();
+            let vmax = vel.iter().map(|v| v.0.hypot(v.1)).fold(0.0f64, f64::max);
+            let reach = super::contact::ContactParams {
+                gap0: p.gap0 + 2.0 * dt * vmax,
+                ..p
+            };
+            let list = super::contact::contacts(&x0, &radii, &masses, self.drum_radius, &reach);
+            let inertia: Vec<f64> = bodies.iter().map(|b| b.inertia).collect();
+            super::contact::project(&list, &mut vel, &masses, &inertia, &p, dt, wall_speed, 200);
+            split_contacts = list.len();
+            for i in 0..nb {
+                pos[i] = (x0[i].0 + dt * vel[i].0, x0[i].1 + dt * vel[i].1);
+            }
+        }
+        let contacts = contact_list.len() + split_contacts;
         for i in 0..nb {
             bodies[i].accel = ((vel[i].0 - start[i].0) / dt, (vel[i].1 - start[i].1) / dt);
             bodies[i].disc = Disc {
@@ -910,7 +939,7 @@ impl BodyFlow {
             residual,
             loads,
             links: lk.len(),
-            contacts: contact_list.len(),
+            contacts,
             wall_torque: self.wall_torque.get(),
         }
     }

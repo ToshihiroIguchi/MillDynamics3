@@ -175,3 +175,58 @@ pub fn friction_loads(
     }
     out
 }
+
+/// Moreau-type velocity projection (contacts split off the fluid coupling): given the velocities
+/// `v = (ux, uy, omega)` that the fluid step produced, applies sequential impulses so that no
+/// contact closes faster than its allowed approach (`-push_out`) and Coulomb friction (impulse
+/// limited by `mu` times the accumulated normal impulse, target slip zero) holds. Contacts are the
+/// list at the start-of-step positions; the final centres are `x0 + dt v`.
+#[allow(clippy::too_many_arguments)]
+pub fn project(
+    list: &[Contact],
+    v: &mut [(f64, f64, f64)],
+    mass: &[f64],
+    inertia: &[f64],
+    p: &ContactParams,
+    dt: f64,
+    wall_speed: f64,
+    sweeps: usize,
+) {
+    let mut ln = vec![0.0f64; list.len()];
+    let mut lt = vec![0.0f64; list.len()];
+    let inv_m = |k: usize| 1.0 / mass[k];
+    for _ in 0..sweeps {
+        for (idx, c) in list.iter().enumerate() {
+            // Normal.
+            let wn = inv_m(c.i) + c.j.map_or(0.0, inv_m);
+            let excess = c.approach(v) + c.push_out(p.beta, dt);
+            let dl = (ln[idx] + excess / wn).max(0.0) - ln[idx];
+            ln[idx] += dl;
+            v[c.i].0 -= dl * c.n.0 * inv_m(c.i);
+            v[c.i].1 -= dl * c.n.1 * inv_m(c.i);
+            if let Some(j) = c.j {
+                v[j].0 += dl * c.n.0 * inv_m(j);
+                v[j].1 += dl * c.n.1 * inv_m(j);
+            }
+            // Friction.
+            if p.mu <= 0.0 {
+                continue;
+            }
+            let wt =
+                wn + c.ri * c.ri / inertia[c.i] + c.j.map_or(0.0, |j| c.rj * c.rj / inertia[j]);
+            let t = (-c.n.1, c.n.0);
+            let slip = c.slip(v, wall_speed);
+            let lim = p.mu * ln[idx];
+            let dt_imp = (lt[idx] + slip / wt).clamp(-lim, lim) - lt[idx];
+            lt[idx] += dt_imp;
+            v[c.i].0 -= dt_imp * t.0 * inv_m(c.i);
+            v[c.i].1 -= dt_imp * t.1 * inv_m(c.i);
+            v[c.i].2 -= dt_imp * c.ri / inertia[c.i];
+            if let Some(j) = c.j {
+                v[j].0 += dt_imp * t.0 * inv_m(j);
+                v[j].1 += dt_imp * t.1 * inv_m(j);
+                v[j].2 -= dt_imp * c.rj / inertia[j];
+            }
+        }
+    }
+}

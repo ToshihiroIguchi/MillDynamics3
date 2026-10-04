@@ -847,3 +847,22 @@ exactly; step cap 0.3 m/s per iteration. Probe: `grid_probe --exp E8a --newton`.
 Verdict: stop rule reached again. Open causes: non-smooth active-set cycling, accuracy of the
 tangential/rotational film at gaps << dx (only the leading Couette term, not calibrated against the
 exact bipolar solution as the normal film was), the unresolved fluid in the pores of a pile.
+
+
+## E8d — contacts split off the coupling, hydrodynamic radius (2026-10-04)
+
+Two changes, probe flags `--split` and `--shrink <cells>` (`grid_probe --exp E8a`):
+- `BodyFlow::split_contact`: contacts are no longer solved inside the nonlinear fluid coupling; after
+  the coupled step a Moreau-type velocity projection (`contact::project`, sequential impulses, normal
+  one-sided + Coulomb friction, 200 sweeps) acts on the fluid-step velocities, and the centres are
+  `x0 + dt v`. Alone this did NOT cure the heavy pile (NaN at 0.8 s): the first trial of the failing
+  step already blew up inside the fluid solver (`max|u|` 4e5, body speeds 0.17 m/s, pair gap 5e-7 m),
+  i.e. the cause was the fluid mesh, not the contact non-smoothness.
+- `BodyFlow::hydro_shrink`: the discs given to the fluid mesh/flux have radius `r - shrink * dx`
+  (hydrodynamic radius), so sub-grid gaps never form sliver cells; lubrication and contact keep the
+  true radius.
+
+Result (rho_s = 8, mu = 0.5, n = 110, d/dx = 8, nu = 0.1, omega = 2, 12 discs, shrink = 0.15): first
+run of the heavy pile to t = 2 s without NaN; the pile slides up to ~0.93 rad, gravity moment
+settles near -6.8 (mean over the 2nd half -6.42). No sensitivity study yet (shrink, grid, dt), so
+no +-3 % statement; the shrink biases the displaced volume by ~2 shrink dx / d.
