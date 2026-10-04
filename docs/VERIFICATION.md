@@ -768,3 +768,36 @@ a dilute or fluid-dominated charge would show the radius-squared dependence and 
 Consequence for D2: coarse-graining raises d/dx, so the resolved coupling needs no unresolved
 (porosity + drag) model as long as k is chosen to keep d/dx >= 8 (isolated) or 16 (dense); k = 2 is
 k-consistent to about 2-4 % in the dense case. Open: k = 4, dilute charges, rotation/tangential lubrication.
+
+### E8a — discs in a filled rotating drum (2026-10-04)
+
+D2 fixed by the user: resolved coupling only, k keeps d/dx >= 8 (isolated) .. 16 (dense).
+E8a is the first DEM-like system on the grid: 12 discs (a = 0.04, rho_s = 2) in a fully filled
+drum (R = 0.5, omega = 2 rad/s, nu = 0.1, g = 50, lubricated, no contact springs, no friction),
+`grid_probe --exp E8a`. Power is read as the gravity moment of the discs (steady state: equals
+omega x torque); the wall torque of the fluid is too noisy (0.06 .. 0.64 within 0.1 s, the
+E3 conditioning problem again).
+
+Infrastructure: rotating drum wall and drum-only wall torque in `BodyFlow`; many-body coupling
+with Anderson acceleration (depth 5, scaled velocities) and a frozen secant preconditioner after 3
+iterations (a preconditioner that changes between iterations defeats the acceleration; with it
+the fixed point needs 9-26 iterations instead of hitting the limit of 40 and diverging at
+t = 0.33 s). The fluid force response to a body velocity is smooth and linear (perturbations 1e-1
+.. 1e-5 agree within 1 %). Cost: mesh built once per coupling step (positions are fixed during the
+iteration), distance early-outs in the aperture/centroid/cell-fraction construction, pruned disc
+sdf, linear tolerances 1e-6 instead of 1e-9 inside the coupling (moment changes 0.02-0.2 %):
+n = 128, 12 discs, 0.5 s simulated: ~390 s -> 26 s (15x). The grid size matters: n = 110 has only
+two multigrid levels and a 3x slower projection than n = 128.
+
+Result: the system does not reach a steady state. The cluster rides around the drum (angle > 2.9 rad,
+period ~3.5 s) and the gravity moment oscillates between -1.04 and +0.16. Up to t = 1.2 s the
+moment agrees to 1 % for n = 128/192/256 and dt, 0.005/0.0025 (-1.035 .. -1.043); later the phase of
+the orbit differs between runs (t = 2.4: -0.35, -0.38, -0.16, -0.15) and three of the four 6 s runs
+(n = 192, 256, n = 128 with dt/2) went to NaN at t = 4.8-5.4, where the cluster reaches the wall and
+close pair gaps. Only n = 128, dt = 0.005 finished.
+
+Verdict: E8a does not give a +-3 % power statement. Missing for a meaningful full-system test:
+contact (normal spring, Coulomb friction), tangential/rotational lubrication, a free surface
+(the E2/E3 gates are open), and a configuration that settles to a steady state. Earlier 2 s runs
+(n = 110/165/220, before the coupling fixes) gave a mean moment over t = 1..2 of
+-0.968/-0.965/-0.950 (transient, not a steady state).
