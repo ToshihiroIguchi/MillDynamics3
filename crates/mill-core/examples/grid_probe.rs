@@ -58,6 +58,7 @@ fn main() {
         "E5g" => e5g(),
         "E7a" => e7a(),
         "E7b" => e7b(),
+        "E8a" => e8a(),
         "E6a" => e6a(),
         "E6d" => e6d(),
         "E6s" => e6s(),
@@ -1558,6 +1559,137 @@ fn e7b() {
     println!(
         "n={n} mean iterations {:.1}, {:.1} s",
         total_iters as f64 / steps as f64,
+        start.elapsed().as_secs_f64()
+    );
+}
+
+/// E8a: discs sedimenting in a fully filled rotating drum (no free surface). Power is measured
+/// two ways: the wall torque of the fluid and the gravity moment of the discs (steady state:
+/// the two balance).
+fn e8a() {
+    use mill_core::mac::bodies::{Body, BodyFlow, BodyStiffness};
+    use mill_core::mac::staggered::Disc;
+    use std::f64::consts::PI;
+    let args: Vec<String> = std::env::args().collect();
+    let get = |key: &str, default: f64| {
+        args.iter()
+            .position(|a| a == key)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let n = get("--n", 110.0) as usize;
+    let nu = get("--nu", 0.1);
+    let omega = get("--omega", 2.0);
+    let t_end = get("--t", 2.0);
+    let dt = get("--dt", 0.005);
+    let (a, rho, g) = (get("--a", 0.04), 2.0, 50.0);
+    let count = get("--m", 12.0) as usize;
+    let dx = 1.1 / n as f64;
+    let pitch = 2.4 * a;
+    let mut sites: Vec<(f64, f64)> = Vec::new();
+    for j in -5i32..=5 {
+        for i in -5i32..=5 {
+            sites.push((
+                pitch * (i as f64 + 0.5 * (j & 1) as f64) + 0.0137,
+                pitch * 0.866_025_4 * j as f64 - 0.0091 - 0.25,
+            ));
+        }
+    }
+    sites.sort_by(|p, q| {
+        (p.0 * p.0 + (p.1 + 0.25).powi(2)).total_cmp(&(q.0 * q.0 + (q.1 + 0.25).powi(2)))
+    });
+    sites.truncate(count);
+    let mass = rho * PI * a * a;
+    let mut bodies: Vec<Body> = sites
+        .iter()
+        .map(|&(x, y)| Body {
+            disc: Disc {
+                cx: x,
+                cy: y,
+                r: a,
+                ux: -omega * y,
+                uy: omega * x,
+                omega,
+            },
+            mass,
+            inertia: 0.5 * mass * a * a,
+            accel: (0.0, 0.0),
+        })
+        .collect();
+    let force = (rho - 1.0) * PI * a * a * g;
+    let ext = vec![(0.0, -force, 0.0); count];
+    let c0 = mill_core::mac::verify::stokes_annulus_drag(a, 0.5, 1.0, nu);
+    let setup = vec![
+        BodyStiffness {
+            added_mass: PI * a * a,
+            drag_stiffness: c0,
+            spin_stiffness: 4.0 * PI * nu * a * a,
+        };
+        count
+    ];
+    let mut bf = BodyFlow::new(n, 0.55, 0.5, nu);
+    bf.drum_omega = omega;
+    println!(
+        "E8a n = {n} (d/dx = {:.1}), nu = {nu}, omega = {omega}, {count} discs a = {a}, dt = {dt}",
+        2.0 * a / dx
+    );
+    println!(
+        "{:>7} {:>12} {:>12} {:>9} {:>6}",
+        "t", "wall torque", "gravity mom", "angle", "iters"
+    );
+    let start = Instant::now();
+    let steps = (t_end / dt).round() as usize;
+    let report = (steps / 10).max(1);
+    let verbose = args.iter().any(|a| a == "--verbose");
+    let (mut sum_w, mut sum_g, mut cnt) = (0.0, 0.0, 0usize);
+    for s in 1..=steps {
+        let info = bf.step_coupled_many(&mut bodies, &ext, &setup, dt, 1e-3, 40);
+        let tg: f64 = bodies.iter().map(|b| -force * b.disc.cx).sum();
+        if s as f64 * dt > 0.5 * t_end {
+            sum_w += info.wall_torque;
+            sum_g += tg;
+            cnt += 1;
+        }
+        if verbose {
+            let wg = bodies
+                .iter()
+                .map(|b| 0.5 - b.disc.r - b.disc.cx.hypot(b.disc.cy))
+                .fold(f64::INFINITY, f64::min);
+            let mut pg = f64::INFINITY;
+            for i in 0..bodies.len() {
+                for j in i + 1..bodies.len() {
+                    let (p, q) = (bodies[i].disc, bodies[j].disc);
+                    pg = pg.min((p.cx - q.cx).hypot(p.cy - q.cy) - p.r - q.r);
+                }
+            }
+            let vmax = bodies
+                .iter()
+                .map(|b| b.disc.ux.hypot(b.disc.uy))
+                .fold(0.0, f64::max);
+            println!(
+                "  s={s} wall gap {:.2e} pair gap {:.2e} vmax {:.3} iters {} res {:.1e} links {}",
+                wg, pg, vmax, info.iterations, info.residual, info.links
+            );
+        }
+        if s % report == 0 || s == steps {
+            let m = bodies.len() as f64;
+            let cx = bodies.iter().map(|b| b.disc.cx).sum::<f64>() / m;
+            let cy = bodies.iter().map(|b| b.disc.cy).sum::<f64>() / m;
+            println!(
+                "{:>7.3} {:>12.5e} {:>12.5e} {:>9.3} {:>6}",
+                s as f64 * dt,
+                info.wall_torque,
+                tg,
+                cx.atan2(-cy),
+                info.iterations
+            );
+        }
+    }
+    println!(
+        "mean over 2nd half: wall torque {:.5e}, gravity moment {:.5e}; {:.1} s",
+        sum_w / cnt as f64,
+        sum_g / cnt as f64,
         start.elapsed().as_secs_f64()
     );
 }

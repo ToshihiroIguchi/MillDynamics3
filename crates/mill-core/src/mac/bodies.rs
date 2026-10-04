@@ -133,6 +133,10 @@ pub struct BodyFlow {
     pub weno: bool,
     /// Blend the force along the line of centres with the sub-grid squeeze film near the wall.
     pub lubrication: bool,
+    /// Angular velocity of the drum wall (rad/s, counter-clockwise).
+    pub drum_omega: f64,
+    /// Torque of the fluid on the drum wall in the last trial (per unit density).
+    wall_torque: std::cell::Cell<f64>,
 }
 
 impl BodyFlow {
@@ -146,7 +150,40 @@ impl BodyFlow {
             prev_mesh: None,
             weno: true,
             lubrication: true,
+            drum_omega: 0.0,
+            wall_torque: std::cell::Cell::new(0.0),
         }
+    }
+
+    /// Wall velocity of a node at `(x, y)`: the drum wall rotates rigidly, `body` is the nearest
+    /// body surface `(distance, ux, uy)` if any.
+    fn wall_velocity(&self, x: f64, y: f64, dx: f64, body: Option<(f64, f64, f64)>) -> (f64, f64) {
+        let sw = self.drum_radius - (x * x + y * y).sqrt();
+        match body {
+            Some((s, ux, uy)) if s < 0.6 * dx && s <= sw => (ux, uy),
+            _ if sw < 0.6 * dx => (-self.drum_omega * y, self.drum_omega * x),
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// Initial flow state in rigid rotation with the drum (zero when the drum is at rest).
+    fn rotate_initial(&self, flow: &mut StaggeredFlow, sm: &StaggeredMesh) {
+        if self.drum_omega == 0.0 {
+            return;
+        }
+        let n = sm.n();
+        for j in 0..n {
+            for i in 0..n {
+                let c = i + n * j;
+                flow.u[c] = -self.drum_omega * sm.gu.centre(i, j).1;
+                flow.v[c] = self.drum_omega * sm.gv.centre(i, j).0;
+            }
+        }
+    }
+
+    /// Torque of the fluid on the drum wall in the last `trial_many` (per unit density).
+    pub fn wall_torque(&self) -> f64 {
+        self.wall_torque.get()
     }
 
     pub fn time(&self) -> f64 {
@@ -163,12 +200,9 @@ impl BodyFlow {
         });
         sm.set_body_flux(&[d]);
         let dx = sm.dx();
-        let wall = move |x: f64, y: f64| {
-            if d.sdf(x, y).abs() < 0.6 * dx {
-                d.velocity(x, y)
-            } else {
-                (0.0, 0.0)
-            }
+        let wall = |x: f64, y: f64| {
+            let (vx, vy) = d.velocity(x, y);
+            self.wall_velocity(x, y, dx, Some((d.sdf(x, y).abs(), vx, vy)))
         };
         let mut flow = match self.state.clone() {
             Some(s) => StaggeredFlow::from_state(&sm, s, wall),
@@ -176,6 +210,7 @@ impl BodyFlow {
                 let mut f = StaggeredFlow::new(&sm, self.nu, wall);
                 f.weno = self.weno;
                 f.upwind = self.weno;
+                self.rotate_initial(&mut f, &sm);
                 f
             }
         };
@@ -326,6 +361,8 @@ pub struct CoupledManyInfo {
     pub loads: Vec<BodyLoad>,
     /// Number of lubricated contacts (disc-disc and disc-wall) in the step.
     pub links: usize,
+    /// Torque of the fluid on the drum wall (per unit density; zero for a drum at rest).
+    pub wall_torque: f64,
 }
 
 /// Nearest-surface velocity of a set of discs at a point (used for wall values and fresh nodes):
@@ -419,21 +456,56 @@ impl BodyFlow {
         });
         sm.set_body_flux(&ds);
         let dx = sm.dx();
-        let ds_wall = ds.clone();
-        let wall = move |x: f64, y: f64| {
-            let (s, ux, uy) = nearest_velocity(&ds_wall, x, y);
-            if s < 0.6 * dx {
-                (ux, uy)
-            } else {
-                (0.0, 0.0)
+        if std::env::var_os("MILL_DEBUG_POCKETS").is_some() {
+            let nn = sm.n();
+            let mut seen = vec![false; nn * nn];
+            let mut comps = Vec::new();
+            for c0 in 0..nn * nn {
+                if seen[c0] || sm.cell_fraction[c0] <= 0.0 {
+                    continue;
+                }
+                let mut stack = vec![c0];
+                seen[c0] = true;
+                let mut size = 0;
+                while let Some(c) = stack.pop() {
+                    size += 1;
+                    let (i, j) = (c % nn, c / nn);
+                    let mut nb = Vec::new();
+                    if i > 0 && sm.au[c] > 0.0 {
+                        nb.push(c - 1);
+                    }
+                    if i + 1 < nn && sm.au[c + 1] > 0.0 {
+                        nb.push(c + 1);
+                    }
+                    if j > 0 && sm.av[c] > 0.0 {
+                        nb.push(c - nn);
+                    }
+                    if j + 1 < nn && sm.av[c + nn] > 0.0 {
+                        nb.push(c + nn);
+                    }
+                    for q in nb {
+                        if !seen[q] && sm.cell_fraction[q] > 0.0 {
+                            seen[q] = true;
+                            stack.push(q);
+                        }
+                    }
+                }
+                comps.push(size);
             }
-        };
+            if comps.len() > 1 {
+                eprintln!("pockets: component sizes {comps:?}");
+            }
+        }
+        let ds_wall = ds.clone();
+        let wall =
+            |x: f64, y: f64| self.wall_velocity(x, y, dx, Some(nearest_velocity(&ds_wall, x, y)));
         let mut flow = match self.state.clone() {
             Some(s) => StaggeredFlow::from_state(&sm, s, wall),
             None => {
                 let mut f = StaggeredFlow::new(&sm, self.nu, wall);
                 f.weno = self.weno;
                 f.upwind = self.weno;
+                self.rotate_initial(&mut f, &sm);
                 f
             }
         };
@@ -447,6 +519,10 @@ impl BodyFlow {
         flow.step(dt);
         let loads: Vec<(f64, f64, f64)> = discs.iter().map(|d| disc_load(&flow, d)).collect();
         let divergence = flow.projected_divergence;
+        if self.drum_omega != 0.0 {
+            self.wall_torque
+                .set(flow.rotating_wall_torque_of(self.drum_omega, radius - 0.25 * dx));
+        }
         let state = flow.into_state();
         (loads, divergence, state, sm)
     }
@@ -496,6 +572,11 @@ impl BodyFlow {
         type Iterate = (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>);
         let mut last: Option<Iterate> = None;
         let mut result = None;
+        // Under-relaxation, halved whenever the residual jumps up (a dense, lubricated cluster
+        // can make the plain fixed point diverge); restarts from the best iterate so far.
+        let mut alpha = 1.0f64;
+        type Vels = Vec<(f64, f64, f64)>;
+        let mut best: Option<(f64, Vels, Vels)> = None;
         for it in 1..=max_iter {
             let discs: Vec<Disc> = (0..nb)
                 .map(|i| {
@@ -509,6 +590,15 @@ impl BodyFlow {
                 })
                 .collect();
             let (raw, div, state, mesh) = self.trial_many(&discs, dt);
+            if std::env::var_os("MILL_DEBUG_ITER").is_some() {
+                let fm = raw.iter().map(|l| l.0.hypot(l.1)).fold(0.0f64, f64::max);
+                let um = state.u.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                let vm: f64 = vel.iter().map(|v| v.0.hypot(v.1)).fold(0.0, f64::max);
+                eprintln!(
+                    "    it {it}: max load {fm:.3e} max|u| {um:.3e} div {div:.1e} max vel {vm:.3e} lk {}",
+                    lk.len()
+                );
+            }
             let forces: Vec<(f64, f64)> = raw.iter().map(|l| (l.0, l.1)).collect();
             let total: Vec<(f64, f64, f64)> = (0..nb)
                 .map(|i| {
@@ -587,7 +677,34 @@ impl BodyFlow {
                 residual = residual.max(r);
                 new_vel[i] = (new_t[i].0, new_t[i].1, wn);
             }
-            vel = new_vel;
+            let mut next_vel = new_vel.clone();
+            match &best {
+                Some((br, bv, bn)) if residual > 2.0 * br && it >= 3 => {
+                    alpha = (alpha * 0.5).max(0.1);
+                    for i in 0..nb {
+                        next_vel[i] = (
+                            bv[i].0 + alpha * (bn[i].0 - bv[i].0),
+                            bv[i].1 + alpha * (bn[i].1 - bv[i].1),
+                            bv[i].2 + alpha * (bn[i].2 - bv[i].2),
+                        );
+                    }
+                }
+                _ => {
+                    if best.as_ref().is_none_or(|b| residual < b.0) {
+                        best = Some((residual, vel.clone(), new_vel.clone()));
+                    }
+                    if alpha < 1.0 {
+                        for i in 0..nb {
+                            next_vel[i] = (
+                                vel[i].0 + alpha * (new_vel[i].0 - vel[i].0),
+                                vel[i].1 + alpha * (new_vel[i].1 - vel[i].1),
+                                vel[i].2 + alpha * (new_vel[i].2 - vel[i].2),
+                            );
+                        }
+                    }
+                }
+            }
+            vel = next_vel;
             let loads: Vec<BodyLoad> = (0..nb)
                 .map(|i| BodyLoad {
                     fx: total[i].0 - external[i].0,
@@ -619,6 +736,7 @@ impl BodyFlow {
             residual,
             loads,
             links: lk.len(),
+            wall_torque: self.wall_torque.get(),
         }
     }
 }

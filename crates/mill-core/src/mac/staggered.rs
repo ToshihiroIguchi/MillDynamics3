@@ -1877,6 +1877,13 @@ impl<'a> StaggeredFlow<'a> {
     /// artefact of the vector Laplacian and would swamp a partially wetted wall. Only liquid nodes
     /// count. Pressure exerts no torque on a circle.
     pub fn rotating_wall_torque(&self, omega: f64) -> f64 {
+        self.rotating_wall_torque_of(omega, f64::NEG_INFINITY)
+    }
+
+    /// As `rotating_wall_torque`, counting only boundary points at a radius of at least
+    /// `min_radius` (the drum wall, excluding bodies inside it).
+    pub fn rotating_wall_torque_of(&self, omega: f64, min_radius: f64) -> f64 {
+        let drum = move |x: f64, y: f64| usize::from((x * x + y * y).sqrt() < min_radius);
         let sm = self.sm;
         let n = sm.n();
         let mut ur = self.u.clone();
@@ -1896,8 +1903,8 @@ impl<'a> StaggeredFlow<'a> {
             &zero,
             self.nu,
             |_, _| (0.0, 0.0),
-            |_, _| 0,
-            1,
+            drum,
+            2,
             &self.liq.active_u,
         );
         let lv = sm.gv.wall_load_masked(
@@ -1905,8 +1912,8 @@ impl<'a> StaggeredFlow<'a> {
             &vr,
             self.nu,
             |_, _| (0.0, 0.0),
-            |_, _| 0,
-            1,
+            drum,
+            2,
             &self.liq.active_v,
         );
         lu[0].torque + lv[0].torque
