@@ -1078,3 +1078,26 @@ jumping inside the charge. `examples/escape_probe` reproduces it headless on the
 88 mm at t = 0.5-0.75 s; with the slurry off, or on the PBF-backed `Simulation` (c52d3e7~1), the worst wall overlap is
 5e-5 m and no ball leaves the drum over 6 s. DFSPH coupling remains unfit for the dense charge ("bursts at res 60"), so
 `Simulation` uses PBF again (c52d3e7 reverted); the DFSPH code stays in `fluid/` for the grid-track comparison.
+
+## PBF vs grid benchmark, first pass (2026-10-05)
+
+Case: 10 heavy discs (a = 0.04, rho_s/rho_f = 8) in a drum of radius 0.5 filled with slurry
+(nu = 0.1, omega = 1, g = 9.81). Metric: net gravity moment of the discs about the axis (grid
+units, rho_f = 1; the PBF value from `pbf_bench` is divided by rho_f = 1000).
+Grid: `grid_probe --exp E8a --n 96 --nu 0.1 --omega 1 --rho 8 --m 10 --g 9.81 --mu 0.5 --split
+--shrink 0.15 --newton --t 4`. PBF: `pbf_bench --t 4 [--res --substeps]` (slurry fill 0.9).
+
+| solver / setting | peak gravity moment |
+|---|---|
+| grid n=96 | -1.30 (t = 2.8, angle 1.6 rad) |
+| PBF res 40, substeps 8 (app default) | -0.926 |
+| PBF res 60 / 80 | -0.782 / -0.741 |
+| PBF substeps 4 / 16 | -0.758 / -1.000 |
+
+Findings:
+- PBF depends strongly on the cost knobs: -0.74 .. -1.00 (about +-15 %) against the 3 % gate.
+- Absolute PBF-vs-grid difference (about 30 %) is not yet meaningful: initial conditions differ
+  (grid starts in solid-body rotation with a hex block of discs, PBF spins up from rest with a
+  random packing, and keeps a 10 % air gap).
+- Next if continued: make both start identically (shared initial disc positions and spin-up),
+  then attribute the PBF error to drag, lubrication or viscosity terms.
