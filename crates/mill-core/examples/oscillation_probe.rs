@@ -339,7 +339,7 @@ fn main() {
 /// The fluid (slurry) particle population's centroid, mirroring `charge_centroid` (metrics.rs) for
 /// balls -- `None` if the population is empty. Used to test whether a water-dominated ("sloshing")
 /// mill's *liquid* swings symmetrically even when the (possibly sparse) ball population does not.
-fn fluid_centroid(fluid: &mill_core::fluid::Fluid) -> Option<(f32, f32)> {
+fn fluid_centroid(fluid: &mill_core::pbf::FluidParticles) -> Option<(f32, f32)> {
     if fluid.x.is_empty() {
         return None;
     }

@@ -1069,3 +1069,12 @@ full-system E8 sweep (nu >= 0.1) is the accepted evidence for the power metric.
 | E8 full system, nu >= 0.1 (slurry, Bingham paste) | peak gravity moment within 2 % between n = 96 and n = 128 (gate +-3 % met) |
 | E8, nu = 0.01 (water-like) | NaN; joins E2 (high-Re / free-surface robustness) |
 | E2, E3 (pure slurry) | gates not met (see sections above) |
+
+### Simulation back on PBF (2026-10-05)
+
+A screenshot of the web app (63 mm drum, 100 rpm, slurry 0.35, 244 balls) showed balls outside the drum and balls
+jumping inside the charge. `examples/escape_probe` reproduces it headless on the DFSPH-backed `Simulation`
+(c52d3e7): single balls at rest receive 6 m/s in one sub-step from the fluid impulse and leave the wall by up to
+88 mm at t = 0.5-0.75 s; with the slurry off, or on the PBF-backed `Simulation` (c52d3e7~1), the worst wall overlap is
+5e-5 m and no ball leaves the drum over 6 s. DFSPH coupling remains unfit for the dense charge ("bursts at res 60"), so
+`Simulation` uses PBF again (c52d3e7 reverted); the DFSPH code stays in `fluid/` for the grid-track comparison.

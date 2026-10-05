@@ -17,7 +17,6 @@
 pub mod coupling;
 pub mod dem;
 pub mod fluid;
-pub mod fluidview;
 pub mod geometry;
 pub mod grid;
 pub mod mac;
@@ -28,9 +27,9 @@ pub mod rng;
 pub mod surface;
 
 use dem::DemState;
-use fluid::Fluid;
 use geometry::Drum;
 pub use params::{EffectiveMedia, Params};
+use pbf::FluidParticles;
 
 /// Fixed simulation sub-step shared by the ball solver and (once it lands, M3) the PBF solver:
 /// 1/240 s. `simulation.substeps` sub-steps are taken per nominal 60 Hz rendered frame at 1x time
@@ -83,11 +82,11 @@ pub struct Simulation {
     /// Total simulated time (s).
     sim_time: f64,
     dem: DemState,
-    fluid: Fluid,
+    fluid: FluidParticles,
     /// Fluid solver diagnostics (viscosity CG iterations, mean shear rate) from the most
     /// recently completed sub-step. `Default` (all zero) before the first [`Simulation::step`]
     /// call.
-    fluid_stats: fluid::FluidStats,
+    fluid_stats: pbf::FluidStepStats,
     /// EMA-smoothed grinding diagnostics (docs/PLAN.md ss3.5), updated every sub-step in
     /// [`Simulation::step`] with time constant [`GRINDING_STATS_EMA_TAU_S`]. All zero before the
     /// first sub-step.
@@ -126,25 +125,24 @@ impl Simulation {
         // ball population never leaves the fluid lattice too coarse to resolve the ball<->fluid
         // coupling stably -- see that method's doc comment.
         let resolution = params.effective_fluid_resolution();
-        let drum0 = Drum::new(radius_m, params.mill.omega(), params.lifters);
         let fluid = if params.slurry.enabled {
-            Fluid::new_with_balls(
+            FluidParticles::seed_lattice(
                 &params.slurry,
-                &drum0,
-                0.0,
+                radius_m,
                 resolution,
                 &dem.balls.x,
                 dem.balls.radius,
             )
         } else {
-            Fluid::new(
+            FluidParticles::seed_lattice(
                 &params::SlurryParams {
                     fill_fraction: 0.0,
                     ..params.slurry
                 },
-                &drum0,
-                0.0,
+                radius_m,
                 resolution,
+                &[],
+                0.0,
             )
         };
         let energy_budget_e0 = dem::mechanical_energy_f64(&dem.balls) + fluid.mechanical_energy_j();
@@ -154,7 +152,7 @@ impl Simulation {
             sim_time: 0.0,
             dem,
             fluid,
-            fluid_stats: fluid::FluidStats::default(),
+            fluid_stats: pbf::FluidStepStats::default(),
             power_draw_w: 0.0,
             torque_nm: 0.0,
             collision_rate_per_s: 0.0,
@@ -235,7 +233,7 @@ impl Simulation {
 
     /// The current fluid (slurry) particle population. Empty when `params.slurry.enabled` was
     /// `false` at construction time.
-    pub fn fluid(&self) -> &Fluid {
+    pub fn fluid(&self) -> &FluidParticles {
         &self.fluid
     }
 
@@ -250,7 +248,7 @@ impl Simulation {
     /// ([`pbf::FluidStepStats::mean_shear_rate_per_s`]). `0.0` before the first
     /// [`Simulation::step`] call.
     pub fn mean_shear_rate_per_s(&self) -> f32 {
-        0.0f32
+        self.fluid_stats.mean_shear_rate_per_s
     }
 
     /// EMA-smoothed mill power draw (W per metre of mill depth): the rate of work the drum's
@@ -343,7 +341,7 @@ impl Simulation {
         m.true_ball_count = self.params.true_ball_count().round().max(0.0) as u32;
         m.coarse_graining_factor = effective.scale_factor;
         m.max_substep_displacement_over_diameter = self.max_substep_displacement_over_diameter;
-        m.mean_shear_rate_per_s = 0.0f32;
+        m.mean_shear_rate_per_s = self.fluid_stats.mean_shear_rate_per_s;
         m.viscosity_solver_iterations = self.fluid_stats.viscosity_iterations;
         m
     }
@@ -409,9 +407,10 @@ impl Simulation {
         let radius_m = self.params.mill.radius_m();
         let lifters = self.params.lifters;
         let dem_iterations = self.params.simulation.dem_iterations;
+        let pbf_iterations = self.params.simulation.pbf_iterations;
 
         let drum = Drum::new(radius_m, omega, lifters);
-        let (fluid_stats, dem_stats) = coupling::step_dfsph(
+        let (fluid_stats, dem_stats) = coupling::step(
             &mut self.dem,
             &mut self.fluid,
             &drum,
@@ -419,23 +418,24 @@ impl Simulation {
             &self.params.media,
             &self.params.slurry,
             dem_iterations,
+            pbf_iterations,
             sub_dt,
         );
-        self.coupling_clamp_hits += fluid_stats.ball_backstop_hits;
+        self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
         let b = &mut self.energy_budget;
         b.elapsed_s += sub_dt as f64;
         b.dem_wall_work_j += dem_stats.wall_work_j as f64;
-        b.fluid_wall_work_j += fluid_stats.wall_work_j;
-        b.shaft_work_j += dem_stats.wall_work_j as f64 + fluid_stats.wall_work_j;
+        b.fluid_wall_work_j += fluid_stats.wall_work_j as f64;
+        b.shaft_work_j += (dem_stats.wall_work_j + fluid_stats.wall_work_j) as f64;
         b.ball_contact_dissipation_j += dem_stats.dissipated_energy_j as f64;
-        // Viscous loss = work the wall does through friction minus the fluid's KE change across
-        // the viscous solve (this includes the energy handed to the balls, which comes back as
-        // `interface_created_j` through the DEM's coupling work).
-        b.fluid_viscous_j += fluid_stats.wall_viscous_work_j - fluid_stats.ke_delta_viscosity_j;
-        b.fluid_clamp_removed_j -= fluid_stats.ke_delta_backstop_j;
-        b.interface_created_j += dem_stats.coupling_work_j as f64;
-        b.fluid_wall_angular_impulse += fluid_stats.wall_angular_impulse;
-        self.update_grinding_stats(&dem_stats, fluid_stats.wall_work_j as f32, sub_dt, omega);
+        b.fluid_wall_slip_j += (fluid_stats.wall_work_j - fluid_stats.ke_delta_noslip_j) as f64;
+        b.fluid_viscous_j -= fluid_stats.ke_delta_viscosity_j as f64;
+        b.fluid_clamp_removed_j -= fluid_stats.ke_delta_clamp_j as f64;
+        b.interface_created_j += (dem_stats.coupling_work_j
+            + fluid_stats.ke_delta_drag_j
+            + fluid_stats.ke_delta_buoyancy_j) as f64;
+        b.fluid_wall_angular_impulse += fluid_stats.wall_angular_impulse as f64;
+        self.update_grinding_stats(&dem_stats, fluid_stats.wall_work_j, sub_dt, omega);
         self.fluid_stats = fluid_stats;
         self.drum_angle = (self.drum_angle + omega * sub_dt).rem_euclid(std::f32::consts::TAU);
         self.sim_time += sub_dt as f64;
@@ -984,7 +984,6 @@ mod tests {
     /// `Simulation::new` must seed the fluid at a resolution high enough to keep the lattice
     /// spacing at or below the effective ball diameter, not the raw user-requested resolution.
     #[test]
-    #[ignore = "DFSPH switch-over: the coupled charge is unstable at this ball count / resolution (pore squeezing, see docs/VERIFICATION.md Phase C2)"]
     fn simulation_new_auto_raises_fluid_resolution_when_coarse_graining_shrinks_balls() {
         // Explicit 10 mm ball diameter override (the project's former default): the shipped 63 mm
         // default no longer coarse-grains at max_balls = 1500 (N_true ~= 62), so reproducing the
@@ -1051,7 +1050,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "DFSPH switch-over: the coupled charge is unstable at this ball count / resolution (pore squeezing, see docs/VERIFICATION.md Phase C2)"]
     fn simulation_new_auto_raises_substeps_when_coarse_graining_shrinks_balls() {
         // Same repro config as the fluid-resolution auto-raise above: docs/PHYSICS.md §9 measured
         // `max_substep_displacement_over_diameter` at 0.64-1.07 across seeds at max_balls = 1500,

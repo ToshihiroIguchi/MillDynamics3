@@ -266,7 +266,7 @@ fn percentile(sorted: &[f32], q: f32) -> f32 {
 /// have there ("ring occupancy", 1.0 = ball fully surrounded by slurry).
 fn ball_slurry_proximity(
     balls: &mill_core::dem::Balls,
-    fluid: &mill_core::fluid::Fluid,
+    fluid: &mill_core::pbf::FluidParticles,
 ) -> (f64, f64) {
     if balls.is_empty() || fluid.is_empty() {
         return (f64::NAN, f64::NAN);

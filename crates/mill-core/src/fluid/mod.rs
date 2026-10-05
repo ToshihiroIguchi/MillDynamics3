@@ -64,9 +64,6 @@ const CFL_FACTOR: f32 = 0.4;
 /// `slurry.surface_tension_n_m` keeps its calibrated meaning.
 const REFERENCE_SURFACE_TENSION_N_M: f32 = 0.072;
 const COHESION_ACCEL_FACTOR: f32 = 2.0;
-/// Largest summed solid volume fraction a fluid particle may sit at (see the pore handling in
-/// the advect stage of [`Fluid::internal_step`]).
-const GAMMA_MAX: f32 = 0.85;
 /// Floor on the pressure denominator `D_i`, as a fraction of its interior-lattice value.
 const D_FLOOR_FRACTION: f32 = 0.05;
 
@@ -565,14 +562,8 @@ impl Fluid {
                 stats.wall_backstop_hits += 1;
             }
         }
-        // The balls advance first (their copy moved with the fluid-updated velocities), then any
-        // fluid particle left inside a ball is moved back to its surface.
-        for b in 0..self.bodies.x.len() {
-            let v = self.bodies.v[b];
-            let w = self.bodies.omega[b];
-            self.bodies.x[b] += v * dt;
-            self.bodies.theta[b] += w * dt;
-        }
+        // Fluid particles that ended up inside a ball (it moved with its own velocity this
+        // step) are moved back to its surface; the balls then advance (prescribed motion).
         if !self.bodies.x.is_empty() && ball_radius > 0.0 {
             let centres: Vec<Vec2> = self.bodies.x.clone();
             let grid = UniformGrid::build(&centres, (2.0 * ball_radius).max(1e-6));
@@ -595,36 +586,13 @@ impl Fluid {
                 });
             }
         }
-        // Pores narrower than the kernel (a ball against the wall or another ball) cannot hold a
-        // fluid particle: the density solve would squeeze it out at an unphysical speed. A
-        // particle where the solids' summed volume fraction exceeds [`GAMMA_MAX`] is moved down
-        // the gradient to the boundary of that region and loses its inward velocity.
-        if !self.bodies.x.is_empty() {
-            let (off, solids) = self.sample_solids(drum, angle_next);
-            for i in 0..self.x.len() {
-                let range = off[i] as usize..off[i + 1] as usize;
-                if range.len() < 2 {
-                    continue; // a single solid is handled by the exact backstops above
-                }
-                let (mut gamma, mut grad, mut vel) = (0.0f32, Vec2::ZERO, Vec2::ZERO);
-                for sol in &solids[range.clone()] {
-                    gamma += sol.gamma;
-                    grad += sol.grad;
-                    vel += sol.vel;
-                }
-                let gl = grad.length();
-                if gamma > GAMMA_MAX && gl > 1e-9 {
-                    let n = grad / gl;
-                    self.x[i] -= n * ((gamma - GAMMA_MAX) / gl).min(0.5 * self.dx);
-                    let vn = (self.v[i] - vel / range.len() as f32).dot(n);
-                    if vn > 0.0 {
-                        self.v[i] -= vn * n;
-                    }
-                    stats.ball_backstop_hits += 1;
-                }
-            }
-        }
         stats.ke_delta_backstop_j += kinetic_energy_f64(&self.v, m) - ke_pre;
+        for b in 0..self.bodies.x.len() {
+            let v = self.bodies.v[b];
+            let w = self.bodies.omega[b];
+            self.bodies.x[b] += v * dt;
+            self.bodies.theta[b] += w * dt;
+        }
         let pe1: f64 = self.x.iter().map(|p| p.y as f64).sum();
         stats.pe_delta_j += (pe1 - pe0) * m as f64 * GRAVITY.abs() as f64;
     }
