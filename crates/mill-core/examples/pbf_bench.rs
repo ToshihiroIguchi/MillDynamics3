@@ -46,6 +46,9 @@ fn main() {
     p.simulation.max_balls = 10_000;
     p.simulation.pbf_iterations = get("--iters", p.simulation.pbf_iterations as f32) as u32;
     p.simulation.dem_iterations = get("--diters", p.simulation.dem_iterations as f32) as u32;
+    if args.iter().any(|a| a == "--noslip") {
+        p.slurry.ball_no_slip = get("--noslip", 0.0);
+    }
     let k = get("--k", 1.0);
     if k > 1.0 {
         p.simulation.coarse_graining_mode = CoarseGrainingMode::Manual;
@@ -55,7 +58,9 @@ fn main() {
     let mut sim = if get("--match", 0.0) > 0.0 {
         // Same start as `grid_probe --exp E8a`: hex block of `--m` discs, solid-body rotation.
         let count = get("--m", 10.0) as usize;
-        let pitch = 2.4 * a;
+        // Coarse-grained runs pass `--m N/k^2` super-balls on a lattice scaled by k, so the block
+        // keeps the same area, solid fraction and shape as the k = 1 reference.
+        let pitch = 2.4 * a * k.max(1.0);
         let y0 = get("--y0", -0.25);
         let mut sites: Vec<(f32, f32)> = Vec::new();
         for j in -5i32..=5 {
@@ -64,6 +69,21 @@ fn main() {
                     pitch * (i as f32 + 0.5 * (j & 1) as f32) + 0.0137,
                     pitch * 0.866_025_4 * j as f32 - 0.0091 + y0,
                 ));
+            }
+        }
+        // Optional ensemble member: a deterministic +-0.1 a jitter of every disc.
+        let seed = get("--seed", 0.0) as u64;
+        if seed > 0 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next_unit = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+            };
+            for s in sites.iter_mut() {
+                s.0 += 0.2 * a * next_unit();
+                s.1 += 0.2 * a * next_unit();
             }
         }
         sites.sort_by(|p, q| {
@@ -92,6 +112,9 @@ fn main() {
         "t", "gravity mom", "P draw", "mean vy"
     );
     let (mut next, mut peak, mut sum, mut cnt) = (0.0, 0.0f64, 0.0f64, 0usize);
+    // Torque-balance power reference: omega * (total gravity moment of balls + fluid), 2nd-half mean.
+    let (mut sum_tot, mut sum_p) = (0.0f64, 0.0f64);
+    let omega_si = omega as f64;
     while sim.sim_time() < t_end {
         sim.step_fixed();
         let tg: f64 = sim.balls().x.iter().map(|x| -(force * x.x) as f64).sum();
@@ -101,14 +124,39 @@ fn main() {
         if sim.sim_time() > 0.5 * t_end {
             sum += tg;
             cnt += 1;
+            let f = sim.fluid();
+            let fluid_m: f64 =
+                f.x.iter()
+                    .map(|x| -(f.particle_mass * 9.81 * x.x) as f64)
+                    .sum();
+            let ball_m: f64 = sim
+                .balls()
+                .x
+                .iter()
+                .map(|x| -(sim.balls().mass * 9.81 * x.x) as f64)
+                .sum();
+            sum_tot += fluid_m + ball_m;
+            sum_p += sim.power_draw_w() as f64;
         }
         if sim.sim_time() >= next {
             next += get("--dtp", 0.25) as f64;
+            let f = sim.fluid();
+            let tot: f64 =
+                f.x.iter()
+                    .map(|x| -(f.particle_mass * 9.81 * x.x) as f64)
+                    .sum::<f64>()
+                    + sim
+                        .balls()
+                        .x
+                        .iter()
+                        .map(|x| -(sim.balls().mass * 9.81 * x.x) as f64)
+                        .sum::<f64>();
             println!(
-                "{:>7.2} {:>12.5e} {:>10.2} {:>9.4} hits {}",
+                "{:>7.2} {:>12.5e} {:>10.2} (ref {:>9.2}) {:>9.4} hits {}",
                 sim.sim_time(),
                 tg,
                 sim.power_draw_w(),
+                -omega_si * tot,
                 sim.balls().v.iter().map(|v| v.y).sum::<f32>() / sim.balls().v.len() as f32,
                 sim.coupling_clamp_hits()
             );
@@ -117,5 +165,11 @@ fn main() {
     println!(
         "peak gravity moment {peak:.5e}, mean over 2nd half {:.5e}",
         sum / cnt.max(1) as f64
+    );
+    let c = cnt.max(1) as f64;
+    println!(
+        "2nd-half mean: P draw {:.3} W, torque-balance reference {:.3} W (-omega * gravity moment of balls+fluid)",
+        sum_p / c,
+        -omega_si * sum_tot / c
     );
 }

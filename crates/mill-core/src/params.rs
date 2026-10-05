@@ -500,8 +500,8 @@ impl SimulationParams {
         if !(4..=200).contains(&self.resolution) {
             return Err("simulation.resolution must be in [4, 200]".into());
         }
-        if !(1..=16).contains(&self.substeps) {
-            return Err("simulation.substeps must be in [1, 16]".into());
+        if !(1..=64).contains(&self.substeps) {
+            return Err("simulation.substeps must be in [1, 64]".into());
         }
         if !(1..=20).contains(&self.pbf_iterations) {
             return Err("simulation.pbf_iterations must be in [1, 20]".into());
@@ -694,7 +694,9 @@ impl Params {
         }
         let v_ref = (2.0 * GRAVITY_MAG * diameter_m).sqrt();
         let min_substeps = (v_ref / (60.0 * TARGET_RATIO * d_eff)).ceil().max(1.0) as u32;
-        self.simulation.substeps.max(min_substeps).min(16)
+        // The auto-raise stops at 16; an explicit request above that (up to the validated 64, used
+        // by the accuracy benchmarks) is honoured as is.
+        self.simulation.substeps.max(min_substeps.min(16))
     }
 }
 

@@ -15,10 +15,14 @@
 //! the ball-free special case (equivalent to an empty ball list).
 //!
 //! **Viscosity.** Step 7 discretises the Newtonian viscous term `(mu/rho) * laplacian(v)` with the
-//! Morris (1997) SPH viscous Laplacian ([`morris_weights`]) and solves the resulting backward-Euler
-//! system `(I + dt*L) v_new = v` implicitly by conjugate gradient ([`solve_implicit_viscosity`]),
-//! `L` being the (symmetric positive semi-definite) graph Laplacian `(Lv)_i = sum_j c_ij (v_i -
-//! v_j)`. Unlike an explicit scheme, this is unconditionally stable for any `viscosity_pa_s` at
+//! Morris (1997) SPH coefficients ([`morris_weights`]) applied in a *central-force* form and solves
+//! the resulting backward-Euler system `(I + dt*L) v_new = v` implicitly by conjugate gradient
+//! ([`solve_implicit_viscosity`]), `L` being the (symmetric positive semi-definite) operator
+//! `(Lv)_i = sum_j 4 c_ij e_ij (e_ij . (v_i - v_j))`. The central form acts along the line of
+//! centres only, so a rigidly rotating fluid feels no viscous force even where the kernel sum is
+//! one-sided (free surface, drum wall) and angular momentum is conserved; the plain Morris form
+//! `c_ij (v_i - v_j)` damped solid-body rotation there (5x the torque-balance power at 1 Pa*s,
+//! docs/VERIFICATION.md). Unlike an explicit scheme, this is unconditionally stable for any `viscosity_pa_s` at
 //! this project's fixed sub-step, and `viscosity_pa_s` enters the physics directly (Pa*s) rather
 //! than through a separately-calibrated qualitative coefficient -- an earlier version used
 //! explicit XSPH mixing with a hand-tuned saturating coefficient curve instead (see git history),
@@ -304,9 +308,10 @@ fn morris_weights(
     mass: f32,
     mu: &[f32],
     h: f32,
-) -> Vec<f32> {
+) -> ViscWeights {
     let eta2 = VISCOSITY_ETA_FACTOR * h * h;
     let mut weights = vec![0.0f32; neighbors.nbrs.len()];
+    let mut dirs = vec![Vec2::ZERO; neighbors.nbrs.len()];
     for i in 0..x.len() {
         let rho_i = density[i].max(1e-6);
         // `k` indexes both the CSR range (`neighbors.nbrs[k]`, to get the neighbour `ju`) and the
@@ -321,9 +326,20 @@ fn morris_weights(
             let grad = spiky_grad(delta, r, h);
             let numerator = (mass * (mu[i] + mu[ju]) / (rho_i * rho_j)) * delta.dot(grad).abs();
             weights[k] = numerator / (delta.length_squared() + eta2);
+            dirs[k] = if r > 1e-9 { delta / r } else { Vec2::X };
         }
     }
-    weights
+    ViscWeights {
+        w: weights,
+        dir: dirs,
+    }
+}
+
+/// Edge weights of the viscous operator: `w[k]` is the Morris coefficient and `dir[k]` the unit
+/// vector `x_i - x_j` of the directed edge `neighbors.nbrs[k]`.
+struct ViscWeights {
+    w: Vec<f32>,
+    dir: Vec<Vec2>,
 }
 
 /// Matrix-free application of the graph Laplacian `(Lv)_i = sum_j c_ij * (v_i - v_j)`, `weights`
@@ -332,18 +348,37 @@ fn morris_weights(
 /// [`solve_implicit_viscosity`]'s doc comment for why this matters (it is the innermost operator
 /// application of a conjugate-gradient loop run up to [`VISCOSITY_CG_MAX_ITERS`] times every
 /// sub-step).
-fn laplacian_apply_into(neighbors: &NeighborLists, weights: &[f32], v: &[Vec2], out: &mut [Vec2]) {
+fn laplacian_apply_into(
+    neighbors: &NeighborLists,
+    weights: &ViscWeights,
+    v: &[Vec2],
+    out: &mut [Vec2],
+) {
     for i in 0..v.len() {
         let mut sum = Vec2::ZERO;
-        // `k` indexes both the CSR range and `weights[k]` at that same position -- see
+        // `k` indexes both the CSR range and `weights.w[k]` at that same position -- see
         // `morris_weights`'s identical rationale.
         #[allow(clippy::needless_range_loop)]
         for k in neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize {
             let j = neighbors.nbrs[k] as usize;
-            sum += weights[k] * (v[i] - v[j]);
+            let e = weights.dir[k];
+            sum += (CENTRAL_VISCOSITY_FACTOR * weights.w[k] * e.dot(v[i] - v[j])) * e;
         }
         out[i] = sum;
     }
+}
+
+/// Central-force form of the viscous operator, `4 c e (e . (v_i - v_j))`: acts along the line of
+/// centres only, so it vanishes exactly for a rigid rotation and conserves angular momentum,
+/// which the Morris form `c (v_i - v_j)` does not near a free surface or wall (its kernel sum is
+/// one-sided there). Its continuum limit for incompressible flow is the same Laplacian when the
+/// coefficient is four times the Morris one (2D angular average of `e_a e_b e_k e_l`).
+const CENTRAL_VISCOSITY_FACTOR: f32 = 4.0;
+
+/// Mean diagonal of the operator's `2 x 2` block for one particle with edge-weight sum `sum_w`
+/// (Jacobi preconditioner).
+fn viscosity_diag(sum_w: f32) -> f32 {
+    0.5 * CENTRAL_VISCOSITY_FACTOR * sum_w
 }
 
 /// Applies the implicit-viscosity system operator `A = I + dt*L` to `v`, writing into `out`
@@ -351,7 +386,7 @@ fn laplacian_apply_into(neighbors: &NeighborLists, weights: &[f32], v: &[Vec2], 
 /// [`laplacian_apply_into`]'s doc comment).
 fn apply_viscosity_system_into(
     neighbors: &NeighborLists,
-    weights: &[f32],
+    weights: &ViscWeights,
     dt: f32,
     v: &[Vec2],
     lv_scratch: &mut [Vec2],
@@ -379,7 +414,7 @@ fn apply_viscosity_system_into(
 /// and re-merging the two components).
 fn solve_implicit_viscosity(
     neighbors: &NeighborLists,
-    weights: &[f32],
+    weights: &ViscWeights,
     v: &mut [Vec2],
     dt: f32,
 ) -> u32 {
@@ -456,6 +491,93 @@ struct BoundaryPair {
     c: f32,
 }
 
+/// Sub-grid squeeze-film link between two balls (or a ball and the circular drum wall, `other ==
+/// u32::MAX`) whose gap is below what the fluid particles resolve. The film exerts
+/// `-c (u_i - u_j) . n n` on ball `i` (and the opposite on `j`), `c = weight * squeeze coefficient`.
+struct SqueezeLink {
+    ball: u32,
+    other: u32,
+    /// Unit vector from `ball` towards its partner (outward for the wall).
+    n: Vec2,
+    c: f32,
+}
+
+const WALL_PARTNER: u32 = u32::MAX;
+
+/// Gain on the 2D Reynolds squeeze-film coefficient taken from the grid track
+/// (`mac::lubrication`), which was calibrated on the exact disc-pair and disc-wall solutions.
+const SQUEEZE_GAIN: f32 = 1.0;
+
+/// Upper bound of `dt * c / m_ball` for one link: beyond a few, the film already locks the relative
+/// normal motion within the sub-step, and a larger value would only make the joint CG system
+/// ill-conditioned (a stiff chain through a dense, settled charge).
+const SQUEEZE_STIFFNESS_CAP: f32 = 8.0;
+
+/// The film model is evaluated at no less than this fraction of the ball radius (surface
+/// roughness; touching or slightly overlapping balls would otherwise get an unbounded coefficient).
+const MIN_FILM_GAP_RATIO: f64 = 0.02;
+
+/// Builds the squeeze links of all ball pairs and ball-wall contacts closer than the resolved
+/// range. `dx` is the fluid particle spacing; as in the grid track, `1 - resolved_ratio(gap / dx)`
+/// of the film model is added where the discretised fluid cannot carry the film itself.
+fn squeeze_links(balls: &Balls, drum_radius: f32, dx: f32, mu: f32, dt: f32) -> Vec<SqueezeLink> {
+    use crate::mac::lubrication as lub;
+    let mut out = Vec::new();
+    let r = balls.radius;
+    if balls.is_empty() || r <= 0.0 || mu <= 0.0 {
+        return out;
+    }
+    let (a, b, dxd, mud) = (r as f64, drum_radius as f64, dx as f64, mu as f64);
+    let gain = SQUEEZE_GAIN;
+    let reach = (lub::H_START * dxd) as f32;
+    let c_max = SQUEEZE_STIFFNESS_CAP * balls.mass / dt.max(1e-12);
+    let grid = UniformGrid::build(&balls.x, 2.0 * r + reach);
+    let mut near: Vec<u32> = Vec::new();
+    for i in 0..balls.len() {
+        let xi = balls.x[i];
+        if !xi.is_finite() {
+            continue;
+        }
+        near.clear();
+        grid.for_each_near(xi, |j| near.push(j));
+        for &j in &near {
+            if (j as usize) <= i || !balls.x[j as usize].is_finite() {
+                continue;
+            }
+            let e = balls.x[j as usize] - xi;
+            let dist = e.length();
+            let gap = dist - 2.0 * r;
+            if gap >= reach || dist < 1e-9 {
+                continue;
+            }
+            let weight = 1.0 - lub::resolved_ratio(gap as f64 / dxd);
+            let h = (gap as f64).max(MIN_FILM_GAP_RATIO * a);
+            let c = weight * lub::squeeze_coefficient(1.0 / a, 1.0 / a, h, mud);
+            out.push(SqueezeLink {
+                ball: i as u32,
+                other: j,
+                n: e / dist,
+                c: (gain * c as f32).min(c_max),
+            });
+        }
+        let dist = xi.length();
+        let gap = drum_radius - r - dist;
+        if gap < reach && dist > 1e-9 {
+            let weight = 1.0 - lub::resolved_ratio(gap as f64 / dxd);
+            let h = (gap as f64).max(MIN_FILM_GAP_RATIO * a);
+            let c = weight
+                * lub::squeeze_coefficient(lub::disc_curvature(a), lub::wall_curvature(b), h, mud);
+            out.push(SqueezeLink {
+                ball: i as u32,
+                other: WALL_PARTNER,
+                n: xi / dist,
+                c: (gain * c as f32).min(c_max),
+            });
+        }
+    }
+    out
+}
+
 /// Solves the fluid viscosity step together with the balls' own velocities, implicitly:
 ///
 /// ```text
@@ -472,8 +594,9 @@ struct BoundaryPair {
 #[allow(clippy::too_many_arguments)]
 fn solve_viscosity_with_balls(
     neighbors: &NeighborLists,
-    weights: &[f32],
+    weights: &ViscWeights,
     pairs: &[BoundaryPair],
+    links: &[SqueezeLink],
     mass: f32,
     ball_mass: f32,
     ball_inertia: f32,
@@ -501,7 +624,7 @@ fn solve_viscosity_with_balls(
     let mut diag = vec![0.0f32; len];
     for (i, d) in diag[..n].iter_mut().enumerate() {
         let range = neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize;
-        *d = mass * (1.0 + dt * weights[range].iter().sum::<f32>());
+        *d = mass * (1.0 + dt * viscosity_diag(weights.w[range].iter().sum::<f32>()));
     }
     for bi in 0..nb {
         diag[n + bi] = ball_mass;
@@ -512,6 +635,13 @@ fn solve_viscosity_with_balls(
         diag[p.fluid as usize] += d;
         diag[n + p.ball as usize] += d;
         diag[n + nb + p.ball as usize] += d * p.lever.length_squared();
+    }
+    for l in links {
+        let d = dt * l.c;
+        diag[n + l.ball as usize] += d;
+        if l.other != WALL_PARTNER {
+            diag[n + l.other as usize] += d;
+        }
     }
     let inv_diag: Vec<f32> = diag.iter().map(|&d| 1.0 / d.max(1e-20)).collect();
 
@@ -532,6 +662,19 @@ fn solve_viscosity_with_balls(
             out[i] += d;
             out[n + bi] -= d;
             out[n + nb + bi].x -= cross2(p.lever, d);
+        }
+        for l in links {
+            let (i, rel) = (l.ball as usize, x[n + l.ball as usize]);
+            let rel = if l.other == WALL_PARTNER {
+                rel
+            } else {
+                rel - x[n + l.other as usize]
+            };
+            let d = (dt * l.c * l.n.dot(rel)) * l.n;
+            out[n + i] += d;
+            if l.other != WALL_PARTNER {
+                out[n + l.other as usize] -= d;
+            }
         }
     };
     let res_norm = |r: &[Vec2]| {
@@ -1955,7 +2098,8 @@ impl FluidParticles {
                     }
                 }
             }
-            if pairs.is_empty() {
+            let links = squeeze_links(balls, drum.radius_m, 0.5 * h, mu, dt);
+            if pairs.is_empty() && links.is_empty() {
                 viscosity_iterations =
                     solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
             } else {
@@ -1970,10 +2114,27 @@ impl FluidParticles {
                     .collect();
                 let ball_v0 = ball_v.clone();
                 let ball_w0 = ball_w.clone();
+                // The film resists squeezing only: a link whose gap is already opening at the
+                // start of the sub-step is dropped (a film cannot pull -- it cavitates -- and
+                // resisting the contact solver's separation motion keeps a settled charge
+                // jittering). The active set is fixed for the solve, so the system stays linear.
+                let links: Vec<SqueezeLink> = links
+                    .into_iter()
+                    .filter(|l| {
+                        let vi = ball_v0[l.ball as usize];
+                        let vj = if l.other == WALL_PARTNER {
+                            Vec2::ZERO
+                        } else {
+                            ball_v0[l.other as usize]
+                        };
+                        l.n.dot(vi - vj) > 0.0
+                    })
+                    .collect();
                 viscosity_iterations = solve_viscosity_with_balls(
                     &neighbors,
                     &weights,
                     &pairs,
+                    &links,
                     mass,
                     balls.mass,
                     balls.inertia,
@@ -2100,6 +2261,140 @@ mod tests {
             fill_fraction: 0.15,
             ..SlurryParams::default()
         }
+    }
+
+    fn two_balls(radius: f32, true_radius: f32, gap: f32, mass: f32) -> Balls {
+        let mut balls = Balls::empty();
+        let half = radius + 0.5 * gap;
+        balls.x = vec![Vec2::new(-half, 0.1), Vec2::new(half, 0.1)];
+        balls.v = vec![Vec2::ZERO; 2];
+        balls.theta = vec![0.0; 2];
+        balls.omega = vec![0.0; 2];
+        balls.radius = radius;
+        balls.true_radius = true_radius;
+        balls.mass = mass;
+        balls.inertia = 0.5 * mass * radius * radius;
+        balls
+    }
+
+    #[test]
+    fn viscous_operator_vanishes_for_rigid_rotation_even_at_a_free_edge() {
+        // A hexagonal patch has one-sided kernel sums along its whole rim. The central-force
+        // operator must still give exactly no force for a rigid rotation (and so conserves angular
+        // momentum); the plain Morris form `c (v_i - v_j)` does not.
+        let dx = 0.02f32;
+        let h = 2.0 * dx;
+        let mut x = Vec::new();
+        for j in -4i32..=4 {
+            for i in -4i32..=4 {
+                x.push(Vec2::new(
+                    dx * (i as f32 + 0.5 * (j & 1) as f32),
+                    dx * 0.866_025_4 * j as f32,
+                ));
+            }
+        }
+        let grid = UniformGrid::build(&x, h);
+        let neighbors = build_neighbor_lists(&x, &grid, h);
+        let mass = 1.0f32;
+        let density: Vec<f32> = (0..x.len())
+            .map(|i| {
+                mass * (poly6(0.0, h)
+                    + neighbors
+                        .of(i)
+                        .iter()
+                        .map(|&j| poly6((x[i] - x[j as usize]).length_squared(), h))
+                        .sum::<f32>())
+            })
+            .collect();
+        let weights = morris_weights(&x, &neighbors, &density, mass, &vec![1.0; x.len()], h);
+        let omega = 3.0f32;
+        let v: Vec<Vec2> = x.iter().map(|p| omega * Vec2::new(-p.y, p.x)).collect();
+        let mut out = vec![Vec2::ZERO; x.len()];
+        laplacian_apply_into(&neighbors, &weights, &v, &mut out);
+
+        let scale = weights.w.iter().cloned().fold(0.0f32, f32::max) * omega * 4.0 * dx;
+        let worst = out.iter().map(|o| o.length()).fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-4 * scale,
+            "rigid rotation feels a viscous force {worst} (scale {scale})"
+        );
+        // And a genuine shear still does: v = (y, 0) in the patch interior.
+        let shear: Vec<Vec2> = x.iter().map(|p| Vec2::new(p.y, 0.0)).collect();
+        laplacian_apply_into(&neighbors, &weights, &shear, &mut out);
+        let dissipated: f32 = out.iter().zip(&shear).map(|(o, s)| o.dot(*s)).sum();
+        assert!(dissipated > 0.0, "shear must be dissipative");
+    }
+
+    #[test]
+    fn squeeze_links_exist_only_for_gaps_below_the_resolved_range() {
+        let dx = 0.0125;
+        let close = squeeze_links(&two_balls(0.04, 0.04, 0.4 * dx, 1.0), 0.5, dx, 100.0, 1e-3);
+        assert_eq!(close.len(), 1, "a gap of 0.4 dx must be lubricated");
+        assert!(close[0].c > 0.0 && (close[0].n - Vec2::X).length() < 1e-6);
+        let far = squeeze_links(&two_balls(0.04, 0.04, 9.0 * dx, 1.0), 0.5, dx, 100.0, 1e-3);
+        assert!(far.is_empty(), "a gap of 9 dx is resolved by the fluid");
+
+        // A ball hugging the wall gets a wall link with the outward normal.
+        let mut wall = two_balls(0.04, 0.04, 20.0 * dx, 1.0);
+        wall.x = vec![Vec2::new(0.0, -(0.5 - 0.04 - 0.3 * dx))];
+        wall.v.truncate(1);
+        wall.theta.truncate(1);
+        wall.omega.truncate(1);
+        let links = squeeze_links(&wall, 0.5, dx, 100.0, 1e-3);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].other, WALL_PARTNER);
+        assert!((links[0].n - Vec2::new(0.0, -1.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn squeeze_link_damps_the_approach_and_conserves_momentum() {
+        // Two equal balls approaching along x, no fluid neighbours: the implicit film leaves the
+        // total momentum untouched and reduces the closing speed u to u / (1 + 2 dt c / m).
+        let (m, dt) = (2.0f32, 1e-3f32);
+        let c = 3.0 * m / dt;
+        let links = [SqueezeLink {
+            ball: 0,
+            other: 1,
+            n: Vec2::X,
+            c,
+        }];
+        let neighbors = NeighborLists {
+            offsets: vec![0, 0],
+            nbrs: Vec::new(),
+        };
+        let mut v = vec![Vec2::new(0.3, -0.2)];
+        let mut ball_v = vec![Vec2::new(1.0, 0.5), Vec2::new(-1.0, 0.5)];
+        let mut ball_w = vec![0.0f32; 2];
+        let no_weights = ViscWeights {
+            w: Vec::new(),
+            dir: Vec::new(),
+        };
+        solve_viscosity_with_balls(
+            &neighbors,
+            &no_weights,
+            &[],
+            &links,
+            0.01,
+            m,
+            0.1,
+            dt,
+            &mut v,
+            &mut ball_v,
+            &mut ball_w,
+        );
+        let closing = (ball_v[0] - ball_v[1]).x;
+        assert!(
+            (closing - 2.0 / 7.0).abs() < 1e-3,
+            "closing speed {closing}"
+        );
+        let total = ball_v[0] + ball_v[1];
+        assert!(
+            (total - Vec2::new(0.0, 1.0)).length() < 1e-4,
+            "momentum changed: {total:?}"
+        );
+        // The tangential component is untouched by a normal squeeze film.
+        assert!((ball_v[0].y - 0.5).abs() < 1e-5 && (ball_v[1].y - 0.5).abs() < 1e-5);
+        assert!((v[0] - Vec2::new(0.3, -0.2)).length() < 1e-6);
     }
 
     #[test]
