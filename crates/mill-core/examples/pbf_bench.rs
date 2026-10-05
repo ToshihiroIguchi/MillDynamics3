@@ -103,11 +103,12 @@ fn main() {
         if sim.sim_time() >= next {
             next += get("--dtp", 0.25) as f64;
             println!(
-                "{:>7.2} {:>12.5e} {:>10.2} {:>9.4}",
+                "{:>7.2} {:>12.5e} {:>10.2} {:>9.4} hits {}",
                 sim.sim_time(),
                 tg,
                 sim.power_draw_w(),
-                sim.balls().v.iter().map(|v| v.y).sum::<f32>() / sim.balls().v.len() as f32
+                sim.balls().v.iter().map(|v| v.y).sum::<f32>() / sim.balls().v.len() as f32,
+                sim.coupling_clamp_hits()
             );
         }
     }

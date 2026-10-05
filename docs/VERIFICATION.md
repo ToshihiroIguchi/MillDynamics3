@@ -1135,3 +1135,21 @@ free-space Stokes drag (it depends on the confinement through a logarithm), so t
 physical basis. Fix direction: replace it by a drag calibrated on the confined (annulus/pair) solutions
 the grid track provides, then re-run the benchmark above. Lubrication and viscosity are not yet isolated.
 
+#### Correction: the drag rate is not the lever (2026-10-05)
+
+Replacing `tau_stokes` by a confined (Kuwabara) rate and scaling it x1 / x3 changed the isolated-disc
+settling speed by < 5 %: the closure is already saturated (`beta` ~ 1), so the ball simply follows its
+entrained fluid. A viscosity sweep shows the resistance is not viscous at all in PBF:
+
+| nu | exact Stokes terminal speed | PBF plateau speed |
+|---|---|---|
+| 0.1 | 0.423 | 0.8-0.9 |
+| 0.3 | 0.141 | 0.63-0.69 |
+| 1 | 0.042 | 0.54-0.58 |
+| 3 | 0.014 | 0.35-0.43 (no clamp hits) |
+
+A 30x error at nu = 3 means the viscous momentum exchange between the entrained blob and the resolved
+fluid around it is far too weak (the fluid below the disc is displaced almost freely). The drag
+replacement was reverted. Fixing this needs the fluid response around a ball (ball-surface no-slip in the
+viscosity solve / a resolved-flow boundary), not the relaxation constant.
+
