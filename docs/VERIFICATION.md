@@ -1240,3 +1240,18 @@ with ~+-10 % knob spread: **the Bingham target is not met**. The yield stress ch
 the stiffness of the regularisation does, which points at the pile dynamics (what the near-ball
 viscosity does when the fluid yields) rather than the plug itself; not yet diagnosed. The implementation
 is kept (physically motivated, no regression, Newtonian path bit-identical) but unverified against the grid.
+
+### PBF at water-like viscosity (2026-10-05)
+
+Matched start (`--match 1 --m 10`, k = 1, rho_s 8, omega 1, 4 s), peak gravity moment, no grid reference exists
+(the grid NaNs at nu 0.01). res 40 / 80 at substeps 8 and 16:
+
+| nu | 40/8 | 80/8 | 40/16 | 80/16 | spread |
+|---|---|---|---|---|---|
+| 0.01 | -0.94 | -0.95 | -1.06 | -0.81 | about +-13 % |
+| 0.003 | -0.80 | -0.74 | -0.83 | -0.65 | about +-12 % |
+
+PBF runs without NaN or clamp trouble, but the result is not converged in either knob (res 80 / substeps 16 is
+the lowest and the trend is not monotone), and this is with k = 1, so coarse-graining is not the main cause of the
+water spread. Converging water needs a resolved wake/boundary layer, i.e. finer fluid and more sub-steps
+(substeps is capped at 16), not a different k.
