@@ -1153,3 +1153,37 @@ fluid around it is far too weak (the fluid below the disc is displaced almost fr
 replacement was reverted. Fixing this needs the fluid response around a ball (ball-surface no-slip in the
 viscosity solve / a resolved-flow boundary), not the relaxation constant.
 
+### PBF ball no-slip boundary (2026-10-05)
+
+The viscous exchange between a ball and the resolved fluid was far too weak (previous section), so the
+Stokes part of step 6.5 is gone. Instead step 7 treats each ball's circumference (`dx = h/2` ghost
+points carrying the rigid-body surface velocity) as a Dirichlet boundary of the Morris viscosity
+Laplacian, with the **balls' velocity and spin as extra unknowns of the same implicit CG solve**
+(`solve_viscosity_with_balls`: SPD, Jacobi-preconditioned, exact linear/angular momentum exchange).
+Treating the ball explicitly was unstable at >= 10 Pa*s (v_rms 0.88 m/s in a still drum, 14 % clamp
+hits); starting the solve from the ball velocity *after* this sub-step's earlier impulses avoids
+double counting with form drag and overlap pushes. Form drag (inertial) stays in step 6.5.
+`BALL_BC_GAIN = 0.5` compensates the single ghost layer; the isolated disc is insensitive to it
+between 0.5 and 10, the dense pile varies least with resolution at 0.25-0.5.
+
+Isolated disc (`--match 1 --m 1 --y0 0 --omega 0.001`), settling speed, exact concentric Stokes in
+brackets: nu 0.1 0.37-0.39 (0.423), nu 3 0.02-0.05 (0.014); res 40 and 80 agree within 2 %
+(before: 0.8-1.4 and 0.35-0.43, i.e. 2-3x and 30x too fast).
+
+Dense pile (`--match 1 --m 10`, nu 0.1, grid n=96: -1.30), peak gravity moment:
+
+| setting | before | after |
+|---|---|---|
+| res 40 / 60 / 80, substeps 8 | -0.64 / - / -0.46 | -1.04 / -1.03 / -1.04 |
+| res 40, substeps 4 / 8 / 12 / 16 | - / -0.64 / - / -0.97 | -0.99 / -1.04 / -1.16 / -1.18 |
+| nu 1, res 40 / 80 / substeps 16 | - | -1.19 / -1.15 / -1.16 |
+
+Resolution dependence is gone (1 %), and at nu = 1 all knobs agree within 3.5 %. At nu = 0.1 the
+sub-step count still moves the peak by +-9 % and the absolute level is ~20 % below the grid, so the
++-3 % goal is **not yet met** at low viscosity; candidate causes: no sub-grid lubrication/contact
+film between discs, the 10 % air gap, and the position-based sub-step dependence. k (coarse-graining)
+is not re-measured (the matched start does not scale with k); a coarse ball now sees its own radius
+in the boundary, i.e. drag grows only logarithmically with k, consistent with E7c for dense charges.
+Cost: +45 % per frame (realtime 6.0 -> 10.5, balanced 18 -> 28, accuracy 54 -> 77 ms, same session).
+Bingham not re-run. The old test of k-independence of the relaxation fraction was removed with the
+Stokes closure; all other tests pass.

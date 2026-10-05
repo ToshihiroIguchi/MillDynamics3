@@ -759,6 +759,13 @@ the full-system invariant directly; no code in `pbf.rs`/`dem.rs` changed as a re
 finding. An angular ball-speed backstop added while chasing this false alarm was, together with the
 pre-existing linear one, ablation-tested (2026-09-27, ss9) and removed once shown not load-bearing.
 
+
+**Update 2026-10-05.** The `tau_stokes` term was removed: free-space 2D Stokes drag has no basis and the
+closure was saturated, so the ball merely followed its entrained fluid. Viscous drag now comes from a
+no-slip ball-surface boundary in the implicit viscosity solve (pbf.rs step 7, balls solved together with
+the fluid); step 6.5 keeps only the form-drag relaxation. See docs/VERIFICATION.md "PBF ball no-slip
+boundary".
+
 ### 6.3 Buoyancy (pbf.rs step 6.6)
 
 Balls are typically sub-resolution relative to the fluid spacing and do not contribute to the

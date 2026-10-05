@@ -436,6 +436,156 @@ fn solve_implicit_viscosity(
     VISCOSITY_CG_MAX_ITERS
 }
 
+/// Gain of the ball-surface no-slip boundary in the viscosity solve (step 7). The ghost points on a
+/// ball's circumference are a single layer, whereas a true wall is a half-space of particles, so
+/// the kernel-truncated weights need a gain. Calibrated on the grid reference (docs/VERIFICATION.md
+/// "PBF ball no-slip boundary"): the isolated-disc settling speed is insensitive to it between 0.5
+/// and 10, and the dense-pile gravity moment varies least with resolution at 0.25-0.5.
+const BALL_BC_GAIN: f32 = 0.5;
+
+/// One fluid particle / ball-surface ghost point pair of the no-slip boundary.
+struct BoundaryPair {
+    fluid: u32,
+    ball: u32,
+    /// Ghost point position relative to the ball centre.
+    lever: Vec2,
+    /// Morris-style coupling weight (already includes [`BALL_BC_GAIN`]).
+    c: f32,
+}
+
+/// Solves the fluid viscosity step together with the balls' own velocities, implicitly:
+///
+/// ```text
+/// m v_i + dt m (L v)_i + dt m sum_k c_ik (v_i - u_k)  = m v*_i
+/// m_b V_b - dt m sum_(i,k in b) c_ik (v_i - u_k)      = m_b V*_b
+/// I_b W_b - dt m sum_(i,k in b) c_ik l_k x (v_i - u_k) = I_b W*_b,   u_k = V_b + W_b perp(l_k)
+/// ```
+///
+/// The system is symmetric positive definite and conserves linear and angular momentum between the
+/// fluid and each ball exactly (the ball gets what the wall term takes from the fluid). Treating
+/// the ball explicitly instead is unstable once the slurry acts as a rigid lump (>= ~10 Pa*s).
+/// Unknowns are packed as `[v (n), V (nb), (W, 0) (nb)]`; Jacobi-preconditioned CG. Returns the
+/// iteration count; `v`, `ball_v`, `ball_w` hold the solution on return.
+#[allow(clippy::too_many_arguments)]
+fn solve_viscosity_with_balls(
+    neighbors: &NeighborLists,
+    weights: &[f32],
+    pairs: &[BoundaryPair],
+    mass: f32,
+    ball_mass: f32,
+    ball_inertia: f32,
+    dt: f32,
+    v: &mut [Vec2],
+    ball_v: &mut [Vec2],
+    ball_w: &mut [f32],
+) -> u32 {
+    let n = v.len();
+    let nb = ball_v.len();
+    let len = n + 2 * nb;
+    let perp = |l: Vec2| Vec2::new(-l.y, l.x);
+
+    // Right-hand side and warm start.
+    let mut x: Vec<Vec2> = Vec::with_capacity(len);
+    x.extend_from_slice(v);
+    x.extend_from_slice(ball_v);
+    x.extend(ball_w.iter().map(|&w| Vec2::new(w, 0.0)));
+    let mut b: Vec<Vec2> = Vec::with_capacity(len);
+    b.extend(v.iter().map(|&vi| mass * vi));
+    b.extend(ball_v.iter().map(|&vb| ball_mass * vb));
+    b.extend(ball_w.iter().map(|&w| Vec2::new(ball_inertia * w, 0.0)));
+
+    // Jacobi preconditioner (inverse of the operator's diagonal).
+    let mut diag = vec![0.0f32; len];
+    for (i, d) in diag[..n].iter_mut().enumerate() {
+        let range = neighbors.offsets[i] as usize..neighbors.offsets[i + 1] as usize;
+        *d = mass * (1.0 + dt * weights[range].iter().sum::<f32>());
+    }
+    for bi in 0..nb {
+        diag[n + bi] = ball_mass;
+        diag[n + nb + bi] = ball_inertia;
+    }
+    for p in pairs {
+        let d = dt * mass * p.c;
+        diag[p.fluid as usize] += d;
+        diag[n + p.ball as usize] += d;
+        diag[n + nb + p.ball as usize] += d * p.lever.length_squared();
+    }
+    let inv_diag: Vec<f32> = diag.iter().map(|&d| 1.0 / d.max(1e-20)).collect();
+
+    let mut lv = vec![Vec2::ZERO; n];
+    let apply = |x: &[Vec2], out: &mut [Vec2], lv: &mut [Vec2]| {
+        laplacian_apply_into(neighbors, weights, &x[..n], lv);
+        for i in 0..n {
+            out[i] = mass * (x[i] + dt * lv[i]);
+        }
+        for bi in 0..nb {
+            out[n + bi] = ball_mass * x[n + bi];
+            out[n + nb + bi] = Vec2::new(ball_inertia * x[n + nb + bi].x, 0.0);
+        }
+        for p in pairs {
+            let (i, bi) = (p.fluid as usize, p.ball as usize);
+            let u = x[n + bi] + x[n + nb + bi].x * perp(p.lever);
+            let d = (dt * mass * p.c) * (x[i] - u);
+            out[i] += d;
+            out[n + bi] -= d;
+            out[n + nb + bi].x -= cross2(p.lever, d);
+        }
+    };
+    let res_norm = |r: &[Vec2]| {
+        r.iter()
+            .zip(&inv_diag)
+            .map(|(&ri, &d)| d * ri.length_squared())
+            .sum::<f32>()
+            .sqrt()
+    };
+
+    let mut ax = vec![Vec2::ZERO; len];
+    apply(&x, &mut ax, &mut lv);
+    let mut r: Vec<Vec2> = b.iter().zip(&ax).map(|(&bi, &ai)| bi - ai).collect();
+    let mut z: Vec<Vec2> = r.iter().zip(&inv_diag).map(|(&ri, &d)| ri * d).collect();
+    let b_norm = res_norm(&b);
+    let mut iters = 0;
+    if b_norm > 0.0 && b_norm.is_finite() && res_norm(&r) > VISCOSITY_CG_TOLERANCE * b_norm {
+        let target = VISCOSITY_CG_TOLERANCE * b_norm;
+        let mut p_dir = z.clone();
+        let mut rz_old = dot(&r, &z);
+        let mut ap = vec![Vec2::ZERO; len];
+        // Extra iterations over the fluid-only solve: the ball unknowns couple distant fluid
+        // through a stiff rigid-body mode.
+        for iter in 1..=4 * VISCOSITY_CG_MAX_ITERS {
+            iters = iter;
+            apply(&p_dir, &mut ap, &mut lv);
+            let p_ap = dot(&p_dir, &ap);
+            if p_ap <= 0.0 || !p_ap.is_finite() {
+                break;
+            }
+            let alpha = rz_old / p_ap;
+            for i in 0..len {
+                x[i] += alpha * p_dir[i];
+                r[i] -= alpha * ap[i];
+            }
+            if res_norm(&r) <= target {
+                break;
+            }
+            for i in 0..len {
+                z[i] = r[i] * inv_diag[i];
+            }
+            let rz_new = dot(&r, &z);
+            let beta = rz_new / rz_old;
+            for i in 0..len {
+                p_dir[i] = z[i] + beta * p_dir[i];
+            }
+            rz_old = rz_new;
+        }
+    }
+    v.copy_from_slice(&x[..n]);
+    ball_v.copy_from_slice(&x[n..n + nb]);
+    for (w, xi) in ball_w.iter_mut().zip(&x[n + nb..]) {
+        *w = xi.x;
+    }
+    iters
+}
+
 /// Mean shear rate `gamma_dot = sqrt(2 D:D)` over all particles, `D = sym(grad v)` the symmetric
 /// part of the SPH velocity-gradient tensor `grad_v_i = sum_j (m_j/rho_j) * (v_j - v_i) (x)
 /// grad_W_ij` (standard SPH gradient estimator, the same neighbour-averaging form the density
@@ -1385,12 +1535,12 @@ impl FluidParticles {
             // than via `ball_mass` directly, avoiding a second, redundant re-derivation of the same
             // material density from `true_radius` alone.
             let mass_true = rho_ball * std::f32::consts::PI * balls.true_radius * balls.true_radius;
-            let inv_tau_stokes = if rho_ball > 0.0 {
-                1.0 / (rho_ball * balls.true_radius * balls.true_radius / (4.0 * mu)).max(1e-9)
-            } else {
-                0.0
-            };
-            if beta_b > 0.0 && inv_tau_stokes > 0.0 {
+            // The viscous (Stokes) part of the drag comes from the ball-surface no-slip boundary
+            // in step 7: free-space `tau_stokes = rho r^2 / 4 mu` has no basis in 2D and the
+            // closure was saturated, so it was not the lever (docs/VERIFICATION.md). Only the
+            // inertial form drag stays in this relaxation closure.
+            let inv_tau_stokes = 0.0f32;
+            if beta_b > 0.0 {
                 let h_c = balls.radius + h;
                 let w_hc0 = poly6(0.0, h_c).max(1e-12);
                 // Coupling-only grid, sized to this step's actual query radius (`h_c`), queried
@@ -1728,7 +1878,85 @@ impl FluidParticles {
         }
         if mu > 0.0 {
             let weights = morris_weights(&self.x, &neighbors, &density, mass, mu, h);
-            viscosity_iterations = solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
+            // Ball surface as a no-slip (Dirichlet) boundary: ghost points on each ball's
+            // circumference carry its rigid-body surface velocity and enter the Morris Laplacian
+            // as extra neighbours; the balls' velocities are solved for together with the fluid.
+            let mut pairs: Vec<BoundaryPair> = Vec::new();
+            if !balls.is_empty() && balls.radius > 0.0 {
+                let dx = 0.5 * h;
+                let count = boundary_points_per_ball(balls.radius, dx) as usize;
+                let pts = ball_boundary_particles(balls, dx);
+                let grid_now = UniformGrid::build(&self.x, h);
+                let eta2 = VISCOSITY_ETA_FACTOR * h * h;
+                let mut nearby: Vec<u32> = Vec::new();
+                for (k, &bp) in pts.iter().enumerate() {
+                    let bi = k / count;
+                    if !balls.x[bi].is_finite() {
+                        continue;
+                    }
+                    nearby.clear();
+                    grid_now.for_each_near(bp, |j| nearby.push(j));
+                    for &j in &nearby {
+                        let delta = self.x[j as usize] - bp;
+                        let r = delta.length();
+                        if !r.is_finite() || r >= h {
+                            continue;
+                        }
+                        let grad = spiky_grad(delta, r, h);
+                        let rho_i = density[j as usize].max(1e-6);
+                        let c = BALL_BC_GAIN
+                            * (mass * 2.0 * mu / (rho_i * rest_density))
+                            * delta.dot(grad).abs()
+                            / (delta.length_squared() + eta2);
+                        if c > 0.0 {
+                            pairs.push(BoundaryPair {
+                                fluid: j,
+                                ball: bi as u32,
+                                lever: bp - balls.x[bi],
+                                c,
+                            });
+                        }
+                    }
+                }
+            }
+            if pairs.is_empty() {
+                viscosity_iterations =
+                    solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
+            } else {
+                // Start from the ball velocities *after* this sub-step's earlier impulses
+                // (overlap push, form drag, buoyancy) so the no-slip solve sees them and does not
+                // double-count the same relative velocity.
+                let mut ball_v: Vec<Vec2> = (0..balls.len())
+                    .map(|bi| balls.v[bi] + coupling.impulses[bi] / balls.mass)
+                    .collect();
+                let mut ball_w: Vec<f32> = (0..balls.len())
+                    .map(|bi| balls.omega[bi] + coupling.angular_impulses[bi] / balls.inertia)
+                    .collect();
+                let ball_v0 = ball_v.clone();
+                let ball_w0 = ball_w.clone();
+                viscosity_iterations = solve_viscosity_with_balls(
+                    &neighbors,
+                    &weights,
+                    &pairs,
+                    mass,
+                    balls.mass,
+                    balls.inertia,
+                    dt,
+                    &mut self.v,
+                    &mut ball_v,
+                    &mut ball_w,
+                );
+                // The ball gets exactly what the wall term took from the fluid.
+                for bi in 0..balls.len() {
+                    let dv = ball_v[bi] - ball_v0[bi];
+                    let dw = ball_w[bi] - ball_w0[bi];
+                    if dv.is_finite() && dw.is_finite() {
+                        coupling.impulses[bi] += balls.mass * dv;
+                        coupling.angular_impulses[bi] += balls.inertia * dw;
+                        coupling.fluid_momentum_change -= balls.mass * dv;
+                    }
+                }
+            }
         }
         let mean_shear_rate_per_s =
             mean_shear_rate(&self.x, &self.v, &neighbors, &density, mass, h);
@@ -2013,56 +2241,6 @@ mod tests {
             "drag should scale up substantially with viscosity: \
              impulse(mu={mu_low})={impulse_low}, impulse(mu={mu_high})={impulse_high}"
         );
-    }
-
-    #[test]
-    fn ball_drag_relaxation_fraction_is_independent_of_coarse_graining() {
-        // Regression for the 2026-09-26 `Balls::true_radius` fix (docs/PHYSICS.md ss6.2): before
-        // it, this step's `inv_tau_stokes`/`inv_tau_form` used the coarse-grained `balls.radius`,
-        // so a purely cosmetic choice of `simulation.max_balls` (which only changes how many DEM
-        // "super-balls" a fixed true media population is coarse-grained into, `Params::
-        // effective_media`) silently changed the *physical* fluid-drag law itself -- a real 10mm
-        // particle and a `max_balls`-driven 40.5mm super-ball representing a cluster of them
-        // relaxed toward the local fluid at very different rates (measured one-sub-step relaxation
-        // fractions 0.82 vs 0.26 at this project's default viscosity) even though both are meant to
-        // represent the *same* true small media. This directly checks the fixed invariant: holding
-        // the true particle size and every other physical parameter fixed, varying only the
-        // coarse-grained `radius`/`mass`/`inertia` a `scale_factor > 1` would produce should leave
-        // the one-sub-step relaxation fraction (`|dv_b| / |v_rel|`) essentially unchanged.
-        let drum = still_drum(2.0);
-        let true_radius_m = 0.005; // this project's default 10mm media diameter
-        let ball_density = 6000.0;
-        let mu = 50.0; // this project's default slurry viscosity
-        let fluid_velocity = Vec2::new(1.0, 0.0);
-        let dt = 1.0 / 240.0;
-        let slurry = SlurryParams {
-            viscosity_pa_s: mu,
-            fill_fraction: 0.0,
-            wettability: 0.0,
-            ..SlurryParams::default()
-        };
-
-        let relaxation_fraction = |coarse_radius_m: f32| -> f32 {
-            let (mut balls, mut fluid) =
-                ball_in_uniform_fluid_patch(coarse_radius_m, ball_density, &slurry, fluid_velocity);
-            balls.true_radius = true_radius_m;
-            let (impulses, _stats) = fluid.step_coupled(&drum, 0.0, &slurry, 1, dt, &balls);
-            (impulses.impulses[0].length() / balls.mass) / fluid_velocity.x
-        };
-
-        // scale_factor 1x, 2x, 4x (this project's own 150-ball default preset coarse-grains to
-        // roughly 4x the true 10mm diameter at its default fill fraction).
-        let baseline = relaxation_fraction(true_radius_m);
-        for scale_factor in [1.0, 2.0, 4.0] {
-            let fraction = relaxation_fraction(true_radius_m * scale_factor);
-            let rel_err = (fraction - baseline).abs() / baseline;
-            assert!(
-                rel_err < 0.05,
-                "relaxation fraction at scale_factor={scale_factor} ({fraction}) diverged from the \
-                 true-particle baseline ({baseline}) by {rel_err} -- max_balls (a pure performance \
-                 knob) should not change the physical drag law"
-            );
-        }
     }
 
     #[test]
