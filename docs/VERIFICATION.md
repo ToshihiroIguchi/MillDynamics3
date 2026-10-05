@@ -1205,3 +1205,19 @@ experiment, reverted): nu 3 isolated-disc speed at 4 / 8 / 16 sub-steps 0.065 / 
 0.075 / 0.040 / 0.031 without it. The dependence is essentially unchanged, so the operator-splitting
 explanation above is at most a small part; the dominant dt-dependent term is still unidentified
 (not the iteration counts, not the splitting order). Practical rule stays: >= 12 sub-steps at nu 0.1.
+
+### PBF: Bingham and coarse-graining k (2026-10-05)
+
+**Bingham.** `pbf_bench --tau 2.5` gives bit-identical results to the Newtonian runs (-1.04 / -1.04 /
+-1.18 at res 40 / 80 substeps 8 / res 40 substeps 16): `pbf.rs` has no yield-stress model at all (the
+Bingham / Herschel-Bulkley effective viscosity is still marked "future work" next to `mean_shear_rate`;
+`Params` carries the fields but nothing reads them). The grid track meets the +-3 % gate for paste
+(tau 2.5 / 10, n96 vs n128 within 1.6 % / 0.1 %), PBF cannot represent it. Closing this needs a
+shear-rate-dependent viscosity in step 7 (Papanastasiou-style regularisation is the obvious first try).
+
+**k.** Unmatched start (`--k 1/2/3`, nu 0.1, res 40, substeps 12, 4 s), peak gravity moment:
+k=1 (10 balls) -1.23, k=2 (2 balls) -0.88, k=3 (1 ball) -0.89. Ball counts round (2 x 4 = 8 and
+1 x 9 = 9 of 10 particle-masses), so per unit mass -1.23 / -1.10 / -0.98: roughly -10 % and -20 %, with
+random packings that differ per run, so this is indicative only, not a pass. Consistent with the
+no-slip boundary seeing the coarse radius (drag grows only logarithmically with k). A clean k test
+needs a matched start at the same total mass for each k.
