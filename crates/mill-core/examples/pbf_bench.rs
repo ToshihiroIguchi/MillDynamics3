@@ -54,17 +54,18 @@ fn main() {
         // Same start as `grid_probe --exp E8a`: hex block of `--m` discs, solid-body rotation.
         let count = get("--m", 10.0) as usize;
         let pitch = 2.4 * a;
+        let y0 = get("--y0", -0.25);
         let mut sites: Vec<(f32, f32)> = Vec::new();
         for j in -5i32..=5 {
             for i in -5i32..=5 {
                 sites.push((
                     pitch * (i as f32 + 0.5 * (j & 1) as f32) + 0.0137,
-                    pitch * 0.866_025_4 * j as f32 - 0.0091 - 0.25,
+                    pitch * 0.866_025_4 * j as f32 - 0.0091 + y0,
                 ));
             }
         }
         sites.sort_by(|p, q| {
-            (p.0 * p.0 + (p.1 + 0.25).powi(2)).total_cmp(&(q.0 * q.0 + (q.1 + 0.25).powi(2)))
+            (p.0 * p.0 + (p.1 - y0).powi(2)).total_cmp(&(q.0 * q.0 + (q.1 - y0).powi(2)))
         });
         sites.truncate(count);
         let pos: Vec<glam::Vec2> = sites.iter().map(|&(x, y)| glam::Vec2::new(x, y)).collect();
@@ -80,7 +81,14 @@ fn main() {
         sim.params().simulation.resolution,
         sim.params().simulation.substeps
     );
-    println!("{:>7} {:>12} {:>10}", "t", "gravity mom", "P draw");
+    // Isolated-disc reference: concentric Stokes terminal speed (force per unit density / drag).
+    let f_unit = (rho as f64 - 1.0) * std::f64::consts::PI * (a as f64).powi(2) * 9.81;
+    let c1 = mill_core::mac::verify::stokes_annulus_drag(a as f64, 0.5, 1.0, nu as f64);
+    println!("concentric Stokes terminal speed {:.4}", f_unit / c1);
+    println!(
+        "{:>7} {:>12} {:>10} {:>9}",
+        "t", "gravity mom", "P draw", "mean vy"
+    );
     let (mut next, mut peak, mut sum, mut cnt) = (0.0, 0.0f64, 0.0f64, 0usize);
     while sim.sim_time() < t_end {
         sim.step_fixed();
@@ -93,12 +101,13 @@ fn main() {
             cnt += 1;
         }
         if sim.sim_time() >= next {
-            next += 0.25;
+            next += get("--dtp", 0.25) as f64;
             println!(
-                "{:>7.2} {:>12.5e} {:>10.2}",
+                "{:>7.2} {:>12.5e} {:>10.2} {:>9.4}",
                 sim.sim_time(),
                 tg,
-                sim.power_draw_w()
+                sim.power_draw_w(),
+                sim.balls().v.iter().map(|v| v.y).sum::<f32>() / sim.balls().v.len() as f32
             );
         }
     }

@@ -1117,3 +1117,21 @@ Findings:
 With a shared start PBF is 26-65 % below the grid and the cost-knob spread grows to about +-35 %, so the
 earlier +-15 % was optimistic. Next: attribute to drag / lubrication / viscosity terms.
 
+### PBF drag attribution: isolated disc (2026-10-05)
+
+`pbf_bench --match 1 --m 1 --y0 0 --omega 0.001` drops one disc (rho_s 8, a = 0.04, nu 0.1) from the
+centre of the slurry-filled drum; the grid's exact concentric Stokes result (`stokes_annulus_drag`)
+gives a terminal speed of 0.423 (grid units).
+
+| PBF setting | settling speed before the wall |
+|---|---|
+| res 40 / substeps 8 | 0.8-0.9 |
+| res 80 / substeps 8 | 0.9-1.4 |
+
+PBF settles 2-3x faster than the exact Stokes drag allows and faster still at finer resolution, so the
+**ball drag term** (step 6.5 of `pbf.rs`: relaxation to an entrained fluid mass with free-space
+`tau_stokes = rho r^2 / 4 mu`) is the main source of the resolution dependence. A 2D disc has no
+free-space Stokes drag (it depends on the confinement through a logarithm), so that constant has no
+physical basis. Fix direction: replace it by a drag calibrated on the confined (annulus/pair) solutions
+the grid track provides, then re-run the benchmark above. Lubrication and viscosity are not yet isolated.
+
