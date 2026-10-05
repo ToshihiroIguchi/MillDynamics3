@@ -1583,7 +1583,7 @@ fn e8a() {
     let omega = get("--omega", 2.0);
     let t_end = get("--t", 2.0);
     let dt = get("--dt", 0.005);
-    let (a, rho, g) = (get("--a", 0.04), get("--rho", 2.0), 50.0);
+    let (a, rho, g) = (get("--a", 0.04), get("--rho", 2.0), get("--g", 50.0));
     let count = get("--m", 12.0) as usize;
     let dx = 1.1 / n as f64;
     let pitch = 2.4 * a;
