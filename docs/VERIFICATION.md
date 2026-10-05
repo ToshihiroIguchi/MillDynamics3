@@ -1199,3 +1199,9 @@ dense pile at nu 0.1 the peak converges at 12-16 sub-steps (-1.16 / -1.18, i.e. 
 -1.30); 4-8 sub-steps are not converged. Consequence: +-3 % across sub-steps needs >= 12 sub-steps at
 nu 0.1 (cost), or a splitting fix (Strang half-steps) that is not yet tried. Moving the solve to the start
 of the step does not help (the scheme is cyclic). `pbf_bench` gained `--iters` and `--diters`.
+
+Strang splitting tried (viscosity half-step before the predict and after the projection, env-gated
+experiment, reverted): nu 3 isolated-disc speed at 4 / 8 / 16 sub-steps 0.065 / 0.035 / 0.029 versus
+0.075 / 0.040 / 0.031 without it. The dependence is essentially unchanged, so the operator-splitting
+explanation above is at most a small part; the dominant dt-dependent term is still unidentified
+(not the iteration counts, not the splitting order). Practical rule stays: >= 12 sub-steps at nu 0.1.
