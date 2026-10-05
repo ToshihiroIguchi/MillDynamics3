@@ -3,7 +3,7 @@
 //! the drum axis -- the same metric `grid_probe --exp E8a` prints. Dimensionless grid units map
 //! to SI as drum radius 0.5 m, fluid density 1000 kg/m^3, mu = nu * 1000.
 //! `cargo run --release -p mill-core --example pbf_bench -- [--nu 0.1] [--rho 8] [--omega 1]
-//!  [--a 0.04] [--fill 0.077] [--t 4] [--res 40] [--substeps 8] [--k 1] [--tau 0]
+//!  [--a 0.04] [--iters 3] [--diters 2] [--fill 0.077] [--t 4] [--res 40] [--substeps 8] [--k 1] [--tau 0]
 //!  [--match 1 --m 10]` (`--match`: grid-identical start)
 
 use mill_core::params::{CoarseGrainingMode, Rheology, SpeedMode};
@@ -44,6 +44,8 @@ fn main() {
     p.simulation.resolution = get("--res", 40.0) as u32;
     p.simulation.substeps = get("--substeps", 8.0) as u32;
     p.simulation.max_balls = 10_000;
+    p.simulation.pbf_iterations = get("--iters", p.simulation.pbf_iterations as f32) as u32;
+    p.simulation.dem_iterations = get("--diters", p.simulation.dem_iterations as f32) as u32;
     let k = get("--k", 1.0);
     if k > 1.0 {
         p.simulation.coarse_graining_mode = CoarseGrainingMode::Manual;

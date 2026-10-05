@@ -1187,3 +1187,15 @@ in the boundary, i.e. drag grows only logarithmically with k, consistent with E7
 Cost: +45 % per frame (realtime 6.0 -> 10.5, balanced 18 -> 28, accuracy 54 -> 77 ms, same session).
 Bingham not re-run. The old test of k-independence of the relaxation fraction was removed with the
 Stokes closure; all other tests pass.
+
+#### Sub-step dependence is a splitting error, not iterations (2026-10-05)
+
+Isolated disc settling speed vs sub-steps 4 / 8 / 16 (exact Stokes in brackets): nu 0.03 0.42 / 0.52 /
+0.53; nu 0.1 0.47 / 0.40 / 0.36 (0.423); nu 3 0.075 / 0.040 / 0.031 (0.014). Raising `--iters` (3 -> 12)
+or `--diters` (2 -> 8) changes nothing, so the density/contact solver is not the cause. The error shrinks
+roughly quadratically with dt: the viscous step acts on the velocity after the position-based pressure
+projection, so within a sub-step the displaced flow is not resisted (operator-splitting error). For the
+dense pile at nu 0.1 the peak converges at 12-16 sub-steps (-1.16 / -1.18, i.e. ~9 % below the grid's
+-1.30); 4-8 sub-steps are not converged. Consequence: +-3 % across sub-steps needs >= 12 sub-steps at
+nu 0.1 (cost), or a splitting fix (Strang half-steps) that is not yet tried. Moving the solve to the start
+of the step does not help (the scheme is cyclic). `pbf_bench` gained `--iters` and `--diters`.
