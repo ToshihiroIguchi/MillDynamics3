@@ -24,8 +24,8 @@ fn main() {
     let radius = sim.params().mill.radius_m();
     let mut next = 0.0;
     println!(
-        "{:>6} {:>8} {:>10} {:>10} {:>8}",
-        "t", "balls", "max out", "max speed", "outside"
+        "{:>6} {:>8} {:>10} {:>10} {:>8} {:>10} {:>10}",
+        "t", "balls", "max out", "max speed", "outside", "P draw W", "P diss W"
     );
     while sim.sim_time() < t_end {
         let before: Vec<(glam::Vec2, glam::Vec2)> = sim
@@ -68,12 +68,14 @@ fn main() {
                 }
             }
             println!(
-                "{:>6.2} {:>8} {:>10.2e} {:>10.3} {:>8}",
+                "{:>6.2} {:>8} {:>10.2e} {:>10.3} {:>8} {:>10.1} {:>10.1}",
                 sim.sim_time(),
                 b.x.len(),
                 worst,
                 vmax,
-                outside
+                outside,
+                sim.power_draw_w(),
+                sim.dissipated_power_w()
             );
         }
     }
