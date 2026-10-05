@@ -1101,3 +1101,19 @@ Findings:
   random packing, and keeps a 10 % air gap).
 - Next if continued: make both start identically (shared initial disc positions and spin-up),
   then attribute the PBF error to drag, lubrication or viscosity terms.
+
+### PBF vs grid, identical start (2026-10-05)
+
+`Simulation::with_initial_balls` + `pbf_bench --match 1 --m 10` start PBF from the grid's hex block of
+10 discs with balls and slurry in solid-body rotation (the 10 % air gap remains). Same case as above
+(nu 0.1, rho_s 8, omega 1). Peak gravity moment in grid units (grid n=96: -1.30):
+
+| PBF setting | peak | 2nd-half mean |
+|---|---|---|
+| res 40 / substeps 8 | -0.637 | -0.615 |
+| res 80 / substeps 8 | -0.457 | -0.367 |
+| res 40 / substeps 16 | -0.966 | -0.837 |
+
+With a shared start PBF is 26-65 % below the grid and the cost-knob spread grows to about +-35 %, so the
+earlier +-15 % was optimistic. Next: attribute to drag / lubrication / viscosity terms.
+

@@ -117,10 +117,29 @@ impl Simulation {
     /// `params.slurry.enabled` -- seeding the fluid (sites overlapping a ball are skipped, docs/
     /// PLAN.md ss3.3). Balls and fluid interact two-way every sub-step, see [`coupling`].
     pub fn new(params: Params) -> Result<Self, String> {
+        Self::build(params, None)
+    }
+
+    /// Like [`Simulation::new`], but the ball population is replaced by discs at `positions`
+    /// (same radius/mass as the seeded media) and the whole system -- balls and slurry -- starts in
+    /// solid-body rotation at the drum's angular speed. Used by the grid-vs-PBF benchmark
+    /// (`examples/pbf_bench.rs`, docs/VERIFICATION.md) so both solvers share an initial state.
+    pub fn with_initial_balls(params: Params, positions: &[glam::Vec2]) -> Result<Self, String> {
+        Self::build(params, Some(positions))
+    }
+
+    fn build(params: Params, initial: Option<&[glam::Vec2]>) -> Result<Self, String> {
         params.validate()?;
         let radius_m = params.mill.radius_m();
         let effective = params.effective_media();
-        let dem = DemState::new(&effective, radius_m, params.simulation.seed);
+        let mut dem = DemState::new(&effective, radius_m, params.simulation.seed);
+        if let Some(pos) = initial {
+            let n = pos.len();
+            dem.balls.x = pos.to_vec();
+            dem.balls.v = vec![glam::Vec2::ZERO; n];
+            dem.balls.theta = vec![0.0; n];
+            dem.balls.omega = vec![0.0; n];
+        }
         // Use `effective_fluid_resolution`, not the raw `simulation.resolution`, so a coarse-grained
         // ball population never leaves the fluid lattice too coarse to resolve the ball<->fluid
         // coupling stably -- see that method's doc comment.
@@ -145,6 +164,17 @@ impl Simulation {
                 0.0,
             )
         };
+        let mut fluid = fluid;
+        if initial.is_some() {
+            let w = params.mill.omega();
+            for (v, x) in dem.balls.v.iter_mut().zip(&dem.balls.x) {
+                *v = w * glam::Vec2::new(-x.y, x.x);
+            }
+            dem.balls.omega.iter_mut().for_each(|o| *o = w);
+            for (v, x) in fluid.v.iter_mut().zip(&fluid.x) {
+                *v = w * glam::Vec2::new(-x.y, x.x);
+            }
+        }
         let energy_budget_e0 = dem::mechanical_energy_f64(&dem.balls) + fluid.mechanical_energy_j();
         Ok(Self {
             params,

@@ -3,7 +3,8 @@
 //! the drum axis -- the same metric `grid_probe --exp E8a` prints. Dimensionless grid units map
 //! to SI as drum radius 0.5 m, fluid density 1000 kg/m^3, mu = nu * 1000.
 //! `cargo run --release -p mill-core --example pbf_bench -- [--nu 0.1] [--rho 8] [--omega 1]
-//!  [--a 0.04] [--fill 0.077] [--t 4] [--res 40] [--substeps 8] [--k 1] [--tau 0]`
+//!  [--a 0.04] [--fill 0.077] [--t 4] [--res 40] [--substeps 8] [--k 1] [--tau 0]
+//!  [--match 1 --m 10]` (`--match`: grid-identical start)
 
 use mill_core::params::{CoarseGrainingMode, Rheology, SpeedMode};
 use mill_core::{Params, Simulation};
@@ -49,7 +50,28 @@ fn main() {
         p.simulation.coarse_graining_k = k;
     }
     let t_end = get("--t", 4.0) as f64;
-    let mut sim = Simulation::new(p).expect("valid params");
+    let mut sim = if get("--match", 0.0) > 0.0 {
+        // Same start as `grid_probe --exp E8a`: hex block of `--m` discs, solid-body rotation.
+        let count = get("--m", 10.0) as usize;
+        let pitch = 2.4 * a;
+        let mut sites: Vec<(f32, f32)> = Vec::new();
+        for j in -5i32..=5 {
+            for i in -5i32..=5 {
+                sites.push((
+                    pitch * (i as f32 + 0.5 * (j & 1) as f32) + 0.0137,
+                    pitch * 0.866_025_4 * j as f32 - 0.0091 - 0.25,
+                ));
+            }
+        }
+        sites.sort_by(|p, q| {
+            (p.0 * p.0 + (p.1 + 0.25).powi(2)).total_cmp(&(q.0 * q.0 + (q.1 + 0.25).powi(2)))
+        });
+        sites.truncate(count);
+        let pos: Vec<glam::Vec2> = sites.iter().map(|&(x, y)| glam::Vec2::new(x, y)).collect();
+        Simulation::with_initial_balls(p, &pos).expect("valid params")
+    } else {
+        Simulation::new(p).expect("valid params")
+    };
     let b = sim.balls();
     let (n, r, m) = (b.x.len(), b.radius, b.mass);
     let force = (m - rho_f * std::f32::consts::PI * r * r) * 9.81;
