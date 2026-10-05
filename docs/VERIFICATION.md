@@ -1221,3 +1221,22 @@ k=1 (10 balls) -1.23, k=2 (2 balls) -0.88, k=3 (1 ball) -0.89. Ball counts round
 random packings that differ per run, so this is indicative only, not a pass. Consistent with the
 no-slip boundary seeing the coarse radius (drag grows only logarithmically with k). A clean k test
 needs a matched start at the same total mass for each k.
+
+#### PBF Bingham: first implementation (2026-10-05)
+
+`pbf.rs` step 7 now uses a Papanastasiou-regularised effective viscosity per particle
+(`mu + tau_y (1 - exp(-gamma/gamma0)) / gamma`, unyielded viscosity capped at 101 mu, `BINGHAM_PLASTIC_RATIO`),
+from the particle's own SPH shear rate of the previous solve; `morris_weights` takes per-particle mu and the
+ball boundary uses the fluid particle's mu. All tests pass.
+
+Grid reference at the same case (`grid_probe --exp E8a --n 96 --nu 0.1 --omega 1 --rho 8 --m 10 --g 9.81 --mu 0.5
+--split --shrink 0.15 --newton --t 4 --tau T`): peak gravity moment **-0.865 (tau 2.5) / -0.855 (tau 10)**, against
+-1.30 for the Newtonian fluid. PBF (`--tau`): tau 2.5 res 40/80 substeps 8 and res 40 substeps 16
+-1.15 / -1.02 / -1.26; tau 10 -1.15 / -1.08 / -1.16; versus -1.04 Newtonian. Varying the plastic ratio
+10 / 100 / 1000 / 10000 (tau 2.5, res 40, substeps 12): -1.28 / - / -1.18 / -1.17.
+
+So PBF responds to the yield stress only weakly (the grid peak drops by a third) and sits ~30 % above the grid
+with ~+-10 % knob spread: **the Bingham target is not met**. The yield stress changes the PBF result by less than
+the stiffness of the regularisation does, which points at the pile dynamics (what the near-ball
+viscosity does when the fluid yields) rather than the plug itself; not yet diagnosed. The implementation
+is kept (physically motivated, no regression, Newtonian path bit-identical) but unverified against the grid.

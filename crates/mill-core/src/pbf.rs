@@ -36,7 +36,7 @@ use crate::coupling::CouplingImpulses;
 use crate::dem::Balls;
 use crate::geometry::Drum;
 use crate::grid::UniformGrid;
-use crate::params::{DyePattern, SlurryParams};
+use crate::params::{DyePattern, Rheology, SlurryParams};
 
 const GRAVITY: f32 = -9.81;
 /// CFM-style relaxation added to the lambda denominator to avoid a divide-by-zero for particles
@@ -302,7 +302,7 @@ fn morris_weights(
     neighbors: &NeighborLists,
     density: &[f32],
     mass: f32,
-    mu: f32,
+    mu: &[f32],
     h: f32,
 ) -> Vec<f32> {
     let eta2 = VISCOSITY_ETA_FACTOR * h * h;
@@ -319,7 +319,7 @@ fn morris_weights(
             let delta = x[i] - x[ju];
             let r = delta.length();
             let grad = spiky_grad(delta, r, h);
-            let numerator = (mass * 2.0 * mu / (rho_i * rho_j)) * delta.dot(grad).abs();
+            let numerator = (mass * (mu[i] + mu[ju]) / (rho_i * rho_j)) * delta.dot(grad).abs();
             weights[k] = numerator / (delta.length_squared() + eta2);
         }
     }
@@ -442,6 +442,9 @@ fn solve_implicit_viscosity(
 /// "PBF ball no-slip boundary"): the isolated-disc settling speed is insensitive to it between 0.5
 /// and 10, and the dense-pile gravity moment varies least with resolution at 0.25-0.5.
 const BALL_BC_GAIN: f32 = 0.5;
+
+/// Ratio of the fully-unyielded to the plastic viscosity in the regularised Bingham model.
+const BINGHAM_PLASTIC_RATIO: f32 = 100.0;
 
 /// One fluid particle / ball-surface ghost point pair of the no-slip boundary.
 struct BoundaryPair {
@@ -601,21 +604,37 @@ fn mean_shear_rate(
     mass: f32,
     h: f32,
 ) -> f32 {
-    let n = x.len();
-    if n == 0 {
-        return 0.0;
+    let rates = shear_rates(x, v, neighbors, density, mass, h);
+    let (sum, count) = rates
+        .iter()
+        .filter(|g| g.is_finite())
+        .fold((0.0f32, 0u32), |(s, c), &g| (s + g, c + 1));
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f32
     }
-    let mut sum = 0.0f32;
-    let mut count = 0u32;
-    for i in 0..n {
+}
+
+/// Per-particle shear rate `sqrt(2 D:D)` (see [`mean_shear_rate`]).
+fn shear_rates(
+    x: &[Vec2],
+    v: &[Vec2],
+    neighbors: &NeighborLists,
+    density: &[f32],
+    mass: f32,
+    h: f32,
+) -> Vec<f32> {
+    let n = x.len();
+    let mut out = vec![0.0f32; n];
+    for (i, g) in out.iter_mut().enumerate() {
         let (mut gxx, mut gxy, mut gyx, mut gyy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
         for &j in neighbors.of(i) {
             let ju = j as usize;
             let delta = x[i] - x[ju];
             let r = delta.length();
             let grad = spiky_grad(delta, r, h);
-            let rho_j = density[ju].max(1e-6);
-            let coeff = mass / rho_j;
+            let coeff = mass / density[ju].max(1e-6);
             let dv = v[ju] - v[i];
             gxx += coeff * dv.x * grad.x;
             gxy += coeff * dv.x * grad.y;
@@ -623,18 +642,28 @@ fn mean_shear_rate(
             gyy += coeff * dv.y * grad.y;
         }
         let dxy = 0.5 * (gxy + gyx);
-        let d_contraction = gxx * gxx + gyy * gyy + 2.0 * dxy * dxy;
-        let gamma_dot = (2.0 * d_contraction).sqrt();
-        if gamma_dot.is_finite() {
-            sum += gamma_dot;
-            count += 1;
-        }
+        *g = (2.0 * (gxx * gxx + gyy * gyy + 2.0 * dxy * dxy)).sqrt();
     }
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f32
-    }
+    out
+}
+
+/// Papanastasiou-regularised Bingham effective viscosity per particle,
+/// `mu + tau_y (1 - exp(-gamma/gamma0)) / gamma`, `gamma0 = tau_y / (BINGHAM_PLASTIC_RATIO * mu)`, so
+/// the unyielded viscosity is capped at `(1 + BINGHAM_PLASTIC_RATIO) mu`.
+fn bingham_viscosity(rates: &[f32], mu: f32, tau_y: f32) -> Vec<f32> {
+    let gamma0 = tau_y / (BINGHAM_PLASTIC_RATIO * mu);
+    rates
+        .iter()
+        .map(|&g| {
+            let g = if g.is_finite() { g } else { 0.0 };
+            let extra = if g < 1e-4 * gamma0 {
+                tau_y / gamma0 // limit gamma -> 0
+            } else {
+                tau_y * (1.0 - (-g / gamma0).exp()) / g
+            };
+            mu + extra
+        })
+        .collect()
 }
 
 /// Per-sub-step fluid solver diagnostics, returned alongside (or instead of, for
@@ -1877,7 +1906,14 @@ impl FluidParticles {
             density[i] = rho;
         }
         if mu > 0.0 {
-            let weights = morris_weights(&self.x, &neighbors, &density, mass, mu, h);
+            let mu_eff: Vec<f32> =
+                if slurry.rheology == Rheology::Bingham && slurry.yield_stress_pa > 0.0 {
+                    let rates = shear_rates(&self.x, &self.v, &neighbors, &density, mass, h);
+                    bingham_viscosity(&rates, mu, slurry.yield_stress_pa)
+                } else {
+                    vec![mu; n]
+                };
+            let weights = morris_weights(&self.x, &neighbors, &density, mass, &mu_eff, h);
             // Ball surface as a no-slip (Dirichlet) boundary: ghost points on each ball's
             // circumference carry its rigid-body surface velocity and enter the Morris Laplacian
             // as extra neighbours; the balls' velocities are solved for together with the fluid.
@@ -1905,7 +1941,7 @@ impl FluidParticles {
                         let grad = spiky_grad(delta, r, h);
                         let rho_i = density[j as usize].max(1e-6);
                         let c = BALL_BC_GAIN
-                            * (mass * 2.0 * mu / (rho_i * rest_density))
+                            * (mass * 2.0 * mu_eff[j as usize] / (rho_i * rest_density))
                             * delta.dot(grad).abs()
                             / (delta.length_squared() + eta2);
                         if c > 0.0 {
