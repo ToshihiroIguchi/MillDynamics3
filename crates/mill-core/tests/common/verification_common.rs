@@ -449,7 +449,11 @@ pub mod harness {
     pub fn hydrostatic(solver: Solver, res: u32) -> Hydrostatic {
         let params = Params::default();
         let r = params.mill.radius_m();
-        let slurry = params.slurry; // fill 0.35, default viscosity
+        // The gates below were set for the former thick default; the app default is now water
+        // (docs/VERIFICATION.md "PBF: water as the default").
+        let mut slurry = params.slurry;
+        slurry.density_kg_m3 = 1800.0;
+        slurry.viscosity_pa_s = 50.0;
         let iters = params.simulation.pbf_iterations;
         let drum = make_drum(r, 0.0);
         let mut f = Fluid2d::new(solver, &slurry, &drum, res, iters);
@@ -669,7 +673,11 @@ pub mod harness {
     pub fn rotating_drum(solver: Solver, res: u32) -> RotatingDrum {
         let params = Params::default();
         let r = params.mill.radius_m();
-        let slurry = params.slurry; // fill 0.35, 50 Pa s
+        // The gates below were set for the former thick default; the app default is now water
+        // (docs/VERIFICATION.md "PBF: water as the default").
+        let mut slurry = params.slurry;
+        slurry.density_kg_m3 = 1800.0;
+        slurry.viscosity_pa_s = 50.0;
         let iters = params.simulation.pbf_iterations;
         let omega = 0.6 * (G / r as f64).sqrt();
         let drum = make_drum(r, omega as f32);

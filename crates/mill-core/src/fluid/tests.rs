@@ -15,8 +15,11 @@ fn drum(radius: f32, omega: f32, lifters: u32) -> Drum {
 }
 
 fn slurry(fill: f32) -> SlurryParams {
+    // These tests were written for the former thick default (1800 kg/m3, 50 Pa*s).
     SlurryParams {
         fill_fraction: fill,
+        density_kg_m3: 1800.0,
+        viscosity_pa_s: 50.0,
         ..SlurryParams::default()
     }
 }
@@ -386,6 +389,8 @@ fn a_fixed_ball_in_a_still_pool_feels_the_displaced_weight() {
     let s = SlurryParams {
         fill_fraction: 0.8,
         surface_tension_n_m: 0.0,
+        density_kg_m3: 1800.0,
+        viscosity_pa_s: 50.0,
         ..SlurryParams::default()
     };
     let radius = 0.006;

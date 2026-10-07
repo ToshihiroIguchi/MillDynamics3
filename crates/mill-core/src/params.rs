@@ -352,8 +352,8 @@ impl Default for SlurryParams {
             // clears the top of the settled ball heap at rest, instead of leaving media exposed
             // above the slurry pool (see docs/PARAMETERS.md's Slurry table).
             fill_fraction: 0.35,
-            density_kg_m3: 1800.0,
-            viscosity_pa_s: 50.0,
+            density_kg_m3: 1000.0,
+            viscosity_pa_s: 0.001,
             rheology: Rheology::Newtonian,
             yield_stress_pa: 0.0,
             wall_no_slip: 1.0,
