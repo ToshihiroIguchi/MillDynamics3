@@ -1255,3 +1255,66 @@ PBF runs without NaN or clamp trouble, but the result is not converged in either
 the lowest and the trend is not monotone), and this is with k = 1, so coarse-graining is not the main cause of the
 water spread. Converging water needs a resolved wake/boundary layer, i.e. finer fluid and more sub-steps
 (substeps is capped at 16), not a different k.
+
+### PBF: central-force viscosity, squeeze films, converged settings (2026-10-06)
+
+**Method.** The 10-disc pile is chaotic, so single runs mislead (the peak is a maximum statistic, with
+sign flips for few balls). Results below are seeded ensembles (`pbf_bench --seed 1..n`, +-0.1 a jitter of
+every disc, n = 6-24, mean and relative std of one member; standard error = std / sqrt(n)). The metric is
+the 2nd-half mean of the **torque-balance power** `-omega * sum m g x` over balls *and fluid*, printed next to
+`P draw`; the peak gravity moment of the discs is kept for the grid comparison. Grid units map to SI as before.
+
+**1. The viscous operator conserved no angular momentum.** The Morris form `c (v_i - v_j)` gives a spurious
+force on a rigidly rotating fluid wherever the kernel sum is one-sided (free surface, drum wall). Pure slurry
+(no balls, rho_s irrelevant), `P draw` against the torque balance: nu 1: 1069 vs 218 W (5x), nu 0.1: 182 vs 69 W
+(2.6x). The central-force form `4 c e (e . (v_i - v_j))` (same Laplacian for incompressible flow, exactly zero
+for rigid rotation, angular momentum conserving): 164 vs 167 W and 63 vs 64 W. With balls (10 discs) P draw / balance:
+nu 0.1 -3.5 %, nu 1 +12 % (was +73 %). `pbf.rs` uses the central form (`ViscWeights`, unit test
+`viscous_operator_vanishes_for_rigid_rotation_even_at_a_free_edge`).
+
+**2. Cost-knob convergence (central form, nu 0.1, 10 discs, ensemble n = 8, peak / torque-balance W):**
+
+| res / substeps | peak | balance |
+|---|---|---|
+| 40 / 8 | -1150 | 1203 |
+| 40 / 16 | -1192 | 1234 |
+| 60 / 16 | -1061 | 1080 |
+| 80 / 16 | -1053 | 1050 |
+| 60 / 32 | -1206 | 1215 |
+| 60 / 64 | -1209 | 1230 |
+| 80 / 32 | -1188 | 1184 |
+
+Standard error is about 1-1.5 %. Resolution and sub-steps are not independent: res 40 / 16 and res 60 / 32 agree,
+res 60 / 16 does not (the sub-step needed shrinks with the particle spacing). The converged level is
+about -1.2 (grid -1.30, -7 %). **Converged within +-3 % for res >= 60 and substeps >= 32**, roughly 9x the
+cost of res 40 / substeps 8. nu 1: peak -1183 (40/8), -1155 / -1169 / -1174 (res 40 / 60 / 80 at 16), -1131 (60/32),
+i.e. +-2 %; the torque balance there is NOT converged in the sub-step (1070, 824, 662 W at 8 / 16 / 32);
+the cause is not found (pure slurry with the same wall is stable to +-2 %, so it comes from the pile-fluid coupling).
+Ablations at nu 0.1: ball drag closure (6.5) off: no change; overlap-push reaction (3.5) off: spread does not
+change once the momentum ledger is kept; squeeze links, gain 1/2/4 and range 1-3x: +-1 %; ball boundary gain 0.25-4:
++-3 %; pbf/dem iteration counts: no change. Step 6.6 (buoyancy) is inactive for balls larger than `h` (the fluid
+density at the ball centre is zero; buoyancy then comes from the pressure through 3.5).
+
+**3. Squeeze films** (`squeeze_links`, `mac::lubrication` model, 2D Reynolds film with the calibrated
+corrections). Normal film only, approach side only (a symmetric film kept the settled charge jittering at
+v_rms 0.3 m/s and resisted the contact solver's separation), stiffness capped at `dt c / m <= 8`. The gain is
+small and does not move the level (nu 0.1: -1148 off, -1152 on); it matters for coarse balls (k = 2: 14 %
+with a symmetric film).
+
+**4. Coarse-graining k (matched mass: 36 balls at k=1, 9 at k=2, 4 at k=3 on a lattice scaled by k).** Torque
+balance, ensemble: k=1 2003 W (n = 24, std 8 %), k=2 2148 W (+7 %, n = 24); k=3 2314 W (+15 %, n = 8, std 12 %:
+four balls are too few for a stable mean). Scaling the film gain with k (geometry says one coarse face carries
+~k pair films) has no effect (k^0 vs k^0.5: 2148 vs 2142 W). **k is not within +-3 %**: about +7 % at k = 2.
+
+**5. Grid comparison (E8a, 10 discs).** Grid nu 0.1: -1.30; grid nu 1 (new): -1.025. PBF converged: nu 0.1 -1.2
+(-7 %), nu 1 -1.13..-1.17 (+10..+14 %): the viscosity dependence of PBF (-1.2 to -1.15) is much weaker than the
+grid's (-1.30 to -1.03). Pure slurry E3s (fill 0.3, Fr 0.36, grid `--exp E3s`, P = omega rho T): Re 20 grid 600 W,
+PBF 631 W (+5 %); Re 40 grid 386 W, PBF 463 W; at Re 2 and 10 the grid holds a uniform rimming film (54 / 539 W)
+while PBF holds a pool (1255 / 889 W): two different equilibria from different starts, not comparable.
+Switching surface tension (0.072 N/m) and wettability (0.6) off does not change the pool.
+
+**6. Negative result: drum wall as a Dirichlet boundary** (ghost points on the wall in the viscosity solve, like
+the balls'): the pure-slurry sub-step spread drops from 3.6 % to 1.3 %, but P grows 1.2-1.6x against the legacy
+per-sub-step blend and moves away from the grid (Re 20: 775 vs 600 W, blend 631 W); gain 0.1-0.5 does not fix it.
+Reverted. Open: why the grid at Re 2-10 prefers the film (initial condition?) and the nu 1 torque-balance dependence
+on the sub-step.

@@ -46,6 +46,10 @@ fn main() {
     p.simulation.max_balls = 10_000;
     p.simulation.pbf_iterations = get("--iters", p.simulation.pbf_iterations as f32) as u32;
     p.simulation.dem_iterations = get("--diters", p.simulation.dem_iterations as f32) as u32;
+    // The grid track has neither surface tension nor wall/ball adhesion, so the comparison runs
+    // use 0 unless asked otherwise (`--st 0.072 --wet 0.6` are the app defaults).
+    p.slurry.surface_tension_n_m = get("--st", 0.0);
+    p.slurry.wettability = get("--wet", 0.0);
     if args.iter().any(|a| a == "--noslip") {
         p.slurry.ball_no_slip = get("--noslip", 0.0);
     }
