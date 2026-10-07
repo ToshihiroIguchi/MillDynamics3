@@ -1318,3 +1318,12 @@ the balls'): the pure-slurry sub-step spread drops from 3.6 % to 1.3 %, but P gr
 per-sub-step blend and moves away from the grid (Re 20: 775 vs 600 W, blend 631 W); gain 0.1-0.5 does not fix it.
 Reverted. Open: why the grid at Re 2-10 prefers the film (initial condition?) and the nu 1 torque-balance dependence
 on the sub-step.
+
+**7. Re-measure with surface tension and wettability off (`--st 0 --wet 0`, res 60 / substeps 32, n = 8).** No effect:
+nu 0.1 peak -1191 (app defaults -1206), balance 1209 W (1215 W); nu 1 peak -1131, balance 664 W (same as before).
+So the earlier tables stand and the grid comparison is not distorted by those two forces.
+
+**8. Bingham with the central form (nu 0.1, same settings, peak / balance W).** Newtonian -1191 / 1209; tau 2.5
+-1164 / 623; tau 10 -1040 / 146. Grid peak -0.865 (tau 2.5) / -0.855 (tau 10): PBF is +35 % / +22 % above it.
+The yield stress cuts PBF's power strongly (1209 -> 623 -> 146 W) but hardly moves the pile's peak (-2 % / -13 %),
+whereas the grid's peak drops by a third. The Bingham target is still not met; the cause is not found.
