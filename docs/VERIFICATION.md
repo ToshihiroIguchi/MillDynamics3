@@ -1365,3 +1365,18 @@ wall-pressure L2 0.20 -> 0.25), so it is not a fix. Raising the adaptive extra i
 projection moves information one neighbour layer per iteration, so a deep pool stays compressed (mean compression 0.047 at
 res 25, 0.138 at res 50) and the unconverged residue shows up as velocity noise. A real fix is a different pressure solver
 (global pressure Poisson solve or multigrid), not a parameter.
+
+
+### PBF: global pressure solve (PCG) tried and rejected (2026-10-08)
+
+The density projection's Jacobi step is a diagonal approximation of `J J^T lambda = -C` (J: constraint
+gradients of the active rows). I replaced it with a preconditioned CG solve of that system
+(residual 1e-3 in about 20 iterations, positions `J^T lambda`).
+
+- Still pool (res 50, water): v_rms rose from 0.015 to 0.037 m/s; mean compression only fell 3.0 % to
+  2.2 %. So the persistent noise is NOT an unconverged Jacobi iteration (the earlier diagnosis was
+  wrong): an exact one-sided projection plus position-based velocity reconstruction itself makes noise.
+- Ensemble (nu 0.1, res 40, 6 seeds, k = 1/2/3): torque-balance reference 2048/1551/1651 W (Jacobi) vs
+  2022/1565/1663 W (CG); P draw 1751/1292/1227 W vs 1737/1291/1232 W. No change in the k drift.
+- Reverted. Noise would need a velocity-level treatment (divergence solve / damping), not a better
+  position projection.
