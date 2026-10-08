@@ -1380,3 +1380,23 @@ gradients of the active rows). I replaced it with a preconditioned CG solve of t
   2022/1565/1663 W (CG); P draw 1751/1292/1227 W vs 1737/1291/1232 W. No change in the k drift.
 - Reverted. Noise would need a velocity-level treatment (divergence solve / damping), not a better
   position projection.
+
+### PBF: coarse-graining k re-measured, no correction applied (2026-10-09)
+
+Matched-mass ensembles (`--match 1 --nu 0.1 --t 7 --res 60 --substeps 16`, 16 seeds; k = 1: 36 balls, k = 2: 9,
+k = 3: 4), torque-balance reference, mean over the 2nd half. A temporary gain `BALL_BC_GAIN * k^q` on the ball
+no-slip boundary was scanned, then removed.
+
+| case | reference (W) | vs k = 1 (2192 W, std 8 %) |
+|---|---|---|
+| k = 2, q = -1 | 2262 | +3.2 % |
+| k = 2, q = -0.5 | 2221 | +1.3 % |
+| k = 2, q = 0 (current) | 2126 | -3 % |
+| k = 2, q = +0.5 | 2055 | -6.2 % |
+| k = 2, q = +1 | 2043 | -6.8 % |
+| k = 3, q = 0 (current) | 2395 | +9 % (std 9 %) |
+| k = 3, q = -0.5 | 2481 | +13 % |
+
+The earlier "+7 % at k = 2" was within the ensemble noise; k = 2 is about -3 % and k = 3 about +9 % with the
+current gain. Scaling the gain with k helps k = 2 but moves k = 3 the wrong way, so it is not adopted. No k
+correction is applied. The grid is only an offline reference; the app does not show it.
