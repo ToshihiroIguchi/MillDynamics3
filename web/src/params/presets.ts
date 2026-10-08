@@ -37,10 +37,10 @@ export interface QualityPreset {
 export const QUALITY_PRESETS: QualityPreset[] = [
   {
     id: "realtime",
-    label: "Realtime (default)",
+    label: "Fast (default)",
     maxBalls: 300,
-    resolution: 15,
-    note: "Native 11.9 ms/frame (water default, 286 fluid particles). Mill power is about +19 % off a converged reference at this fluid resolution (+10 % at 20) and a thin wetting film is not resolved: use it to watch the motion, not to read power.",
+    resolution: 25,
+    note: "Native 67 ms/frame (water default). Mill power is about +5 % off a converged reference at this fluid resolution (+19 % at the former 15, +10 % at 20); a thin wetting film is not resolved.",
   },
   {
     id: "balanced",
