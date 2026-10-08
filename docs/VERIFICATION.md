@@ -1327,3 +1327,29 @@ So the earlier tables stand and the grid comparison is not distorted by those tw
 -1164 / 623; tau 10 -1040 / 146. Grid peak -0.865 (tau 2.5) / -0.855 (tau 10): PBF is +35 % / +22 % above it.
 The yield stress cuts PBF's power strongly (1209 -> 623 -> 146 W) but hardly moves the pile's peak (-2 % / -13 %),
 whereas the grid's peak drops by a third. The Bingham target is still not met; the cause is not found.
+
+### PBF: water as the default (2026-10-08)
+
+The slurry default is now water (1000 kg/m3, 0.001 Pa*s). Two things followed. (1) A still water pool in the
+hydrostatic harness run has residual KE/(M g dx) = 3.85 against the 0.05 gate (the gate was set for 50 Pa*s):
+the harness and the DFSPH unit tests stay pinned to 1800 kg/m3 / 50 Pa*s and the gate is not loosened; a still
+pool at water viscosity is visibly noisier. (2) `escape_probe` at the water default: 0 balls outside over 6 s.
+
+**App geometry (2 mm balls, 63 mm drum, fill 0.30, 60 % Nc, wet, no coarse-graining; `coarse_graining_probe
+--browser-defaults --reference`, 3 seeds, 3 + 4 revolutions, substeps 16).** Mill power against the converged
+reference (res 80, substeps 32, 3.026 W); seed sd is <= 1.5 %, so the scatter below is a real resolution effect:
+
+| fluid res | 15 | 20 | 25 | 30 | 40 | 50 | 60 |
+|---|---|---|---|---|---|---|---|
+| power vs reference | +19.4 % | +10.5 % | +4.6 % | +2.5 % | -4.9 % | -1.0 % | +1.7 % |
+
+Resolution >= 30 is within about +-5 % (not monotone: 40 is the worst), >= 50 within +-2 %; **the +-3 % gate is met
+only at res 50 / 60**. Coarse-graining at the app geometry (Manual k = 2): res 25 +20.2 %, res 40 +11.7 %
+(not met, consistent with the +7 % of the matched-mass pile test; no coarse-graining is needed at the
+shipped defaults anyway: N_true ~ 244 < max_balls). The reference peak ball overlap is 13.4 % of the radius
+(target < 10 %).
+
+**Cost (native, `perf_probe`, 120 frames, ms/frame):** res 15 / 150 balls 11.9; res 25 / 300 balls 66.8; res 30 / 300
+balls 72.2; res 40 / 600 balls 160.6; res 50 / 600 balls 201.9. Presets are now Realtime 15, Balanced 30, Accuracy 50
+(`web/src/params/presets.ts`), i.e. the quality tiers cost +8 % (Balanced) and +26 % (Accuracy) against the
+previous 25 / 40 and give +-3 % / +-2 % power instead of +5 % / -5 %.

@@ -19,12 +19,12 @@
 // this specific fidelity gap remains -- or much more aggressive ball coarse-graining than any of
 // these three tiers use.
 //
-// STALE as of the default change to a 2 mm ball in a 63 mm drum (see `crates/mill-core/src/
-// params.rs`'s `shipped_defaults_need_no_coarse_graining` test): `N_true` (~244) sits under every
-// tier's `maxBalls` (Realtime and Balanced both 300 now, Accuracy 600), so no tier coarse-grains
-// -- only `resolution` (slurry fluid particle count) differs between tiers. The "Achieved speed"
-// figures below were measured against much older defaults and have not been re-measured --
-// treat them as directional, not current, until docs/PERF.md is refreshed.
+// As of the 2 mm ball in a 63 mm drum (see `crates/mill-core/src/params.rs`'s
+// `shipped_defaults_need_no_coarse_graining` test) `N_true` (~244) sits under every tier's
+// `maxBalls`, so no tier coarse-grains -- only `resolution` (fluid particle count) differs. The
+// notes below give native (not browser) ms/frame from `examples/perf_probe` with the water default
+// (2026-10-08) and the power error from `examples/coarse_graining_probe --reference`; the older
+// "achieved speed" browser figures in docs/PERF.md pre-date that default.
 export interface QualityPreset {
   id: string;
   label: string;
@@ -40,20 +40,20 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Realtime (default)",
     maxBalls: 300,
     resolution: 15,
-    note: "~1.0-1.1x achieved speed (pre-dates the 2 mm / 63 mm default, needs re-measurement). Coarsest slurry of the three tiers -- a thin wetting film is not resolved smoothly.",
+    note: "Native 11.9 ms/frame (water default, 286 fluid particles). Mill power is about +19 % off a converged reference at this fluid resolution (+10 % at 20) and a thin wetting film is not resolved: use it to watch the motion, not to read power.",
   },
   {
     id: "balanced",
     label: "Balanced",
     maxBalls: 300,
-    resolution: 25,
-    note: "~0.25-0.38x achieved speed (pre-dates the 2 mm / 63 mm default, needs re-measurement; also well below real time before that -- regressed from an earlier ~0.7-0.75x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). Finer slurry than Realtime (same ball population as every tier at the current default, since none of the three needs coarse-graining any more); wetting resolution improves but a thin film is still coarse.",
+    resolution: 30,
+    note: "Native 72 ms/frame (1143 fluid particles). Mill power within about +-3 % of a converged reference at the 2 mm / 63 mm default with water (docs/VERIFICATION.md); a thin film is still coarse. Coarse-graining the balls (k > 1) is not within +-3 %: about +10-20 % power at k = 2.",
   },
   {
     id: "accuracy",
     label: "Accuracy",
     maxBalls: 600,
-    resolution: 40,
-    note: "~0.12-0.13x achieved speed (pre-dates the 2 mm / 63 mm default, needs re-measurement; also clearly slow motion before that, worse than before -- regressed from an earlier ~0.3-0.4x after the 2026-09 slurry fill-fraction bump; see docs/PERF.md). This project's original default fluid resolution -- the finest of the three tiers (same ball population as every tier at the current default), and still under-resolves a thin wetting film.",
+    resolution: 50,
+    note: "Native 202 ms/frame (3174 fluid particles). The finest tier: mill power within about +-3 % of the converged reference (-1 % at this resolution). Same ball population as every tier at the current default.",
   },
 ];
