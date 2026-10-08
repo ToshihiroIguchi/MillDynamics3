@@ -1353,3 +1353,15 @@ shipped defaults anyway: N_true ~ 244 < max_balls). The reference peak ball over
 balls 72.2; res 40 / 600 balls 160.6; res 50 / 600 balls 201.9. Presets are now Realtime 15, Balanced 30, Accuracy 50
 (`web/src/params/presets.ts`), i.e. the quality tiers cost +8 % (Balanced) and +26 % (Accuracy) against the
 previous 25 / 40 and give +-3 % / +-2 % power instead of +5 % / -5 %.
+
+**Still water pool (`examples/still_pool_probe`, stopped drum, no balls, res 50, 3174 particles).** The fluid never
+comes to rest: RMS speed 0.015 m/s and peak 0.05-0.08 m/s, constant from 0.5 s to 10 s (sqrt(g dx) = 0.079 m/s), so
+it is particle noise, not a decaying slosh. It is damped by viscosity (RMS 0.0054 at 0.1 Pa*s, 0.00035 at 50 Pa*s),
+is independent of surface tension, wettability and sub-steps, and worse at coarser resolution (res 30: 0.017). More
+density iterations (3 -> 5 / 8 / 12 / 20) lower it only to about 0.009. Under-relaxing the Jacobi correction by 0.7 / 0.5 / 0.3
+lowers the RMS to 0.0065 / 0.0053 / 0.0050 but makes the pool worse compressed (res 50, 50 Pa*s: mean compression 0.138 -> 0.172,
+wall-pressure L2 0.20 -> 0.25), so it is not a fix. Raising the adaptive extra iterations 6 -> 30 helps only partly
+(mean compression 0.099, wall-pressure L2 0.16, noise 0.0107) at several times the cost. Cause: the pressure-only Jacobi
+projection moves information one neighbour layer per iteration, so a deep pool stays compressed (mean compression 0.047 at
+res 25, 0.138 at res 50) and the unconverged residue shows up as velocity noise. A real fix is a different pressure solver
+(global pressure Poisson solve or multigrid), not a parameter.
