@@ -356,7 +356,7 @@ fn run_seeded(params: &Params, cfg: &ScaleupConfig, seed: u64) -> Result<Scaleup
     let m3 = rho * 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
     let scale_j = m3 * G * d;
     let thresholds_j: Vec<f64> = if cfg.thresholds_j.is_empty() {
-        [0.1, 1.0, 10.0, 100.0]
+        [0.03, 0.1, 0.3, 1.0, 3.0, 10.0]
             .iter()
             .map(|k| k * scale_j)
             .collect()

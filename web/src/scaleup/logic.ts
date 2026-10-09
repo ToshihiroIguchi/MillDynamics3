@@ -58,8 +58,8 @@ export const DEFAULT_STUDY_CONFIG: StudyConfig = {
   warmupRevolutions: 4,
   measureRevolutions: 6,
   samplesPerRevolution: 8,
-  dtRatio: 0.05,
-  demIterations: 6,
+  dtRatio: 0.025,
+  demIterations: 12,
 };
 
 /** Lab-scale defaults mirroring `MediaParams`/`MillParams` defaults (63 mm drum, 2 mm ZrO2 balls). */
