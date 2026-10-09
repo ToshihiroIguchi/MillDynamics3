@@ -61,7 +61,7 @@ open work.
    re-contacts of the same pair within `0.25 sqrt(d/g)` counted once; the debounce window itself is a
    modelling choice that scales the absolute count). Treat impact frequency as comparable only at
    identical settings, and prefer the mean stress energy and the specific power, which are more stable
-   *(a time-step-independent impact definition is not done)*.
+   *(a time-step-independent impact definition is not done: counting only contact onsets was tried and is worse, +25 % per doubling, docs/VERIFICATION.md)*.
 3. **Statistics.** The charge is chaotic and the EMA is a 1 s average. Whole-revolution averaging
    is possible with the report window; seed ensembles are not automated *(not done)*: run several
    seeds by hand and average. A batch driver over the same `Simulation` could be added.

@@ -1546,3 +1546,14 @@ laws. Plausible reason (not tested): D/d also changes the charge geometry (numbe
 free path to ball size), which the velocity-only argument ignores. What does hold is Froude similarity at a
 *fixed* D/d (earlier runner check: 1.5 % over a 4x scale): dimensionless quantities are exactly
 transferable only between geometrically similar mills.
+
+### Contact-onset impact counting: tried and rejected (2026-10-10)
+
+Counting an impact only on the first sub-step a pair touches (instead of every sub-step whose
+pre-solve approach speed exceeds the threshold) was implemented and measured (2 seeds, 12 iterations,
+impacts/ball/s at 16 / 32 / 64 sub-steps): without debounce 55.9 / 75.2 / 99.7, with the 0.25 sqrt(d/g)
+debounce 52.8 / 67.5 / 82.6, versus 96.2 / 99.9 / 107.0 for the shipped definition (debounce only).
+The onset count rises +28 % / +22 % per doubling (finer steps split one physical contact into several
+touch/separate cycles) and the mean stress energies fall about 10 % per doubling, so it is **worse**
+and was removed. A sub-step-independent impact definition therefore remains open; the shipped definition
+is the least dependent measured (+4 % / +7 % per doubling).

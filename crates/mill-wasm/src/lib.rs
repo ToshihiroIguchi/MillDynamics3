@@ -180,3 +180,25 @@ pub fn set_panic_hook() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
 }
+
+/// Runs the **same** simulation the main screen runs, headless, for one seed: warm-up, then the
+/// proxy statistics averaged over whole revolutions (`mill_core::batch::run_seed`). JSON in
+/// (`Params`) and out (`SeedResult`). Blocking: call it from a dedicated worker, one seed per call.
+#[wasm_bindgen(js_name = stressRunJson)]
+pub fn stress_run_json(
+    params_json: &str,
+    seed: f64,
+    warmup_revolutions: f32,
+    measure_revolutions: f32,
+) -> Result<String, JsValue> {
+    let params: Params =
+        serde_json::from_str(params_json).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let result = mill_core::batch::run_seed(
+        &params,
+        seed as u64,
+        warmup_revolutions,
+        measure_revolutions,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    serde_json::to_string(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
