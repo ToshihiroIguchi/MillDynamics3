@@ -1400,3 +1400,17 @@ no-slip boundary was scanned, then removed.
 The earlier "+7 % at k = 2" was within the ensemble noise; k = 2 is about -3 % and k = 3 about +9 % with the
 current gain. Scaling the gain with k helps k = 2 but moves k = 3 the wrong way, so it is not adopted. No k
 correction is applied. The grid is only an offline reference; the app does not show it.
+
+**Bingham yield-stress sweep (2026-10-09; nu 0.1, 10 discs, res 60, substeps 16, t = 4, 12 seeds; tau in grid units).**
+
+| tau | peak gravity moment | torque-balance reference (W) |
+|---|---|---|
+| 0 | -1027 | 1045 |
+| 2.5 | -1256 | 1315 |
+| 10 | -1153 | 1097 |
+| 40 | -1056 | 947 |
+
+The pile's peak does not fall with the yield stress (it first rises 22 %), whereas the grid's peak drops by a third
+(-0.865 against -1.30). Hypothesis, not tested: `shear_rates` uses fluid neighbours only, so the fluid next to a ball
+(which shears against the ball's no-slip surface) looks unsheared and gets the capped viscosity `(1 + 100) mu`, i.e.
+extra drag where the real fluid has yielded. The ball ghost velocities would have to enter the shear estimate.
