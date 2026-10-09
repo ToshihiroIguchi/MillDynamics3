@@ -94,11 +94,11 @@ refreshed.
 
 | Preset | `max_balls` | `resolution` | Achieved speed (stale, see above) | Fluid spacing / ball diameter |
 |---|---|---|---|---|
-| **Realtime** (default at a fresh app load) | 300 | 15 | ~1.0-1.1x | ~1.05 |
-| Balanced | 300 | 25 | ~0.7-0.75x | ~0.63 |
-| Accuracy (mill-core's own `Default`) | 600 | 40 | ~0.3-0.4x | ~0.39 |
+| **Fast** (default at a fresh app load; id `realtime`) | 300 | 25 | not re-measured (native 67 ms/frame) | ~0.63 |
+| Balanced | 300 | 30 | not re-measured (native 72 ms/frame) | ~0.5 |
+| Accuracy | 600 | 50 | not re-measured (native 202 ms/frame) | ~0.3 |
 
-Realtime's ratio (~1.05) sits just over the panel's own `> 1.0` "a single fluid particle is wider
+(Pre-2026-10-08 note, for the old Realtime at resolution 15:) the ratio (~1.05) sat just over the panel's own `> 1.0` "a single fluid particle is wider
 than a ball" warning threshold at the new 2 mm default (the solver auto-raises its effective
 resolution in that case), Balanced and Accuracy stay under it, and all three are still coarse relative to what a visually smooth *thin film* specifically
 needs (a film a few millimetres thick is not resolvable by particles a third-to-half a ball diameter
