@@ -1414,3 +1414,9 @@ The pile's peak does not fall with the yield stress (it first rises 22 %), where
 (-0.865 against -1.30). Hypothesis, not tested: `shear_rates` uses fluid neighbours only, so the fluid next to a ball
 (which shears against the ball's no-slip surface) looks unsheared and gets the capped viscosity `(1 + 100) mu`, i.e.
 extra drag where the real fluid has yielded. The ball ghost velocities would have to enter the shear estimate.
+
+**Ball ghost points in the Bingham shear rate: no effect (2026-10-09, reverted).** Adding the balls' no-slip ghost
+points (translation + rotation velocity) as neighbours of the shear-rate estimate gave, for tau 2.5 / 10 / 40, peak
+-1261 / -1155 / -1053 and reference 1321 / 1098 / 943 W against -1256 / -1153 / -1056 and 1315 / 1097 / 947 W
+before: identical within the 1 % ensemble error. The hypothesis above is refuted; the weak, non-monotone yield-stress
+response of the pile peak has another cause (not found).
