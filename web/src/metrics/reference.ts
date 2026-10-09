@@ -25,6 +25,13 @@ export interface ProxyReference {
   simTime: number;
   /** True when at least some values are window means rather than instantaneous values. */
   windowed: boolean;
+  /** Optional per-row standard error of the mean (same keys as `values`); present only for
+   * references stored from a repeat-runs batch (batch/). Absent in references stored earlier. */
+  errors?: Record<string, number>;
+  /** True when the reference was stored from a repeat-runs batch (mean over seeds). */
+  fromBatch?: boolean;
+  /** Number of seeds averaged when `fromBatch`. */
+  seeds?: number;
 }
 
 function num(v: unknown): number | null {
@@ -110,8 +117,20 @@ export function parseReference(raw: unknown): ProxyReference | null {
   }
   if (Object.keys(values).length === 0) return null;
   const st = (o.settings ?? {}) as Record<string, unknown>;
+  let errors: Record<string, number> | undefined;
+  if (o.errors !== null && typeof o.errors === "object") {
+    const e: Record<string, number> = {};
+    for (const [k, v] of Object.entries(o.errors as Record<string, unknown>)) {
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0 && k in values) e[k] = v;
+    }
+    if (Object.keys(e).length > 0) errors = e;
+  }
+  const seeds = num(o.seeds);
   return {
     values,
+    ...(errors ? { errors } : {}),
+    ...(o.fromBatch === true ? { fromBatch: true } : {}),
+    ...(seeds !== null && seeds >= 1 ? { seeds } : {}),
     settings: {
       substeps: num(st.substeps),
       demIterations: num(st.demIterations),

@@ -182,6 +182,53 @@ x axis is labelled once per decade starting from the first edge.
 
 ---
 
+## Repeat runs (seeds)
+
+Located at the bottom of the Grinding proxy (3D) group (`web/src/ui/batchSection.ts`, pure logic in
+`web/src/batch/`). It answers "how much of a difference between two conditions is just chaos?".
+
+**What it runs.** The *same* `Simulation` with the *same* applied parameters as the main screen
+(slurry, sub-steps and iterations exactly as shown; only the seed is replaced), headless, in a
+dedicated Web Worker (`stressRunJson`, `crates/mill-core/src/batch.rs`), one seed per call. Nothing is
+computed by a different model. The seeds are the literal numbers 1..N, never offset by the main
+simulation's seed. The parameters used are the **applied** ones, not unapplied edits in the left
+panel; a one-line summary ("63 mm drum, 2 mm balls, 100 rpm, sub-steps 32, iterations 12, slurry
+on") shows what will be used. With slurry on the run is slow; a rough duration is estimated from the
+sub-step rate the main screen is currently achieving (unknown while it is paused). Cancel terminates
+the worker. Wasm errors are shown in the section, never swallowed.
+
+**Inputs.** Seeds (default 3), warm-up revolutions (default 4), measured revolutions (default 4,
+integer >= 1). The run is refused, with the reason shown, when the live coarse-graining factor is
+above 1 (the statistics are meaningless) or the drum speed is 0.
+
+**Why seeds.** The charge is chaotic: one run is one sample, and the spread between seeds is the
+statistical error of every row. **Why whole revolutions.** The motion repeats per revolution, so a
+partial revolution biases a mean. The warm-up must be long enough for the charge to reach its steady
+state; the section reports the wall-power drift per revolution (mean over seeds) and warns above
+5 %/rev.
+
+**Table.** Per proxy row: mean over seeds +- standard error of the mean (sample standard deviation
+with n-1, over sqrt(n)), the relative standard error, and, when a reference exists, the ratio batch
+mean / reference with its propagated relative error `sqrt(re_batch^2 + re_ref^2)`. The reference is
+treated as exact unless it was itself stored from a batch (then both errors are propagated). Ratios
+whose relative error exceeds 10 % are marked `!`: do not read them. The `window_*` rows are exact
+window means computed from the cumulative energies (not from the smoothed live values); they have no
+live counterpart, so they are compared only against a reference that was stored from a batch.
+
+**Buttons.** *Use as reference* stores the batch means and standard errors (with the exact params
+and settings used) through the same reference mechanism as *Set reference*; the usual warning appears
+when sub-steps, solver iterations or the coarse-graining factor differ. *Download CSV* and *Download
+JSON* contain all per-seed values, the combined table, the params JSON and the seeds, so a result is
+reproducible. References stored before this feature remain valid (the standard-error and batch fields
+are optional).
+
+**Sensitivity.** Re-runs seed 1 with ball-ball friction, ball-wall friction, ball-ball restitution
+and ball-wall restitution each scaled by 0.8 and 1.2 (restitution clamped to <= 1, static friction kept
+>= kinetic), plus the unperturbed base (9 runs), and shows the percentage change per row, highlighting
+changes above 10 %. Contact coefficients are not calibrated, so ratios between conditions are only
+trustworthy for rows where these changes are small. A single seed is used, so a change is only
+meaningful if it exceeds the relative standard error seen in the multi-seed table.
+
 ## Slurry group
 
 ### Mixing index

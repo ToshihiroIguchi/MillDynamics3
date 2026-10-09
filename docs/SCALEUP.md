@@ -40,8 +40,11 @@ Impacts are classified, for ball-ball and ball-wall separately, as **drop** (`v_
    setting identical between compared runs (sub-steps, solver iterations, coarse-graining), see below.
 2. Keep coarse-graining off (`k = 1`): the rows are meaningless when `k > 1` (the simulated ball is
    not the real ball). This limits the size that can be simulated (a few thousand balls).
-3. Let the run settle, use the report window (warm-up / end) for averages over whole revolutions,
-   then "Set reference" for the lab condition and read the other conditions as ratios.
+3. Let the run settle, then use "Repeat runs (seeds)" in the Grinding proxy (3D) group: it runs the
+   same simulation with the same applied settings for seeds 1..N over whole revolutions and gives mean
+   +- standard error per row, so the ratio to the lab condition ("Use as reference" on its batch) comes
+   with a propagated error (ratios above 10 % relative error are marked). The report window with
+   "Set reference" remains a single-run alternative.
 4. Compare dimensionless values (`SE/(m g d)`) across ball sizes, per-ball frequencies and specific
    power across drum sizes.
 5. Use the ratios only if they exceed the uncertainties below.
@@ -62,9 +65,11 @@ open work.
    modelling choice that scales the absolute count). Treat impact frequency as comparable only at
    identical settings, and prefer the mean stress energy and the specific power, which are more stable
    *(a time-step-independent impact definition is not done: counting only contact onsets was tried and is worse, +25 % per doubling, docs/VERIFICATION.md)*.
-3. **Statistics.** The charge is chaotic and the EMA is a 1 s average. Whole-revolution averaging
-   is possible with the report window; seed ensembles are not automated *(not done)*: run several
-   seeds by hand and average. A batch driver over the same `Simulation` could be added.
+3. **Statistics.** The charge is chaotic and the EMA is a 1 s average. "Repeat runs (seeds)" in the
+   metrics panel averages whole revolutions over several seeds of the same `Simulation` with the same
+   applied settings and reports standard errors and propagated ratio errors (docs/METRICS.md,
+   "Repeat runs (seeds)"). It is slow with slurry on, and the number of seeds and revolutions is the
+   user's choice; the warm-up needed for steady state is flagged through the power-drift indicator.
 4. **Reaching a large mill.** Do not extrapolate stress energies in D/d. Measured at 59 % and 85 % Nc
    (docs/VERIFICATION.md, "D/d sweep of the main simulation"): the dimensionless drop stress energy falls
    with D/d (slope about -0.3 to -0.4, free-fall expectation +1) and the shear energy rises (+0.1 to

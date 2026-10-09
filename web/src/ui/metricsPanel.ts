@@ -34,6 +34,7 @@ import type { ParamsJson } from "../protocol";
 import { ReportAggregator } from "../report/aggregator";
 import { buildReportPdf, downloadReportPdf, energyCumulativeFraction } from "../report/pdf";
 import type { AppState } from "../state";
+import { createBatchSection, type BatchSection } from "./batchSection";
 import { createHelpIcon } from "./helpIcon";
 import { drawSparkline } from "./sparkline";
 
@@ -376,6 +377,7 @@ export function createMetricsPanel(
   let proxyBannerEl: HTMLElement | null = null;
   let proxyRefNoteEl: HTMLElement | null = null;
   let proxyClearBtn: HTMLButtonElement | null = null;
+  let batchSection: BatchSection | null = null;
   let reference: ProxyReference | null = loadReference();
   let latestValues: Record<string, number | null> = {};
   const groupDetailsEls = new Map<MetricGroupName, HTMLDetailsElement>();
@@ -557,6 +559,28 @@ export function createMetricsPanel(
         saveReference(null);
         lastRenderMs = -Infinity;
       });
+
+      // Repeat runs (seeds): same Simulation and applied params as the main screen, headless in
+      // its own worker. Reads the live state lazily; never the unapplied form edits.
+      batchSection = createBatchSection({
+        getLive: () => {
+          const st = latestState;
+          if (!st) return null;
+          return {
+            params: st.params,
+            coarseGrainingFactor: st.metrics?.coarse_graining_factor ?? null,
+            thresholdsScaled: st.metrics?.stress?.thresholds_scaled ?? [],
+            subStepsPerSecondAchieved: st.subStepsPerSecondAchieved,
+          };
+        },
+        getReference: () => reference,
+        setReference: (ref) => {
+          reference = ref;
+          saveReference(ref);
+          lastRenderMs = -Infinity;
+        },
+      });
+      details.appendChild(batchSection.element);
     }
 
     if (group === "Grinding") {
@@ -662,6 +686,7 @@ export function createMetricsPanel(
     if (nowMs - lastRenderMs < 100) return;
     lastRenderMs = nowMs;
     refreshReportUi();
+    batchSection?.update();
 
     for (const spec of METRIC_SPECS) {
       const raw = values[spec.id];
@@ -754,7 +779,7 @@ export function createMetricsPanel(
         const cur = settingsOf(state.params, state.metrics?.coarse_graining_factor ?? null);
         const diff = settingsMismatch(reference.settings, cur);
         note =
-          `Reference set at t = ${reference.simTime.toFixed(1)} s (${reference.windowed ? "report-window mean" : "current value"}). ` +
+          `Reference set at t = ${reference.simTime.toFixed(1)} s (${reference.fromBatch ? `mean of ${reference.seeds ?? "?"} seeds, repeat runs` : reference.windowed ? "report-window mean" : "current value"}). ` +
           `Ratio = current value / reference.`;
         if (diff.length > 0) {
           note += ` Warning: numerical settings differ from the reference run (${diff.join(", ")}); ` +
