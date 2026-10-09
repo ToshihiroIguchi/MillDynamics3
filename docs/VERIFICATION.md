@@ -1421,7 +1421,13 @@ points (translation + rotation velocity) as neighbours of the shear-rate estimat
 before: identical within the 1 % ensemble error. The hypothesis above is refuted; the weak, non-monotone yield-stress
 response of the pile peak has another cause (not found).
 
-## Scale-up runner (`mill_core::scaleup`, 2026-10-09)
+## Scale-up runner (`mill_core::scaleup`, 2026-10-09; runner since removed)
+
+Note: the separate runner and its probe were removed on 2026-10-10; the impact statistics are now
+recorded in the main simulation (`stress.rs`, docs/SCALEUP.md). The measurements below were made
+with the runner's own settings (no slurry, `dt = dt_ratio sqrt(d/g)`, 6-12 contact iterations,
+restitution threshold and friction speed scale `0.1428 sqrt(g d)`, a lubrication-cushion
+restitution `exp(-35/St)` in the wet case) and are not what the main simulation's defaults give.
 
 Probe: `cargo run --release -p mill-core --example scaleup_probe -- --cases conv,sim,sweep,sens,wet`
 (3 seeds, 63 mm drum, 2 mm ZrO2, 59 % Nc, dry, 6 recorded revolutions; `± ` is the standard error over

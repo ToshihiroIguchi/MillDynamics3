@@ -18,7 +18,7 @@
 // `sim.stepFixed()`.
 
 import init, { defaultParamsJson, Simulation, setPanicHook } from "./wasm/mill_wasm.js";
-import type { Metrics } from "./metrics/types";
+import { parseMetrics } from "./metrics/parse";
 import { QUALITY_PRESETS } from "./params/presets";
 import type { FrameMessage, MainToWorkerMessage, ParamsJson, WorkerToMainMessage } from "./protocol";
 import { withPath } from "./params/schema";
@@ -93,7 +93,7 @@ function buildFrame(
   if (now - lastSlowUpdateMs >= SLOW_UPDATE_INTERVAL_MS) {
     lastSlowUpdateMs = now;
     frame.fluidSurface = sim.fluidSurface();
-    frame.metrics = JSON.parse(sim.metricsJson()) as Metrics;
+    frame.metrics = parseMetrics(sim.metricsJson());
   }
   return frame;
 }

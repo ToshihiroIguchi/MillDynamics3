@@ -8,6 +8,7 @@
 
 import { jsPDF } from "jspdf";
 import { METRIC_GROUPS, METRIC_SPECS, type MetricSpec } from "../metrics/specs";
+import { formatEdgeJ, tickEdgeIndices } from "../metrics/histogramAxis";
 import type { ImpactEnergyHistogram } from "../metrics/types";
 import {
   criticalSpeedRpm,
@@ -196,26 +197,22 @@ function renderHistogramImage(histogram: ImpactEnergyHistogram | undefined | nul
 
   ctx.font = "12px sans-serif";
   ctx.fillStyle = "#444444";
-  for (let i = 0; i < edges.length; i++) {
-    const edge = edges[i];
-    if (edge === undefined || edge <= 0) continue;
-    const log10 = Math.log10(edge);
-    if (Math.abs(log10 - Math.round(log10)) > 1e-6) continue; // only label bin edges landing on a decade
-    const label = edge.toExponential(0);
+  // One label per decade of stress energy (edges are in joules and do not land on powers of ten).
+  for (const i of tickEdgeIndices(edges)) {
     const x = padLeft + i * barW;
     ctx.textAlign = "center";
-    ctx.fillText(label, Math.min(Math.max(x, padLeft + 24), width - padRight - 24), height - padBottom + 22);
+    ctx.fillText(formatEdgeJ(edges[i]!), Math.min(Math.max(x, padLeft + 24), width - padRight - 24), height - padBottom + 22);
   }
 
   ctx.textAlign = "center";
   ctx.font = "13px sans-serif";
-  ctx.fillText("Impact energy (J)", padLeft + plotW / 2, height - 8);
+  ctx.fillText("Stress energy SE (J, 3D ball mass)", padLeft + plotW / 2, height - 8);
 
   ctx.save();
   ctx.translate(18, padTop + plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = "center";
-  ctx.fillText("Impacts / s", 0, 0);
+  ctx.fillText("Impacts / s (whole population)", 0, 0);
   ctx.restore();
 
   return canvas.toDataURL("image/png");
@@ -616,7 +613,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12);
   doc.setTextColor(20, 20, 20);
-  doc.text("Impact energy distribution (window-mean rates; line = energy-weighted cumulative fraction)", PAGE_MARGIN_MM, cursor.y);
+  doc.text("Impact stress-energy distribution (window-mean rates; line = energy-weighted cumulative fraction)", PAGE_MARGIN_MM, cursor.y);
   cursor.y += 7;
 
   const imageDataUrl = renderHistogramImage(impactEnergyHistogram);
@@ -639,7 +636,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
       doc.setFont("courier", "bold");
       doc.setFontSize(8.5);
       doc.setTextColor(90, 90, 90);
-      doc.text("Bin range (J)", colMetricX, cursor.y);
+      doc.text("SE bin range (J)", colMetricX, cursor.y);
       doc.text("Count (1/s)", colMeanX, cursor.y, { align: "right" });
       cursor.y += 4.5;
       doc.setFont("courier", "normal");

@@ -25,7 +25,9 @@ export interface MetricContext {
   slurryEnabled: boolean | null;
 }
 
-export type MetricGroupName = "Drum" | "Media" | "Grinding" | "Slurry" | "Solver";
+export const PROXY_GROUP = "Grinding proxy (3D)" as const;
+
+export type MetricGroupName = "Drum" | "Media" | "Grinding" | typeof PROXY_GROUP | "Slurry" | "Solver";
 
 /** %Nc at/above which the charge is considered centrifuging (pinned to the wall, no free-fall/
  * cascading region to measure a toe/shoulder edge from) -- see `unavailable` on `toe_angle_deg`/
@@ -36,6 +38,8 @@ export interface MetricSpec {
   id: string;
   group: MetricGroupName;
   label: string;
+  /** Optional dynamic label (e.g. one that embeds a value from `ctx.metrics`); falls back to `label`. */
+  labelFor?(ctx: MetricContext): string | null;
   unit?: string;
   /** One/two-sentence explanation shown as a tooltip on the "?" icon next to the label. */
   help?: string;
@@ -59,6 +63,9 @@ export interface MetricSpec {
    * only inside its group's collapsible `<details>`. Display order within the key block comes
    * from `KEY_METRIC_IDS`, not from this table's order. */
   key?: boolean;
+  /** Show a "x ref" ratio (current / stored reference) next to the value (Grinding proxy rows
+   * only; not meaningful for cumulative quantities, which just grow with time). */
+  refRatio?: boolean;
 }
 
 /** The key-results block's metric ids, in display order. Kept as an explicit list (rather than
@@ -83,12 +90,100 @@ export function coarseGrainingReason(ctx: MetricContext): string | null {
   return k !== undefined && k > 1 ? "Coarse-grained" : null;
 }
 
+/** `unavailable` reason for the Grinding proxy (3D) rows: coarse-graining makes the simulated ball
+ * differ from the real one, so SE, impact rates and per-ball powers are not meaningful; also
+ * unavailable when the build/state provides no `stress` block. */
+export function proxyReason(ctx: MetricContext): string | null {
+  const k = coarseGrainingReason(ctx);
+  if (k !== null) return k;
+  return ctx.metrics?.stress ? null : "No data";
+}
+
 function fixed(decimals: number): (v: number) => string {
   return (v) => v.toFixed(decimals);
 }
 
 function percentOf1(decimals: number): (v: number) => string {
   return (v) => `${(v * 100).toFixed(decimals)}%`;
+}
+
+/** Significant-digit formatter for quantities spanning many decades (powers, rates). */
+function sig(digits: number): (v: number) => string {
+  return (v) => {
+    if (v === 0) return "0";
+    const a = Math.abs(v);
+    return a >= 1e5 || a < 1e-3 ? v.toExponential(digits - 1) : v.toPrecision(digits);
+  };
+}
+
+const PROXY_NOTE =
+  " SE = relative kinetic energy of an impact, computed with the 3D sphere mass each disc stands for; " +
+  "'scaled' means divided by m*g*d (d = ball diameter). Per-ball powers use a one-ball-thick slab " +
+  "(depth = ball diameter). For RELATIVE comparison only (use Set reference); meaningless when " +
+  "coarse-graining is active (k > 1).";
+
+const proxy = (key: keyof NonNullable<Metrics["stress"]>) =>
+  (ctx: MetricContext): number | null => {
+    const v = ctx.metrics?.stress?.[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+
+const proxyAt = (key: "effective_power_per_ball_w" | "cumulative_effective_energy_per_ball_j" | "impacts_per_ball_per_s", i: number) =>
+  (ctx: MetricContext): number | null => {
+    const v = ctx.metrics?.stress?.[key]?.[i];
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  };
+
+const thresholdLabel = (prefix: string, i: number) => (ctx: MetricContext): string | null => {
+  const t = ctx.metrics?.stress?.thresholds_scaled?.[i];
+  return typeof t === "number" ? `${prefix} SE > ${t} m·g·d` : null;
+};
+
+const proxyHideUnlessThreshold = (i: number) => (_value: number | null, ctx: MetricContext): string | null => {
+  const k = proxyReason(ctx);
+  if (k !== null) return k;
+  return ctx.metrics?.stress?.thresholds_scaled?.[i] === undefined ? "No data" : null;
+};
+
+const PROXY_BASE = { group: PROXY_GROUP, csv: true, unavailable: (_v: number | null, ctx: MetricContext) => proxyReason(ctx), hideWhenUnavailable: true } as const;
+
+const THRESHOLD_COUNT = 6;
+
+function effectivePowerSpecs(): MetricSpec[] {
+  const out: MetricSpec[] = [];
+  for (let i = 0; i < THRESHOLD_COUNT; i++) {
+    out.push({
+      id: `proxy_eff_power_${i}`,
+      help: `Power per ball carried by impacts whose scaled stress energy exceeds this threshold (a mechanistic grinding model counts only sufficiently strong impacts as effective).${PROXY_NOTE}`,
+      ...PROXY_BASE,
+      label: "Effective power, SE > threshold",
+      labelFor: thresholdLabel("Eff. power,", i),
+      unit: "W/ball",
+      value: proxyAt("effective_power_per_ball_w", i),
+      format: sig(3),
+      refRatio: true,
+      unavailable: proxyHideUnlessThreshold(i),
+    });
+  }
+  return out;
+}
+
+function cumulativeEffectiveSpecs(): MetricSpec[] {
+  const out: MetricSpec[] = [];
+  for (let i = 0; i < THRESHOLD_COUNT; i++) {
+    out.push({
+      id: `proxy_cum_eff_energy_${i}`,
+      help: `Cumulative stress energy per ball carried by impacts above this threshold since the simulation started. The time two conditions need to reach the same value is a relative grinding-time proxy.${PROXY_NOTE}`,
+      ...PROXY_BASE,
+      label: "Cumulative effective energy, SE > threshold",
+      labelFor: thresholdLabel("Cum. eff. energy,", i),
+      unit: "J/ball",
+      value: proxyAt("cumulative_effective_energy_per_ball_j", i),
+      format: sig(3),
+      unavailable: proxyHideUnlessThreshold(i),
+    });
+  }
+  return out;
 }
 
 const m = <K extends keyof Metrics>(key: K) =>
@@ -183,6 +278,21 @@ export const METRIC_SPECS: MetricSpec[] = [
   },
   { id: "dissipated_power", help: "Rate at which ball contacts (friction, inelastic impacts, rolling resistance) dissipate energy. Should be positive and of the same order as Power draw in a dry steady state.", group: "Grinding", label: "Dissipated power", unit: "W/m", value: m("dissipated_power_w"), format: fixed(2), sparkline: true, csv: true, key: true },
 
+  // --- Grinding proxy (3D) --------------------------------------------------------------------
+  { id: "proxy_specific_power", help: `Wall power per ball divided by the 3D ball mass: power drawn per kilogram of grinding media. Scales roughly as sqrt(drum size) between similar mills.${PROXY_NOTE}`, ...PROXY_BASE, label: "Specific power", unit: "W/kg", value: proxy("specific_power_w_per_kg"), format: sig(3), sparkline: true, refRatio: true },
+  { id: "proxy_wall_power", help: `Power the drum wall delivers (including slurry drag on the wall) per ball.${PROXY_NOTE}`, ...PROXY_BASE, label: "Wall power per ball", unit: "W/ball", value: proxy("wall_power_per_ball_w"), format: sig(3), refRatio: true },
+  { id: "proxy_impacts_total", help: `Impacts per ball per second, all four classes together. Impacts are split into drop type (approach speed along the normal at least the tangential slip speed) and shear type (slip dominates), for ball-ball and ball-wall contacts.${PROXY_NOTE}`, ...PROXY_BASE, label: "Impacts per ball", unit: "1/s", value: proxy("impacts_total_per_ball_per_s"), format: sig(3), refRatio: true },
+  { id: "proxy_impacts_bb_drop", help: `Ball-ball drop-type impacts per ball per second.${PROXY_NOTE}`, ...PROXY_BASE, label: "Impacts per ball, ball-ball drop", unit: "1/s", value: proxyAt("impacts_per_ball_per_s", 0), format: sig(3), refRatio: true },
+  { id: "proxy_impacts_bb_shear", help: `Ball-ball shear-type impacts per ball per second.${PROXY_NOTE}`, ...PROXY_BASE, label: "Impacts per ball, ball-ball shear", unit: "1/s", value: proxyAt("impacts_per_ball_per_s", 1), format: sig(3), refRatio: true },
+  { id: "proxy_impacts_bw_drop", help: `Ball-wall drop-type impacts per ball per second.${PROXY_NOTE}`, ...PROXY_BASE, label: "Impacts per ball, ball-wall drop", unit: "1/s", value: proxyAt("impacts_per_ball_per_s", 2), format: sig(3), refRatio: true },
+  { id: "proxy_impacts_bw_shear", help: `Ball-wall shear-type impacts per ball per second.${PROXY_NOTE}`, ...PROXY_BASE, label: "Impacts per ball, ball-wall shear", unit: "1/s", value: proxyAt("impacts_per_ball_per_s", 3), format: sig(3), refRatio: true },
+  { id: "proxy_mean_se_drop", help: `Mean scaled stress energy SE/(m*g*d) of drop-type impacts (ball-ball and ball-wall).${PROXY_NOTE}`, ...PROXY_BASE, label: "Mean SE/(m·g·d), drop", value: proxy("mean_se_scaled_drop"), format: sig(3), refRatio: true },
+  { id: "proxy_mean_se_shear", help: `Mean scaled stress energy SE/(m*g*d) of shear-type impacts (ball-ball and ball-wall).${PROXY_NOTE}`, ...PROXY_BASE, label: "Mean SE/(m·g·d), shear", value: proxy("mean_se_scaled_shear"), format: sig(3), refRatio: true },
+  { id: "proxy_stress_intensity", help: `Mean scaled stress energy over all impacts (a Kwade-type stress intensity).${PROXY_NOTE}`, ...PROXY_BASE, label: "Stress intensity, mean SE/(m·g·d)", value: proxy("stress_intensity_scaled"), format: sig(3), sparkline: true, refRatio: true },
+  ...effectivePowerSpecs(),
+  { id: "proxy_cum_specific_energy", help: `Wall work per kilogram of media since the simulation started (J/kg). Take differences between two times for a window.${PROXY_NOTE}`, ...PROXY_BASE, label: "Cumulative specific energy", unit: "J/kg", value: proxy("cumulative_specific_energy_j_per_kg"), format: sig(3) },
+  ...cumulativeEffectiveSpecs(),
+
   // --- Slurry -------------------------------------------------------------------------------
   { id: "fluid_particle_count", help: "Number of slurry particles being simulated.", group: "Slurry", label: "Fluid particles", value: m("fluid_particle_count"), format: fixed(0), csv: true },
   {
@@ -229,4 +339,4 @@ export const METRIC_SPECS: MetricSpec[] = [
   { id: "substep_displacement", help: "Largest distance a ball moves in one sub-step, relative to its diameter. Should stay well below 1; above 0.5 warns of tunnelling risk.", group: "Solver", label: "Substep displacement / diameter", value: m("max_substep_displacement_over_diameter"), format: fixed(3), csv: true },
 ];
 
-export const METRIC_GROUPS: MetricGroupName[] = ["Drum", "Media", "Grinding", "Slurry", "Solver"];
+export const METRIC_GROUPS: MetricGroupName[] = ["Drum", "Media", "Grinding", PROXY_GROUP, "Slurry", "Solver"];

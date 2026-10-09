@@ -68,6 +68,34 @@ impl CouplingImpulses {
 /// semi-implicit coupling scheme), then the balls advance using those forces, so their new
 /// positions become the moving boundary for the fluid's *next* sub-step.
 #[allow(clippy::too_many_arguments)]
+pub fn step_recorded(
+    dem: &mut DemState,
+    fluid: &mut FluidParticles,
+    drum: &Drum,
+    drum_angle: f32,
+    media: &MediaParams,
+    slurry: &SlurryParams,
+    dem_iterations: u32,
+    pbf_iterations: u32,
+    dt: f32,
+    impacts: Option<&mut Vec<crate::dem::ImpactRecord>>,
+) -> (crate::pbf::FluidStepStats, crate::dem::DemStepStats) {
+    let (impulses, fluid_stats) =
+        fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
+    let dem_stats = dem.step_recorded(
+        drum,
+        drum_angle,
+        media,
+        dem_iterations,
+        dt,
+        Some(&impulses),
+        impacts,
+    );
+    (fluid_stats, dem_stats)
+}
+
+/// [`step_recorded`] without impact recording.
+#[allow(clippy::too_many_arguments)]
 pub fn step(
     dem: &mut DemState,
     fluid: &mut FluidParticles,
@@ -79,11 +107,18 @@ pub fn step(
     pbf_iterations: u32,
     dt: f32,
 ) -> (crate::pbf::FluidStepStats, crate::dem::DemStepStats) {
-    let (impulses, fluid_stats) =
-        fluid.step_coupled(drum, drum_angle, slurry, pbf_iterations, dt, &dem.balls);
-    let dem_stats =
-        dem.step_with_external_forces(drum, drum_angle, media, dem_iterations, dt, Some(&impulses));
-    (fluid_stats, dem_stats)
+    step_recorded(
+        dem,
+        fluid,
+        drum,
+        drum_angle,
+        media,
+        slurry,
+        dem_iterations,
+        pbf_iterations,
+        dt,
+        None,
+    )
 }
 
 #[cfg(test)]

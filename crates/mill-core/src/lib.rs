@@ -24,7 +24,7 @@ pub mod metrics;
 pub mod params;
 pub mod pbf;
 pub mod rng;
-pub mod scaleup;
+pub mod stress;
 pub mod surface;
 
 use dem::DemState;
@@ -95,7 +95,10 @@ pub struct Simulation {
     torque_nm: f32,
     collision_rate_per_s: f32,
     dissipated_power_w: f32,
-    impact_energy_counts_per_s: [f32; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
+    /// Recorded impacts of the current sub-step (scratch, cleared every sub-step) and their
+    /// EMA-smoothed 3D-converted statistics, see [`stress`].
+    impact_log: Vec<dem::ImpactRecord>,
+    stress: stress::StressAccum,
     /// Largest [`dem::DemStepStats::max_substep_displacement_over_diameter`] seen since the last
     /// call to [`Simulation::step`] (reset at the start of each call, not EMA-smoothed -- a
     /// tunnelling-risk spike is exactly the kind of transient an average would hide).
@@ -188,7 +191,8 @@ impl Simulation {
             torque_nm: 0.0,
             collision_rate_per_s: 0.0,
             dissipated_power_w: 0.0,
-            impact_energy_counts_per_s: [0.0; dem::IMPACT_ENERGY_HISTOGRAM_BINS],
+            impact_log: Vec::new(),
+            stress: stress::StressAccum::default(),
             max_substep_displacement_over_diameter: 0.0,
             coupling_clamp_hits: 0,
             energy_budget: EnergyBudget::default(),
@@ -219,6 +223,17 @@ impl Simulation {
             + b.interface_created_j;
         b.unattributed_j = b.delta_mechanical_j - explained;
         b
+    }
+
+    /// `(m3, m3 g d, d)`: the 3D mass of the sphere one simulated ball stands for (kg), the energy
+    /// unit of the dimensionless stress energies (J) and the ball diameter (m).
+    fn stress_scales(&self) -> (f64, f64, f64) {
+        let balls = &self.dem.balls;
+        let r = balls.radius as f64;
+        // Disc areal mass `rho pi r^2`  ->  sphere mass `rho 4/3 pi r^3` = disc mass * 4/3 * r.
+        let m3 = balls.mass as f64 * 4.0 / 3.0 * r;
+        let d = 2.0 * r;
+        (m3, m3 * 9.81 * d, d)
     }
 
     pub fn params(&self) -> &Params {
@@ -310,12 +325,6 @@ impl Simulation {
         self.dissipated_power_w
     }
 
-    /// EMA-smoothed impact rate (impacts per second per metre of mill depth) in each log-spaced
-    /// energy bin (see [`dem::impact_energy_bin_edges`]).
-    pub fn impact_energy_counts_per_s(&self) -> &[f32; dem::IMPACT_ENERGY_HISTOGRAM_BINS] {
-        &self.impact_energy_counts_per_s
-    }
-
     /// Largest [`dem::DemStepStats::max_substep_displacement_over_diameter`] over every sub-step
     /// of the most recent [`Simulation::step`] call (not EMA-smoothed, see that field's struct
     /// doc comment for why).
@@ -362,9 +371,25 @@ impl Simulation {
         m.torque_nm = self.torque_nm;
         m.collision_rate_per_s = self.collision_rate_per_s;
         m.dissipated_power_w = self.dissipated_power_w;
+        let (m3, scale_j, d) = self.stress_scales();
+        m.stress = self.stress.metrics(
+            self.dem.balls.len(),
+            m3,
+            scale_j,
+            d,
+            self.power_draw_w as f64,
+        );
         m.impact_energy_histogram = metrics::ImpactEnergyHistogram {
-            bin_edges_j: dem::impact_energy_bin_edges().to_vec(),
-            counts_per_s: self.impact_energy_counts_per_s.to_vec(),
+            bin_edges_j: stress::se_bin_edges()
+                .iter()
+                .map(|e| (e * scale_j) as f32)
+                .collect(),
+            counts_per_s: self
+                .stress
+                .histogram_rate()
+                .iter()
+                .map(|&c| c as f32)
+                .collect(),
         };
         m.coupling_clamp_hits = self.coupling_clamp_hits;
         m.effective_ball_diameter_m = effective.diameter_m;
@@ -441,7 +466,8 @@ impl Simulation {
         let pbf_iterations = self.params.simulation.pbf_iterations;
 
         let drum = Drum::new(radius_m, omega, lifters);
-        let (fluid_stats, dem_stats) = coupling::step(
+        self.impact_log.clear();
+        let (fluid_stats, dem_stats) = coupling::step_recorded(
             &mut self.dem,
             &mut self.fluid,
             &drum,
@@ -451,6 +477,7 @@ impl Simulation {
             dem_iterations,
             pbf_iterations,
             sub_dt,
+            Some(&mut self.impact_log),
         );
         self.coupling_clamp_hits += fluid_stats.coupling_clamp_hits;
         let b = &mut self.energy_budget;
@@ -500,8 +527,18 @@ impl Simulation {
         };
         self.torque_nm += alpha * (torque_instant - self.torque_nm);
 
-        let collision_rate_instant = stats.collision_count as f32 / sub_dt;
-        self.collision_rate_per_s += alpha * (collision_rate_instant - self.collision_rate_per_s);
+        // Impact statistics come from the recorded impacts (3D-converted, scale-relative
+        // threshold, see `stress`), not from `DemStepStats`' 2D-disc-mass counters.
+        let (m3, scale_j, _) = self.stress_scales();
+        self.stress.update(
+            &self.impact_log,
+            m3,
+            scale_j,
+            sub_dt as f64,
+            alpha as f64,
+            (stats.wall_work_j + fluid_wall_work_j) as f64,
+        );
+        self.collision_rate_per_s = self.stress.total_rate() as f32;
 
         // Clamped to >= 0: `dissipated_energy_j` is provably non-negative up to floating-point
         // summation-order slack (see its doc comment), so this guards only against that slack
@@ -510,15 +547,6 @@ impl Simulation {
         // `dem::tests`/`tests::dissipated_energy_is_never_materially_negative_while_cascading`.
         let dissipated_power_instant = stats.dissipated_energy_j.max(0.0) / sub_dt;
         self.dissipated_power_w += alpha * (dissipated_power_instant - self.dissipated_power_w);
-
-        for (ema, &count) in self
-            .impact_energy_counts_per_s
-            .iter_mut()
-            .zip(&stats.impact_energy_histogram)
-        {
-            let instant = count as f32 / sub_dt;
-            *ema += alpha * (instant - *ema);
-        }
 
         self.max_substep_displacement_over_diameter = self
             .max_substep_displacement_over_diameter
@@ -986,11 +1014,19 @@ mod tests {
 
         assert_eq!(
             m.impact_energy_histogram.bin_edges_j.len(),
-            dem::IMPACT_ENERGY_HISTOGRAM_BINS + 1
+            stress::SE_BINS + 1
         );
         assert_eq!(
             m.impact_energy_histogram.counts_per_s.len(),
-            dem::IMPACT_ENERGY_HISTOGRAM_BINS
+            stress::SE_BINS
+        );
+        // The 3D-converted stress statistics are present and finite.
+        let st = &m.stress;
+        assert!(st.ball_mass_3d_kg > 0.0 && st.scale_energy_j > 0.0);
+        assert!(st.impacts_total_per_ball_per_s.is_finite() && st.stress_intensity_scaled >= 0.0);
+        assert_eq!(
+            st.effective_power_per_ball_w.len(),
+            st.thresholds_scaled.len()
         );
         assert!(
             m.impact_energy_histogram
@@ -1004,6 +1040,27 @@ mod tests {
         let json = serde_json::to_string(&m).expect("Metrics should serialize");
         assert!(json.contains("power_draw_w"));
         assert!(json.contains("impact_energy_histogram"));
+        assert!(json.contains("specific_power_w_per_kg"));
+    }
+
+    #[test]
+    fn stress_metrics_follow_the_running_simulation() {
+        let mut params = Params::default();
+        params.slurry.enabled = false;
+        let mut sim = Simulation::new(params).unwrap();
+        for _ in 0..(4 * 60) {
+            sim.step(1.0 / 60.0);
+        }
+        let m = sim.metrics();
+        let st = &m.stress;
+        // 3D mass of a 2 mm ZrO2 sphere: 6000 * 4/3 pi (1e-3)^3 = 2.51e-5 kg.
+        assert!((st.ball_mass_3d_kg - 2.513e-5).abs() < 1e-7, "{st:?}");
+        assert!(st.impacts_total_per_ball_per_s > 1.0, "{st:?}");
+        assert!(st.mean_se_scaled_drop > 0.0 && st.stress_intensity_scaled > 0.0);
+        assert!(st.specific_power_w_per_kg > 0.0, "{st:?}");
+        // The legacy collision rate is now the recorded total (whole population).
+        let total = st.impacts_total_per_ball_per_s * m.simulated_ball_count as f32;
+        assert!((m.collision_rate_per_s - total).abs() / total < 1e-3);
     }
 
     /// Regression test for the 2026-09-23 report: raising `simulation.max_balls` well above the

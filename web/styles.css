@@ -731,269 +731,29 @@ body.params-collapsed .params-panel {
   margin: 6px 0 0;
 }
 
-/* ---- Scale-up study panel (ui/scaleupPanel.ts) -------------------------------------------------
-   Full-screen overlay with its own theme tokens: dark by default (matches the app), light when the
-   OS asks for it. The charts read --su-text / --su-grid from here (scaleup/charts.ts). */
-.su-overlay {
-  --su-bg: #12161c;
-  --su-surface: #1c2129;
-  --su-border: #3a4048;
-  --su-text: #e6e9ef;
-  --su-muted: #9aa3b0;
-  --su-grid: #2a313b;
-  --su-accent: #3a82a8;
-  --su-warn-bg: #4a3512;
-  --su-warn-text: #ffd27a;
-  --su-error: #ff8a8a;
-  --su-noisy: #ffb648;
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  background: var(--su-bg);
-  color: var(--su-text);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+/* Grinding proxy (3D) group: "x ref" ratio column and Set/Clear reference controls. */
+.metric-ref {
+  color: #7fb4d6;
+  min-width: 44px;
+  text-align: right;
+  white-space: nowrap;
+  cursor: help;
 }
 
-.su-overlay[hidden] {
+.metric-ref[hidden] {
   display: none;
 }
 
-@media (prefers-color-scheme: light) {
-  .su-overlay {
-    --su-bg: #ffffff;
-    --su-surface: #f1f3f6;
-    --su-border: #c3c9d2;
-    --su-text: #1b2028;
-    --su-muted: #5b6573;
-    --su-grid: #dde1e7;
-    --su-accent: #1f6a93;
-    --su-warn-bg: #fff1d0;
-    --su-warn-text: #6b4600;
-    --su-error: #b3261e;
-    --su-noisy: #b45f00;
-  }
-}
-
-.su-header {
+.metrics-ref-controls {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--su-border);
-}
-
-.su-title {
-  margin: 0;
-  font-size: 16px;
-}
-
-.su-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px 48px;
-}
-
-.su-section {
-  margin: 16px 0;
-}
-
-.su-h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
-}
-
-.su-h4 {
-  margin: 12px 0 6px;
-  font-size: 12px;
-  color: var(--su-muted);
-}
-
-.su-note,
-.su-help {
-  color: var(--su-muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.su-note {
-  margin: 4px 0 8px;
-  max-width: 110ch;
-}
-
-.su-row {
-  display: flex;
-  align-items: flex-end;
   gap: 8px;
-  margin: 6px 0;
+  margin: 6px 0 0;
 }
 
-.su-wrap {
-  flex-wrap: wrap;
+.metrics-ref-controls .metrics-export {
+  flex: 1;
 }
 
-.su-field {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.su-field-label {
-  color: var(--su-muted);
-  font-size: 11px;
-}
-
-.su-num,
-.su-text,
-.su-select {
-  background: var(--su-surface);
-  color: var(--su-text);
-  border: 1px solid var(--su-border);
-  border-radius: 3px;
-  padding: 3px 5px;
-  font: inherit;
-}
-
-.su-num {
-  width: 72px;
-}
-
-.su-text {
-  width: 120px;
-}
-
-.su-btn {
-  background: var(--su-surface);
-  color: var(--su-text);
-  border: 1px solid var(--su-border);
-  border-radius: 4px;
-  padding: 5px 10px;
-  font: inherit;
-  cursor: pointer;
-}
-
-.su-btn:hover:not(:disabled) {
-  border-color: var(--su-accent);
-}
-
-.su-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.su-primary {
-  background: var(--su-accent);
-  border-color: var(--su-accent);
-  color: #fff;
-}
-
-.su-small {
-  padding: 2px 6px;
-}
-
-.su-scroll {
-  overflow-x: auto;
-}
-
-.su-table {
-  border-collapse: collapse;
-  min-width: 100%;
-}
-
-.su-table th,
-.su-table td {
-  border-bottom: 1px solid var(--su-border);
-  padding: 4px 6px;
-  text-align: left;
-  vertical-align: top;
-  white-space: nowrap;
-}
-
-.su-table th {
-  color: var(--su-muted);
-  font-weight: 600;
-}
-
-.su-metric {
-  white-space: normal;
-  min-width: 260px;
-  max-width: 420px;
-}
-
-.su-val {
-  text-align: right !important;
-}
-
-.su-derived {
-  color: var(--su-muted);
-}
-
-.su-bad td {
-  background: var(--su-warn-bg);
-}
-
-.su-msg {
-  min-height: 1em;
-  margin: 4px 0;
-}
-
-.su-error {
-  color: var(--su-error);
-}
-
-.su-progress {
-  color: var(--su-muted);
-}
-
-.su-warnings {
-  margin-bottom: 8px;
-}
-
-.su-warning {
-  background: var(--su-warn-bg);
-  color: var(--su-warn-text);
-  border-radius: 3px;
-  padding: 4px 8px;
-  margin: 4px 0;
-}
-
-.su-noisy {
-  color: var(--su-noisy);
-  font-weight: 600;
-}
-
-.su-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin: 6px 0;
-}
-
-.su-swatch {
-  display: inline-block;
-  width: 12px;
-  height: 3px;
-  margin-right: 5px;
-  vertical-align: middle;
-}
-
-.su-charts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 12px;
-}
-
-.su-chart-title {
-  color: var(--su-muted);
-  margin-bottom: 2px;
-}
-
-.su-canvas {
-  display: block;
-  width: 100%;
-  background: var(--su-surface);
-  border: 1px solid var(--su-border);
-  border-radius: 4px;
+.metrics-note.is-warn-note {
+  color: #e8a33d;
 }

@@ -10,6 +10,30 @@ export interface ImpactEnergyHistogram {
   counts_per_s: number[];
 }
 
+/** Names of the four impact classes, in the order of every per-class array in `StressMetrics`. */
+export const STRESS_CLASS_NAMES = ["ball_ball_drop", "ball_ball_shear", "ball_wall_drop", "ball_wall_shear"] as const;
+
+/** Mirrors `mill_core::stress::StressMetrics` (crates/mill-core/src/stress.rs): 3D-converted
+ * grinding-proxy statistics of the running simulation. Per-class arrays have 4 entries in the
+ * order of `STRESS_CLASS_NAMES`; per-threshold arrays are index-aligned with `thresholds_scaled`. */
+export interface StressMetrics {
+  ball_mass_3d_kg: number;
+  scale_energy_j: number;
+  impacts_per_ball_per_s: number[];
+  impacts_total_per_ball_per_s: number;
+  mean_se_scaled: number[];
+  mean_se_scaled_drop: number;
+  mean_se_scaled_shear: number;
+  stress_intensity_scaled: number;
+  wall_power_per_ball_w: number;
+  specific_power_w_per_kg: number;
+  thresholds_scaled: number[];
+  effective_power_per_ball_w: number[];
+  cumulative_wall_energy_per_ball_j: number;
+  cumulative_specific_energy_j_per_kg: number;
+  cumulative_effective_energy_per_ball_j: number[];
+}
+
 /** Mirrors `mill_core::metrics::Metrics`. */
 export interface Metrics {
   // Charge geometry (angle convention: atan2(y, x) in [0, 2*pi), CCW from +x -- see
@@ -46,6 +70,9 @@ export interface Metrics {
   dissipated_power_w: number;
   impact_energy_histogram: ImpactEnergyHistogram;
   coupling_clamp_hits: number;
+
+  /** 3D grinding-proxy statistics; absent (or null) when the build/state does not provide them. */
+  stress?: StressMetrics | null;
 
   // Coarse-graining / media.
   effective_ball_diameter_m: number;

@@ -18,7 +18,7 @@ after the initial settling transient (roughly `t > 15` s of simulated time).
 ## Panel layout: key results vs. details
 
 The panel (`web/src/ui/metricsPanel.ts`) opens on a small, fixed **Key results** block, followed by
-the five groups below as collapsible `<details>` (all closed by default). The block exists because
+the groups below as collapsible `<details>` (all closed by default). The block exists because
 the full metric table is ~30 rows, most of which either duplicate the HUD/params panel or matter
 only as an alarm, not as a number worth reading continuously -- see `web/src/metrics/specs.ts`'s
 `KEY_METRIC_IDS` for the authoritative list. Seven rows, in display order, each answering a
@@ -128,6 +128,57 @@ ball's mass is `k^2` times a true ball's (`docs/PHYSICS.md` §9). Every other me
 total charge mass is preserved regardless of `k`. Raise `Max balls` above `True ball count` (or, as
 above, keep `True ball count` below `Max balls` in the first place) to disable coarse-graining and
 see genuine per-impact statistics.
+
+---
+
+## Grinding proxy (3D) group
+
+Grinding itself is not simulated. This group reports the quantities that mechanistic grinding models
+are driven by, computed from the impacts the ball solver records in the **main** simulation and
+converted to 3D (`crates/mill-core/src/stress.rs`, `Metrics.stress`). It uses the same run, the same
+numerical settings and the same report window as everything else on the panel.
+
+**Definitions.**
+
+- **SE (stress energy)** is the relative kinetic energy of one impact, `0.5 * m_red * v^2`, with the
+  mass of the *3D sphere* each disc stands for (`m = rho * 4/3 * pi * r^3`), not the 2D unit-depth
+  disc mass (which overstates SE by a ball-size-dependent factor, about 750x for a 2 mm ball).
+  Ball-ball uses the reduced mass `m/2`, ball-wall `m`.
+- **Scaled** means divided by `m*g*d` (`d` the ball diameter), so conditions of different size can be
+  compared.
+- **Drop vs shear.** An impact is drop type when its normal approach speed is at least its tangential
+  slip speed, shear type otherwise; ball-ball and ball-wall are kept apart (four classes). They scale
+  differently with drum and ball size.
+- **Per-ball powers** use a one-ball-thick slab (depth = ball diameter): the 2D per-metre-depth power
+  times `d`, divided by the ball count.
+
+**Rows.** Specific power (W/kg, wall power per ball over the 3D ball mass); wall power per ball (W);
+impacts per ball per second (total and the four classes); mean `SE/(m g d)` for drop and shear
+impacts; stress intensity (mean scaled SE over all impacts); effective power per ball for each
+threshold (power carried by impacts whose scaled SE exceeds `0.03, 0.1, 0.3, 1, 3, 10`; the labels
+come from `thresholds_scaled`); cumulative specific energy (J/kg); cumulative effective energy per
+ball for each threshold. Specific power and stress intensity have sparklines; all rows are in the CSV.
+
+**How to read it.** The values are for **relative comparison only**: absolute numbers carry the
+2D-model bias. Use **Set reference** on a baseline run (it stores the current report-window mean of
+each non-cumulative row together with the params and numerical settings), change a condition, and
+read the `x ref` column: current value / reference, two significant digits, with the reference value
+in the tooltip. If sub-steps, ball solver iterations or the coarse-graining factor differ from the
+reference run, a warning appears next to the ratios, because those change impact statistics by
+several percent. The reference is kept in `localStorage` (the feature works without it, just not
+across reloads); **Clear reference** removes it. The cumulative rows have no ratio (they grow with
+time); the time two conditions need to reach the same cumulative effective energy is the
+relative-grinding-time proxy.
+
+**Hidden when `k > 1`.** Like Collision rate, these rows are hidden whenever coarse-graining is
+active, with a banner explaining why: the simulated ball is not the real ball, so impact energies and
+rates are not meaningful. The group stays visible so the banner can be read.
+
+**Impact histogram.** The chart in the Grinding group (and the PDF report's spectrum) now shows the
+same 3D stress energy: 28 log-spaced bins (4 per decade, 29 edges) of SE in joules using the 3D ball
+mass; the y axis is impacts per second of the whole simulated population; the orange line is the
+energy-weighted cumulative fraction. Bin edges are in joules and do not land on powers of ten, so the
+x axis is labelled once per decade starting from the first edge.
 
 ---
 

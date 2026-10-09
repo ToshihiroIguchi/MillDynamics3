@@ -45,30 +45,6 @@ pub fn restitution_velocity_threshold(radius_m: f32) -> f32 {
     RESTITUTION_THRESHOLD_FROUDE * (-GRAVITY * 2.0 * radius_m).sqrt()
 }
 
-/// Empirical constant of the lubrication-cushion restitution law `e = e_dry * exp(-BETA / St)`
-/// (Legendre, Zenit, Daniel & Guiraud 2006, sphere-wall impacts in viscous liquids).
-const WET_CUSHION_BETA: f32 = 35.0;
-
-/// Effective restitution of an impact with approach speed `v_n` (m/s) in a liquid of dynamic
-/// viscosity `mu_pa_s`; `e_dry` unchanged when `mu_pa_s == 0`. `St = rho_ball * v_n * d / (9 mu)`.
-#[inline]
-pub fn wet_cushion_restitution(
-    e_dry: f32,
-    mu_pa_s: f32,
-    rho_ball: f32,
-    diameter_m: f32,
-    v_n: f32,
-) -> f32 {
-    if mu_pa_s <= 0.0 {
-        return e_dry;
-    }
-    let st = rho_ball * v_n.max(0.0) * diameter_m / (9.0 * mu_pa_s);
-    if st <= 0.0 {
-        return 0.0;
-    }
-    e_dry * (-WET_CUSHION_BETA / st).exp()
-}
-
 /// Largest fraction of a ball's own diameter that step 3's non-penetration solve recovers from a
 /// single contact in one iteration. A deep overlap (e.g. from a coarse-grained ball population's
 /// large diameter, or several balls suddenly landing on top of each other) is instead recovered
@@ -560,16 +536,9 @@ impl DemState {
         let w = balls.inv_mass();
         let w_rot = balls.inv_inertia();
         let r = balls.radius;
-        // The solver keeps the absolute `RESTITUTION_VELOCITY_THRESHOLD` it was tuned against (the
-        // energy-injection regressions) unless the scale-up runner opts into the ball-relative one
-        // (`media.restitution_threshold_froude`). Recording always uses the ball-relative one.
+        // Recording threshold (scale-relative); the solver itself keeps the absolute
+        // `RESTITUTION_VELOCITY_THRESHOLD` it was tuned against (the energy-injection regressions).
         let impact_threshold = restitution_velocity_threshold(r);
-        let solver_threshold = if media.restitution_threshold_froude > 0.0 {
-            media.restitution_threshold_froude * (-GRAVITY * 2.0 * r).sqrt()
-        } else {
-            RESTITUTION_VELOCITY_THRESHOLD
-        };
-        let rho_ball = balls.mass / (PI * r * r);
 
         // --- 0. Sanitize state carried in from the previous sub-step -------------------------
         // Mirrors `pbf::FluidParticles::step_coupled`'s step 0: given finite input this solver
@@ -938,7 +907,7 @@ impl DemState {
             let n_hat = if dist > 1e-9 { delta / dist } else { Vec2::X };
 
             let v_n_pre = (v_pre[iu] - v_pre[ju]).dot(n_hat);
-            let is_fresh_impact = v_n_pre < -solver_threshold;
+            let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
             if is_fresh_impact {
                 // A genuine fresh impact (docs/PLAN.md ss3.5): reduced mass `mass/2` for two
                 // equal masses colliding.
@@ -949,13 +918,7 @@ impl DemState {
                 }
             }
             let e = if is_fresh_impact {
-                wet_cushion_restitution(
-                    media.restitution_ball_ball,
-                    media.wet_cushion_viscosity_pa_s,
-                    rho_ball,
-                    2.0 * r,
-                    -v_n_pre,
-                )
+                media.restitution_ball_ball
             } else {
                 0.0
             };
@@ -1004,7 +967,7 @@ impl DemState {
             let v_wall = drum.wall_velocity(balls.x[iu] - r * n_hat);
 
             let v_n_pre = (v_pre[iu] - v_wall).dot(n_hat);
-            let is_fresh_impact = v_n_pre < -solver_threshold;
+            let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
             if is_fresh_impact {
                 // Wall has "infinite" mass, so the reduced mass of the pair is just the ball's
                 // own.
@@ -1015,13 +978,7 @@ impl DemState {
                 }
             }
             let e = if is_fresh_impact {
-                wet_cushion_restitution(
-                    media.restitution_ball_wall,
-                    media.wet_cushion_viscosity_pa_s,
-                    rho_ball,
-                    2.0 * r,
-                    -v_n_pre,
-                )
+                media.restitution_ball_wall
             } else {
                 0.0
             };
@@ -1597,17 +1554,6 @@ mod tests {
         // Scales as sqrt(d).
         let ratio = restitution_velocity_threshold(0.004) / t;
         assert!((ratio - 2.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn wet_cushion_is_off_at_zero_viscosity_and_damps_low_stokes_impacts() {
-        assert_eq!(wet_cushion_restitution(0.7, 0.0, 6000.0, 0.002, 1.0), 0.7);
-        // St = 6000 * 1 * 0.002 / (9 * 0.001) = 1333: nearly dry.
-        let water = wet_cushion_restitution(0.7, 0.001, 6000.0, 0.002, 1.0);
-        assert!(water > 0.68 && water < 0.7, "{water}");
-        // St = 1.33 (viscous oil): bouncing is killed.
-        let oil = wet_cushion_restitution(0.7, 1.0, 6000.0, 0.002, 1.0);
-        assert!(oil < 1e-6, "{oil}");
     }
 
     #[test]

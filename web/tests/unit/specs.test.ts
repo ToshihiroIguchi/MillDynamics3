@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KEY_METRIC_IDS, METRIC_GROUPS, METRIC_SPECS, type MetricContext, type MetricGroupName } from "../../src/metrics/specs";
+import { KEY_METRIC_IDS, METRIC_GROUPS, METRIC_SPECS, PROXY_GROUP, type MetricContext, type MetricGroupName } from "../../src/metrics/specs";
 import type { Metrics } from "../../src/metrics/types";
 
 const CONTEXT_ONLY_IDS = new Set([
@@ -23,6 +23,22 @@ const CONTEXT_ONLY_EXPECTED: Record<string, number> = {
   percent_critical: 71,
   critical_speed_rpm: 42.3,
 };
+
+const PROXY_CSV_IDS = [
+  "proxy_specific_power",
+  "proxy_wall_power",
+  "proxy_impacts_total",
+  "proxy_impacts_bb_drop",
+  "proxy_impacts_bb_shear",
+  "proxy_impacts_bw_drop",
+  "proxy_impacts_bw_shear",
+  "proxy_mean_se_drop",
+  "proxy_mean_se_shear",
+  "proxy_stress_intensity",
+  ...[0, 1, 2, 3, 4, 5].map((i) => `proxy_eff_power_${i}`),
+  "proxy_cum_specific_energy",
+  ...[0, 1, 2, 3, 4, 5].map((i) => `proxy_cum_eff_energy_${i}`),
+];
 
 const baseCtx: MetricContext = {
   metrics: null,
@@ -51,8 +67,8 @@ describe("METRIC_SPECS with a metrics-less context", () => {
 });
 
 describe("METRIC_GROUPS", () => {
-  it("is exactly Drum, Media, Grinding, Slurry, Solver in that order", () => {
-    expect(METRIC_GROUPS).toEqual(["Drum", "Media", "Grinding", "Slurry", "Solver"]);
+  it("is exactly Drum, Media, Grinding, Grinding proxy (3D), Slurry, Solver in that order", () => {
+    expect(METRIC_GROUPS).toEqual(["Drum", "Media", "Grinding", "Grinding proxy (3D)", "Slurry", "Solver"]);
   });
 
   it("covers every spec's group", () => {
@@ -87,6 +103,8 @@ describe("sparkline specs", () => {
       "total_kinetic_energy",
       "power_draw",
       "dissipated_power",
+      "proxy_specific_power",
+      "proxy_stress_intensity",
       "mixing_index",
       "max_compression_error",
       "coupling_clamp_hits",
@@ -134,6 +152,7 @@ describe("CSV column order (metrics/history.ts's toCsv, driven by METRIC_SPECS's
       "torque",
       "collision_rate",
       "dissipated_power",
+      ...PROXY_CSV_IDS,
       "fluid_particle_count",
       "pool_depth",
       "mixing_index",
@@ -186,10 +205,10 @@ const fakeMetrics: Metrics = {
 
 describe("unavailable / hideWhenUnavailable specs", () => {
   it("matches the exact set of ids flagged unavailable/hideWhenUnavailable in specs.ts", () => {
-    const unavailableIds = METRIC_SPECS.filter((s) => s.unavailable).map((s) => s.id);
+    const unavailableIds = METRIC_SPECS.filter((s) => s.unavailable && s.group !== PROXY_GROUP).map((s) => s.id);
     expect(unavailableIds).toEqual(["toe_angle_deg", "shoulder_angle_deg", "collision_rate", "mixing_index"]);
 
-    const hideWhenUnavailableIds = METRIC_SPECS.filter((s) => s.hideWhenUnavailable).map((s) => s.id);
+    const hideWhenUnavailableIds = METRIC_SPECS.filter((s) => s.hideWhenUnavailable && s.group !== PROXY_GROUP).map((s) => s.id);
     expect(hideWhenUnavailableIds).toEqual(["collision_rate", "mixing_index"]);
   });
 
@@ -231,5 +250,59 @@ describe("unavailable / hideWhenUnavailable specs", () => {
     // Before the first params message arrives, slurryEnabled is null -- don't hide the row over
     // an unknown state, only over a confirmed "off".
     expect(spec?.unavailable?.(null, { ...baseCtx, slurryEnabled: null })).toBeNull();
+  });
+});
+
+describe("Grinding proxy (3D) specs", () => {
+  const stress = {
+    ball_mass_3d_kg: 3e-5,
+    scale_energy_j: 6e-7,
+    impacts_per_ball_per_s: [1, 2, 3, 4],
+    impacts_total_per_ball_per_s: 10,
+    mean_se_scaled: [0.1, 0.2, 0.3, 0.4],
+    mean_se_scaled_drop: 0.25,
+    mean_se_scaled_shear: 0.5,
+    stress_intensity_scaled: 0.35,
+    wall_power_per_ball_w: 1e-4,
+    specific_power_w_per_kg: 3.3,
+    thresholds_scaled: [0.03, 0.1, 0.3, 1, 3, 10],
+    effective_power_per_ball_w: [6, 5, 4, 3, 2, 1],
+    cumulative_wall_energy_per_ball_j: 0.01,
+    cumulative_specific_energy_j_per_kg: 300,
+    cumulative_effective_energy_per_ball_j: [1, 2, 3, 4, 5, 6],
+  };
+  const proxySpecs = METRIC_SPECS.filter((s) => s.group === PROXY_GROUP);
+
+  it("every proxy row reads its value from metrics.stress and is hidden without it", () => {
+    const ctx: MetricContext = { ...baseCtx, metrics: { ...fakeMetrics, stress } };
+    const bare: MetricContext = { ...baseCtx, metrics: { ...fakeMetrics } };
+    expect(proxySpecs.length).toBeGreaterThan(10);
+    for (const spec of proxySpecs) {
+      const v = spec.value(ctx);
+      expect(v, spec.id).not.toBeNull();
+      expect(spec.unavailable?.(v, ctx), spec.id).toBeNull();
+      expect(spec.unavailable?.(null, bare), spec.id).toBe("No data");
+      expect(spec.hideWhenUnavailable, spec.id).toBe(true);
+      expect(spec.help, spec.id).toContain("RELATIVE");
+    }
+  });
+
+  it("is hidden as 'Coarse-grained' when k > 1", () => {
+    const ctx: MetricContext = { ...baseCtx, metrics: { ...fakeMetrics, stress, coarse_graining_factor: 2 } };
+    for (const spec of proxySpecs) expect(spec.unavailable?.(1, ctx), spec.id).toBe("Coarse-grained");
+  });
+
+  it("labels threshold rows from thresholds_scaled", () => {
+    const ctx: MetricContext = { ...baseCtx, metrics: { ...fakeMetrics, stress } };
+    const spec = METRIC_SPECS.find((s) => s.id === "proxy_eff_power_2");
+    expect(spec?.labelFor?.(ctx)).toBe("Eff. power, SE > 0.3 m·g·d");
+    expect(spec?.value(ctx)).toBe(4);
+  });
+
+  it("hides threshold rows beyond the provided thresholds", () => {
+    const short = { ...stress, thresholds_scaled: [0.1], effective_power_per_ball_w: [5], cumulative_effective_energy_per_ball_j: [2] };
+    const ctx: MetricContext = { ...baseCtx, metrics: { ...fakeMetrics, stress: short } };
+    const spec = METRIC_SPECS.find((s) => s.id === "proxy_eff_power_3");
+    expect(spec?.unavailable?.(null, ctx)).toBe("No data");
   });
 });

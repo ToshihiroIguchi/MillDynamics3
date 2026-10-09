@@ -172,21 +172,6 @@ pub struct MediaParams {
     pub friction_velocity_scale_m_s: f32,
     /// Rolling-resistance coefficient (dimensionless torque coefficient).
     pub rolling_friction: f32,
-    /// Dynamic viscosity (Pa*s) of the liquid in the gaps between balls, used only by the
-    /// **lubrication cushion** model (`dem.rs`): a fresh impact's restitution is multiplied by
-    /// `exp(-35 / St)` with the impact Stokes number `St = rho_ball * v_n * d / (9 * mu)` (Legendre
-    /// et al. 2006). `0` (the default) disables the model, so every existing configuration is
-    /// unchanged. This is independent of the particle slurry (`slurry.*`): it lets the scale-up
-    /// runner ([`crate::scaleup`]) account for wet impact damping without resolving the fluid.
-    #[serde(default)]
-    pub wet_cushion_viscosity_pa_s: f32,
-    /// When `> 0`, the fresh-impact speed threshold of the restitution pass is `this *
-    /// sqrt(g * d)` (ball-relative) instead of the historical absolute 0.02 m/s. `0.1428`
-    /// reproduces 0.02 m/s at the shipped 2 mm ball. The scale-up runner ([`crate::scaleup`]) sets
-    /// it so that geometrically similar mills of different size behave identically; `0` (the
-    /// default) keeps every existing configuration bit-identical.
-    #[serde(default)]
-    pub restitution_threshold_froude: f32,
 }
 
 /// `#[serde(default = ...)]` target for [`MediaParams::friction_ball_ball_static`] -- must match
@@ -234,8 +219,6 @@ impl Default for MediaParams {
             friction_ball_wall_static: default_friction_ball_wall(),
             friction_velocity_scale_m_s: default_friction_velocity_scale_m_s(),
             rolling_friction: 0.01,
-            wet_cushion_viscosity_pa_s: 0.0,
-            restitution_threshold_froude: 0.0,
         }
     }
 }
@@ -286,15 +269,6 @@ impl MediaParams {
         if !(self.friction_velocity_scale_m_s > 0.0 && self.friction_velocity_scale_m_s.is_finite())
         {
             return Err("media.friction_velocity_scale_m_s must be > 0".into());
-        }
-        if !(self.wet_cushion_viscosity_pa_s >= 0.0 && self.wet_cushion_viscosity_pa_s.is_finite())
-        {
-            return Err("media.wet_cushion_viscosity_pa_s must be >= 0".into());
-        }
-        if !(self.restitution_threshold_froude >= 0.0
-            && self.restitution_threshold_froude.is_finite())
-        {
-            return Err("media.restitution_threshold_froude must be >= 0".into());
         }
         Ok(())
     }

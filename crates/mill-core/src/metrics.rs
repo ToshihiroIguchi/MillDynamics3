@@ -61,11 +61,10 @@ const POOL_DEPTH_BAND_RAD: f32 = 5.0 * PI / 180.0;
 /// not a rendering-quality field like [`crate::surface`]'s `GRID_SIZE`.
 const MIXING_GRID_SIZE: usize = 16;
 
-/// Impact-energy histogram (docs/PLAN.md ss3.5): `bin_edges_j.len() == counts_per_s.len() + 1`,
-/// log-spaced from [`crate::dem::IMPACT_ENERGY_MIN_J`] to [`crate::dem::IMPACT_ENERGY_MAX_J`]
-/// (see [`crate::dem::impact_energy_bin_edges`]). `counts_per_s[k]` is the EMA-smoothed impact
-/// rate (impacts/s per metre of mill depth) whose energy fell in
-/// `[bin_edges_j[k], bin_edges_j[k+1])`.
+/// Impact stress-energy histogram: `bin_edges_j.len() == counts_per_s.len() + 1`, log-spaced
+/// (see [`crate::stress::se_bin_edges`], scaled by `m g d` of the 3D ball). `counts_per_s[k]` is
+/// the EMA-smoothed rate (impacts/s, whole simulated population, all classes pooled) whose stress
+/// energy (3D ball mass, see [`crate::stress`]) fell in `[bin_edges_j[k], bin_edges_j[k+1])`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ImpactEnergyHistogram {
     pub bin_edges_j: Vec<f32>,
@@ -158,6 +157,9 @@ pub struct Metrics {
     pub dissipated_power_w: f32,
     /// Impact-energy histogram. See [`crate::Simulation::impact_energy_counts_per_s`].
     pub impact_energy_histogram: ImpactEnergyHistogram,
+    /// 3D-converted grinding-proxy statistics (stress energies, per-ball frequencies, specific
+    /// power). See [`crate::stress`]. Not meaningful when `coarse_graining_factor > 1`.
+    pub stress: crate::stress::StressMetrics,
     /// Number of balls whose fluid-coupling impulse was clamped over the most recent
     /// [`crate::Simulation::step`] call. A healthy run stays at (or very near) `0` once the
     /// charge has settled. See [`crate::coupling::CouplingImpulses::clamp_hits`].
@@ -239,6 +241,7 @@ pub fn compute(balls: &Balls, fluid: &FluidParticles, drum: &Drum, drum_angle: f
         collision_rate_per_s: 0.0,
         dissipated_power_w: 0.0,
         impact_energy_histogram: ImpactEnergyHistogram::default(),
+        stress: crate::stress::StressMetrics::default(),
         coupling_clamp_hits: 0,
         effective_ball_diameter_m: 0.0,
         simulated_ball_count: 0,

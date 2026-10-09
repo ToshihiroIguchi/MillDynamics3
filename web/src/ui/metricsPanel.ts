@@ -11,11 +11,23 @@ import {
   KEY_METRIC_IDS,
   METRIC_GROUPS,
   METRIC_SPECS,
+  PROXY_GROUP,
   type MetricContext,
   type MetricGroupName,
   type MetricSpec,
 } from "../metrics/specs";
+import { formatEdgeJ, tickEdgeIndices } from "../metrics/histogramAxis";
 import { MetricsHistory, type CsvColumn } from "../metrics/history";
+import {
+  buildReference,
+  formatRatio,
+  loadReference,
+  ratio,
+  saveReference,
+  settingsMismatch,
+  settingsOf,
+  type ProxyReference,
+} from "../metrics/reference";
 import type { ImpactEnergyHistogram } from "../metrics/types";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
@@ -71,9 +83,10 @@ function ensureHistSized(canvas: HTMLCanvasElement): CanvasRenderingContext2D | 
   return ctx;
 }
 
-/** Bar chart of `Metrics.impact_energy_histogram`: equal-width bars (the underlying bins are
- * already log-spaced, so equal screen width per bin is correct), a peak-count label, and decade
- * tick labels on the x-axis where a bin edge lands on (close to) a power of ten. */
+/** Bar chart of `Metrics.impact_energy_histogram`: x = stress energy SE in joules (relative
+ * kinetic energy of an impact, 3D ball mass; log-spaced bins, so equal screen width per bin), y =
+ * impacts per second of the whole simulated population (peak label top-left), orange line =
+ * energy-weighted cumulative fraction. Ticks every decade of SE. */
 function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyHistogram | undefined | null): void {
   const ctx = ensureHistSized(canvas);
   if (!ctx) return;
@@ -125,16 +138,11 @@ function drawImpactHistogram(canvas: HTMLCanvasElement, histogram: ImpactEnergyH
     ctx.fillText("cum. energy", HIST_CSS_WIDTH - padRight, 10);
   }
 
-  // Decade tick labels: anchored `center` except within one label-width of either canvas edge,
-  // where centering would draw half the text past the edge and clip it (this was most visible on
-  // the rightmost label, e.g. "1e+1" losing its last character -- reported by an external
-  // review). Switching anchor near the edges keeps every label fully inside the canvas instead.
-  for (let i = 0; i < edges.length; i++) {
-    const edge = edges[i];
-    if (edge === undefined || edge <= 0) continue;
-    const log10 = Math.log10(edge);
-    if (Math.abs(log10 - Math.round(log10)) > 1e-6) continue;
-    const label = edge.toExponential(0);
+  // Tick labels one decade apart (see metrics/histogramAxis.ts: edges are in joules, not decades).
+  // Anchored `center` except within one label-width of either canvas edge, where centering would
+  // draw half the text past the edge and clip it.
+  for (const i of tickEdgeIndices(edges)) {
+    const label = formatEdgeJ(edges[i]!);
     const x = padLeft + i * barW;
     const halfWidth = ctx.measureText(label).width / 2;
     if (x + halfWidth > HIST_CSS_WIDTH) {
@@ -177,7 +185,7 @@ const GENERATE_LABEL = "Generate report now";
 
 const GROUPS_STORAGE_KEY = "milldynamics.metricsGroups";
 
-// All five groups start collapsed: the key-results block above them already carries the numbers
+// All six groups start collapsed: the key-results block above them already carries the numbers
 // that matter at a glance (see specs.ts's `KEY_METRIC_IDS`), so everything else is opt-in detail.
 // Mirrors ui/paramsPanel.ts's per-group open/closed persistence pattern one-for-one, under its own
 // storage key (paramsPanel.ts's is "milldynamics.paramsGroups", a separate panel/preference).
@@ -185,6 +193,7 @@ const DEFAULT_GROUP_OPEN: Record<MetricGroupName, boolean> = {
   Drum: false,
   Media: false,
   Grinding: false,
+  [PROXY_GROUP]: false,
   Slurry: false,
   Solver: false,
 };
@@ -362,6 +371,13 @@ export function createMetricsPanel(
   const valueEls = new Map<string, HTMLSpanElement>();
   const sparklineEls = new Map<string, HTMLCanvasElement>();
   const rowEls = new Map<string, HTMLElement>();
+  const labelTextEls = new Map<string, HTMLSpanElement>();
+  const refEls = new Map<string, HTMLSpanElement>();
+  let proxyBannerEl: HTMLElement | null = null;
+  let proxyRefNoteEl: HTMLElement | null = null;
+  let proxyClearBtn: HTMLButtonElement | null = null;
+  let reference: ProxyReference | null = loadReference();
+  let latestValues: Record<string, number | null> = {};
   const groupDetailsEls = new Map<MetricGroupName, HTMLDetailsElement>();
   const groupChipEls = new Map<MetricGroupName, HTMLSpanElement>();
   let histogramCanvas: HTMLCanvasElement | null = null;
@@ -379,7 +395,10 @@ export function createMetricsPanel(
 
     const label = document.createElement("span");
     label.className = "metric-label";
-    label.append(spec.unit ? `${spec.label} (${spec.unit})` : spec.label);
+    const labelText = document.createElement("span");
+    labelText.textContent = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
+    label.append(labelText);
+    labelTextEls.set(spec.id, labelText);
     const helpIcon = createHelpIcon(spec.help);
     if (helpIcon) label.appendChild(helpIcon);
 
@@ -389,6 +408,14 @@ export function createMetricsPanel(
 
     row.appendChild(label);
     row.appendChild(value);
+
+    if (spec.refRatio) {
+      const refEl = document.createElement("span");
+      refEl.className = "metric-ref";
+      refEl.hidden = true;
+      row.appendChild(refEl);
+      refEls.set(spec.id, refEl);
+    }
 
     if (spec.sparkline) {
       const canvas = document.createElement("canvas");
@@ -482,6 +509,56 @@ export function createMetricsPanel(
       details.appendChild(buildRow(spec));
     }
 
+    if (group === PROXY_GROUP) {
+      const banner = document.createElement("div");
+      banner.className = "metrics-warn";
+      banner.hidden = true;
+      details.appendChild(banner);
+      proxyBannerEl = banner;
+
+      const controls = document.createElement("div");
+      controls.className = "metrics-ref-controls";
+      const setBtn = document.createElement("button");
+      setBtn.type = "button";
+      setBtn.className = "metrics-export";
+      setBtn.textContent = "Set reference";
+      setBtn.title = "Store the current report-window mean (or the current value if no window data yet) of the proxy rows as the reference";
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "metrics-export";
+      clearBtn.textContent = "Clear reference";
+      controls.append(setBtn, clearBtn);
+      details.appendChild(controls);
+
+      const refNote = document.createElement("div");
+      refNote.className = "metrics-note";
+      details.appendChild(refNote);
+      proxyRefNoteEl = refNote;
+      proxyClearBtn = clearBtn;
+
+      setBtn.addEventListener("click", () => {
+        if (!latestState) return;
+        const k = latestState.metrics?.coarse_graining_factor ?? null;
+        if (k !== null && k > 1) return;
+        const ids = METRIC_SPECS.filter((sp) => sp.refRatio).map((sp) => sp.id);
+        reference = buildReference(
+          ids,
+          latestValues,
+          (id) => reportAggregator.statsFor(id)?.mean ?? null,
+          latestState.params,
+          k,
+          latestState.simTime,
+        );
+        saveReference(reference);
+        lastRenderMs = -Infinity;
+      });
+      clearBtn.addEventListener("click", () => {
+        reference = null;
+        saveReference(null);
+        lastRenderMs = -Infinity;
+      });
+    }
+
     if (group === "Grinding") {
       const warnEl = document.createElement("div");
       warnEl.className = "metrics-warn";
@@ -493,7 +570,7 @@ export function createMetricsPanel(
       histWrap.className = "impact-histogram-wrap";
       const histLabel = document.createElement("div");
       histLabel.className = "impact-histogram-label";
-      histLabel.textContent = "Impact energy distribution";
+      histLabel.textContent = "Impact stress-energy distribution (x: SE in J, 3D ball mass; y: impacts/s)";
       const canvas = document.createElement("canvas");
       canvas.className = "impact-histogram";
       histWrap.appendChild(histLabel);
@@ -555,6 +632,7 @@ export function createMetricsPanel(
     // paint below is throttled by wall-clock time. A metric currently `unavailable` (e.g.
     // collision_rate while coarse-grained) is sampled as `null`, so its sparkline/CSV column shows
     // a gap/empty cell rather than a value that can't be compared to a real mill.
+    latestValues = values;
     history.push(state.simTime, values);
     lastSimTime = state.simTime;
     exportButton.disabled = history.length === 0;
@@ -600,6 +678,26 @@ export function createMetricsPanel(
         row.hidden = spec.hideWhenUnavailable === true && reason !== null;
       }
 
+      if (spec.labelFor) {
+        const dyn = spec.labelFor(ctx);
+        const labelEl = labelTextEls.get(spec.id);
+        if (dyn !== null && labelEl) {
+          const full = spec.unit ? `${dyn} (${spec.unit})` : dyn;
+          if (labelEl.textContent !== full) labelEl.textContent = full;
+        }
+      }
+
+      const refEl = refEls.get(spec.id);
+      if (refEl) {
+        const refValue = reference?.values[spec.id];
+        const r = reference ? ratio(value, refValue) : null;
+        refEl.hidden = reference === null;
+        const text = r === null ? "-" : `× ${formatRatio(r)}`;
+        if (refEl.textContent !== text) refEl.textContent = text;
+        const tip = refValue === undefined ? "No reference value for this row" : `Reference: ${refValue.toPrecision(3)}${spec.unit ? ` ${spec.unit}` : ""}`;
+        if (refEl.title !== tip) refEl.title = tip;
+      }
+
       const warnThreshold = WARN_THRESHOLDS.get(spec.id);
       if (warnThreshold !== undefined && row) {
         const warn = value !== null && value > warnThreshold;
@@ -614,7 +712,8 @@ export function createMetricsPanel(
       const details = groupDetailsEls.get(group);
       if (!details) continue;
       const groupSpecs = METRIC_SPECS.filter((s) => s.group === group && !s.key);
-      details.hidden = groupSpecs.length > 0 && groupSpecs.every((s) => rowEls.get(s.id)?.hidden === true);
+      details.hidden =
+        group !== PROXY_GROUP && groupSpecs.length > 0 && groupSpecs.every((s) => rowEls.get(s.id)?.hidden === true);
     }
 
     for (const spec of METRIC_SPECS) {
@@ -636,6 +735,38 @@ export function createMetricsPanel(
           `be misleading. Raise Max balls above ${nTrue} to show them.`;
       }
     }
+
+    if (proxyBannerEl) {
+      const stress = state.metrics?.stress;
+      proxyBannerEl.hidden = kReason === null && stress !== undefined && stress !== null;
+      if (kReason !== null && state.metrics) {
+        proxyBannerEl.textContent =
+          `Coarse-graining is active (k = ${state.metrics.coarse_graining_factor.toFixed(2)}). The 3D grinding ` +
+          `proxy is hidden: the simulated ball is not the real ball, so impact energies and rates are not ` +
+          `meaningful. Raise Max balls above ${state.metrics.true_ball_count.toFixed(0)} to show it.`;
+      } else if (!proxyBannerEl.hidden) {
+        proxyBannerEl.textContent = "No grinding-proxy data yet.";
+      }
+    }
+    if (proxyRefNoteEl) {
+      let note = "Rows are for relative comparison only. Set a reference run, then read the ratios of later runs.";
+      if (reference) {
+        const cur = settingsOf(state.params, state.metrics?.coarse_graining_factor ?? null);
+        const diff = settingsMismatch(reference.settings, cur);
+        note =
+          `Reference set at t = ${reference.simTime.toFixed(1)} s (${reference.windowed ? "report-window mean" : "current value"}). ` +
+          `Ratio = current value / reference.`;
+        if (diff.length > 0) {
+          note += ` Warning: numerical settings differ from the reference run (${diff.join(", ")}); ` +
+            `these change impact statistics by several percent, so ratios are less reliable.`;
+        }
+        proxyRefNoteEl.classList.toggle("is-warn-note", diff.length > 0);
+      } else {
+        proxyRefNoteEl.classList.remove("is-warn-note");
+      }
+      if (proxyRefNoteEl.textContent !== note) proxyRefNoteEl.textContent = note;
+    }
+    if (proxyClearBtn) proxyClearBtn.disabled = reference === null;
 
     if (histogramWrapEl) {
       histogramWrapEl.hidden = kReason !== null;
