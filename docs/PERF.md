@@ -346,3 +346,13 @@ fewer sub-steps would all trade physical fidelity for speed and were treated as 
 "make it faster, not different" pass; they remain options for a future task if the browser numbers
 above (still well under 1.0x at Balanced/Accuracy on today's slower reference machine) are judged not
 good enough.
+
+## Presets after the water-default convergence study (2026-10-09)
+
+The quality presets are now Fast (default, id `realtime`) 300 balls / resolution 25, Balanced 300 / 30, Accuracy
+600 / 50 (`web/src/params/presets.ts`). Native `perf_probe` (water default, ms/frame): res 25 / 300 balls 66.8,
+res 30 / 300 balls 72.2, res 50 / 600 balls 201.9; the former Realtime (res 15, 150 balls) cost 11.9. The browser
+(WASM) speed of the new tiers has **not** been measured: the Playwright server failed to connect in this session,
+and every "achieved speed" figure above predates the water default, the central-force viscosity, the squeeze
+films and the higher sub-step counts, so treat them as stale. Power error against the converged reference
+(docs/VERIFICATION.md): +4.6 % at res 25, +2.5 % at 30, -1.0 % at 50.
