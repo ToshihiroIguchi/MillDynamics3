@@ -16,6 +16,8 @@ export interface ToolbarCallbacks {
    * When `false` the Record button is rendered disabled with a tooltip explaining why, instead of
    * being hidden outright. */
   recordingSupported: boolean;
+  /** Opens/closes the scale-up study panel (ui/scaleupPanel.ts); returns the new "visible" state. */
+  onToggleScaleup(): boolean;
 }
 
 /** 18x18 stroke-based icons, one per toolbar action. Kept inline (no icon font/library
@@ -31,6 +33,8 @@ const ICONS = {
     '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><line x1="3" y1="5" x2="15" y2="5"/><line x1="3" y1="9" x2="15" y2="9"/><line x1="3" y1="13" x2="15" y2="13"/><circle cx="7" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="9" r="1.6" fill="currentColor" stroke="none"/><circle cx="6" cy="13" r="1.6" fill="currentColor" stroke="none"/></svg>',
   panel:
     '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="3" width="13" height="12" rx="1.5"/><line x1="11.5" y1="3" x2="11.5" y2="15"/></svg>',
+  scaleup:
+    '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 15V9M7.5 15V6M12 15V3.5"/><path d="M3 15h12"/></svg>',
   // Record/stop use a hardcoded red fill (not `currentColor`) -- a record button reads as "red"
   // regardless of hover/pressed state, same visual language as a typical OS/app record control.
   record: '<svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><circle cx="9" cy="9" r="5.5" fill="#e5484d"/></svg>',
@@ -56,6 +60,8 @@ export interface Toolbar {
    * pausing the sim programmatically, not via this button's own click) in the play/pause icon,
    * without re-invoking `onTogglePlay` -- the caller already changed the running state itself. */
   setRunning(running: boolean): void;
+  /** Reflects the scale-up panel's visibility (it can also be closed from inside the panel). */
+  setScaleupPressed(pressed: boolean): void;
 }
 
 export function createToolbar(callbacks: ToolbarCallbacks): Toolbar {
@@ -101,6 +107,13 @@ export function createToolbar(callbacks: ToolbarCallbacks): Toolbar {
     panelBtn.setAttribute("aria-pressed", String(visible));
   });
 
+  const scaleupBtn = createIconButton(ICONS.scaleup, "Scale-up study");
+  scaleupBtn.title = "Open the scale-up study (relative grinding-proxy comparison between mill sizes)";
+  scaleupBtn.setAttribute("aria-pressed", "false");
+  scaleupBtn.addEventListener("click", () => {
+    scaleupBtn.setAttribute("aria-pressed", String(callbacks.onToggleScaleup()));
+  });
+
   const recordBtn = createIconButton(ICONS.record, "Record");
   recordBtn.title = "Record the simulation as a video";
   if (!callbacks.recordingSupported) {
@@ -118,6 +131,10 @@ export function createToolbar(callbacks: ToolbarCallbacks): Toolbar {
     });
   }
 
-  el.append(playPauseBtn, stepBtn, resetBtn, paramsBtn, panelBtn, recordBtn);
-  return { el, setRunning };
+  el.append(playPauseBtn, stepBtn, resetBtn, paramsBtn, panelBtn, scaleupBtn, recordBtn);
+  return {
+    el,
+    setRunning,
+    setScaleupPressed: (pressed) => scaleupBtn.setAttribute("aria-pressed", String(pressed)),
+  };
 }

@@ -25,7 +25,7 @@ This reference documents every user-facing simulation parameter. The table data 
 | `media.friction_ball_wall` | Friction (ball-wall) | — | 0.35 | 0–2 | 0.01 | Coefficient of kinetic friction for ball–wall contact. |
 | `media.rolling_friction` | Rolling friction | — | 0.01 | 0–1 | 0.001 | Rolling-resistance coefficient (dimensionless torque coefficient). |
 
-Not yet UI-exposed (no `schema.ts` entry): `media.friction_ball_ball_static`/`media.friction_ball_wall_static` (static/stick Coulomb friction coefficients, each defaulting to its kinetic counterpart above -- no behavior change until set higher) and `media.friction_velocity_scale_m_s` (default 0.02 m/s, the relative-speed scale over which friction blends from the static to the kinetic coefficient). See `dem.rs`'s `effective_friction` and docs/PHYSICS.md §9's 2026-09-28 entry.
+Not yet UI-exposed (no `schema.ts` entry): `media.wet_cushion_viscosity_pa_s` (default 0 = off; lubrication-cushion restitution law used by the scale-up runner, docs/SCALEUP.md), `media.restitution_threshold_froude` (default 0 = historical absolute 0.02 m/s fresh-impact threshold; > 0 makes it `value * sqrt(g d)`, set by the scale-up runner), `media.friction_ball_ball_static`/`media.friction_ball_wall_static` (static/stick Coulomb friction coefficients, each defaulting to its kinetic counterpart above -- no behavior change until set higher) and `media.friction_velocity_scale_m_s` (default 0.02 m/s, the relative-speed scale over which friction blends from the static to the kinetic coefficient). See `dem.rs`'s `effective_friction` and docs/PHYSICS.md §9's 2026-09-28 entry.
 
 ## Lifters Parameters
 
@@ -107,3 +107,49 @@ of these three tiers clears the second one.
 | `simulation.seed` | Random seed | — | 1 | 0–1,000,000,000 | 1 | Random number seed for reproducible initial ball configuration. All runs with identical `Params` and `seed` are deterministic. |
 
 **Note:** Fields `simulation.resolution` (default 40, controls PBF spatial resolution) and `simulation.pbf_iterations` (default 3, controls PBF density-constraint solver) exist in the data model but are not exposed in the UI. Frame budget (`simulation.frame_budget_ms`, default 12.0 ms) is also not user-tunable.
+
+## Scale-up study panel
+
+Opened with the "Scale-up study" toolbar button (bar-chart icon). It is independent of the live
+simulation: it runs the dry, ball-only grinding-proxy runner (`mill-core/src/scaleup.rs`) in its own
+Web Worker. **Evaluate it relatively only**: absolute values carry the 2D-model bias; what is
+meaningful is the ratio of a candidate condition to the reference (lab) condition.
+
+**Inputs.** The first condition row is the reference (lab) condition; further rows are candidates.
+Each row has: name, drum diameter (mm), ball diameter (mm), % of critical speed, fill fraction J,
+ball density, lifter count (0 = smooth wall; lifter height = d, base width = 1.5 d, top width = d),
+restitution and friction (ball-ball, ball-wall) and an optional lubrication viscosity (Pa s, 0 = dry;
+this is `media.wet_cushion_viscosity_pa_s`; the slurry itself is never resolved). The derived ball
+count and D/d are shown per row; Run is disabled when any row would need more than 50000 or fewer
+than 2 balls. Run settings: number of seeds (ensemble size, default 3), warm-up revolutions,
+measured revolutions (whole number), samples per revolution, `dt_ratio` (sub-step as a multiple of
+sqrt(d/g)) and DEM iterations. Conditions run sequentially; Cancel terminates the worker.
+
+**Reading the results table.** Each cell is mean +- standard error over seeds. For candidates, the
+adjacent "/ reference" column is candidate / reference with first-order propagated error; a ratio
+whose relative error exceeds 10 % is highlighted (add seeds). Metrics: specific power (wall power per
+ball over the 3D ball mass; per-ball powers use a one-ball-thick slab), impacts per ball per second,
+mean stress energy (SE = relative kinetic energy of an impact with the 3D ball mass, scaled = divided
+by m g d) for drop-type and shear-type impacts, the overall stress intensity, and the power (and its
+fraction of wall power) carried by impacts above thresholds of 0.1, 1, 10, 100 m g d. Warnings appear
+when the wall-power drift exceeds 5 %/rev (not steady: raise warm-up) or the maximum sub-step
+displacement exceeds 0.5 d (lower `dt_ratio`).
+
+**Charts.** Dimensionless stress-energy histogram (log-log, selectable impact class) and the time
+series of wall power and cumulative effective energy (selectable threshold) of the first seed.
+
+**D/d sweep.** Varies the drum diameter of a base condition at fixed ball diameter and % critical,
+shows the points and power-law fits (exponent, expected exponent where theory gives one, R^2) and an
+extrapolation calculator; it warns when the target D/d is more than 1.5x outside the swept range or
+R^2 < 0.95.
+
+**Contact sensitivity.** Re-runs the reference with restitution and friction scaled by +-20 % and
+shows the % change per metric (> 10 % highlighted): a ratio is only as trustworthy as it is
+insensitive to the assumed contact values.
+
+**Matching ball diameter.** Gives the ball diameter that keeps the drop-type stress energy of the
+reference when the drum grows at constant % critical, d = d_ref (D_ref / D_target)^(1/3), with a
+button to add it as a candidate.
+
+**Export.** CSV of the metric table, CSV of the interval time series, and JSON with all results plus
+the exact Params JSON and settings used (reproducible from Params + seeds).

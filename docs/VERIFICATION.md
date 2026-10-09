@@ -1420,3 +1420,58 @@ points (translation + rotation velocity) as neighbours of the shear-rate estimat
 -1261 / -1155 / -1053 and reference 1321 / 1098 / 943 W against -1256 / -1153 / -1056 and 1315 / 1097 / 947 W
 before: identical within the 1 % ensemble error. The hypothesis above is refuted; the weak, non-monotone yield-stress
 response of the pile peak has another cause (not found).
+
+## Scale-up runner (`mill_core::scaleup`, 2026-10-09)
+
+Probe: `cargo run --release -p mill-core --example scaleup_probe -- --cases conv,sim,sweep,sens,wet`
+(3 seeds, 63 mm drum, 2 mm ZrO2, 59 % Nc, dry, 6 recorded revolutions; `± ` is the standard error over
+seeds). Key columns: specific power (W/kg, 3D ball mass), impacts per ball per second, mean
+`SE/(m g d)` of drop-type and shear-type impacts, stress intensity (mean over all impacts).
+Full method and conventions: `docs/SCALEUP.md`.
+
+**Similarity check (met).** Drum and ball scaled together by 1 / 2 / 4 at constant % Nc, ball-relative
+numerical settings (`dt = dt_ratio sqrt(d/g)`, restitution threshold and friction speed scale
+`0.1428 sqrt(g d)`): mean `SE/(m g d)` drop 0.0767 / 0.0769 / 0.0757, shear 0.2835 / 0.2850 / 0.2838,
+stress intensity 0.1735 / 0.1745 / 0.1729 (all within 1.5 %); specific power x1.41 / x2.00 (= sqrt of the
+scale), impact rate per ball x0.70 / x0.50. (A first attempt that scaled the geometry but left the speed
+at 100 rpm, i.e. a different % Nc, differed by up to +90 %: the probe, not the solver, was wrong.) Unit test
+`scaleup::tests::geometrically_similar_mills_give_the_same_dimensionless_stress_energy`.
+
+**Numerical convergence (NOT met at ±3 %).** Relative to nothing finer is known to be converged:
+
+| dt_ratio | iters | spec. power | impacts/ball/s | SE drop | SE shear | intensity |
+|---|---|---|---|---|---|---|
+| 0.1 | 6 | 1.005 | 149.7 | 0.0734 | 0.268 | 0.162 |
+| 0.05 | 6 | 1.064 | 164.8 | 0.0767 | 0.284 | 0.174 |
+| 0.025 | 6 | 1.074 | 170.7 | 0.0782 | 0.303 | 0.186 |
+| 0.05 | 12 | 1.069 | 148.3 | 0.0827 | 0.304 | 0.189 |
+| 0.025 | 12 | 1.085 | 156.3 | 0.0841 | 0.318 | 0.198 |
+| 0.0125 | 12 | 1.102 | 173.7 | 0.0865 | 0.313 | 0.198 |
+| 0.025 | 20 | 1.099 | 152.1 | 0.0845 | 0.324 | 0.202 |
+
+Specific power and the mean stress energies move by a few percent per halving of `dt` or doubling of the
+iterations (intensity 0.162 -> 0.202 across the table); the **impact count does not converge in `dt`**
+(148 -> 156 -> 174 at 12 iterations): finer steps resolve more small re-contacts. Treat the impact
+frequency as a number that is only comparable between runs with identical settings. Defaults are now
+`dt_ratio = 0.025`, `dem_iterations = 12`; comparisons must keep both fixed across conditions.
+
+**D/d sweep and the drop/shear scaling (NOT confirmed).** 59 % Nc, `d` = 2 mm, D/d = 20 / 30 / 45 / 60 / 90
+(98 ... 1993 balls): fitted exponent of mean drop `SE/(m g d)` in D/d is -0.31 (expected +1, R^2 0.69),
+shear +0.31 (expected -1, R^2 0.80), stress intensity +0.06 (R^2 0.20); shear energy jumps between D/d 45 and 60
+(0.288 -> 0.391). The simple free-fall / shear-rate scaling assumes a cataracting (drop-dominated) regime;
+at 59 % Nc the charge cascades and the "drop" class is mostly gentle contacts, so the expectation does not
+apply, and the power-law extrapolation of the stress energies is **not reliable here**. Only specific
+power (exponent 0.41, R^2 0.998) and, less well, the impact rate (0.59, R^2 0.96) follow a clean power
+law. The panel's R^2 < 0.95 warning exists for exactly this case. A test at a cataracting speed (e.g. 80-90 % Nc)
+has not been done.
+
+**Contact sensitivity (ratios not robust).** +-20 % on a coefficient changes: friction ball-ball: shear SE
++17 % / -8 %; friction ball-wall: shear SE -7 % / +5 %, drop SE -6 % / +3 %; restitution ball-ball: impact rate
+-11 % / +14 %, drop SE -1 % / +7 %; specific power stays within +-1 %. So conclusions that rest on
+differences below ~10-15 % in stress-energy or impact-rate ratios are within the unknown contact coefficients.
+
+**Wet cushion.** mu = 0 / 0.001 / 0.01 / 0.1 / 1 Pa s: impact rate 165 / 135 / 96 / 94 / 94, drop SE 0.077 /
+0.082 / 0.090 / 0.088 / 0.089; the effect saturates once the typical impact Stokes number is below ~100
+(restitution already ~0). Specific power is unchanged (+-1 %), i.e. the cushion does not change the power;
+wet effects other than impact damping (drag, buoyancy, rheology) are not in this runner. The constant 35 was
+not calibrated against `mac/`.

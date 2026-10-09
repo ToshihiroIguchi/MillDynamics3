@@ -6,6 +6,7 @@ import { createInitialState } from "./state";
 import { createHud } from "./ui/hud";
 import { createMetricsPanel } from "./ui/metricsPanel";
 import { createParamsPanel } from "./ui/paramsPanel";
+import { createScaleupPanel } from "./ui/scaleupPanel";
 import { createToolbar } from "./ui/toolbar";
 import { WebCodecsCanvasRecorder } from "./video/recorder";
 
@@ -217,6 +218,10 @@ function toggleRecord(): boolean {
   return state.isRecording;
 }
 
+// Created lazily-wired: the panel's worker (and its wasm instance) only starts on first open.
+const scaleupPanel = createScaleupPanel(() => toolbar.setScaleupPressed(false));
+document.body.appendChild(scaleupPanel.el);
+
 const toolbar = createToolbar({
   onTogglePlay: togglePlay,
   onStep: () => send({ type: "step" }),
@@ -230,6 +235,10 @@ const toolbar = createToolbar({
   initialPanelVisible,
   onToggleRecord: toggleRecord,
   recordingSupported: recorder.isSupported(),
+  onToggleScaleup: () => {
+    scaleupPanel.setVisible(!scaleupPanel.isVisible());
+    return scaleupPanel.isVisible();
+  },
 });
 sceneWrap.appendChild(toolbar.el);
 

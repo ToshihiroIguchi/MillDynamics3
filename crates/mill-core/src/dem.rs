@@ -28,7 +28,46 @@ const GRAVITY: f32 = -9.81;
 /// (`e * v_approach` vs. exactly zero) depends on this threshold. See docs/PLAN.md ss3.2 step 6.
 /// Also used (docs/PLAN.md ss3.5) as the threshold for counting a contact as a genuine "impact"
 /// for [`DemStepStats::collision_count`]/`impact_energy_histogram`.
+#[cfg_attr(not(test), allow(dead_code))]
 const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
+
+/// The threshold above, expressed relative to the ball size: `c * sqrt(g * d)`, with `c` chosen so
+/// the shipped 2 mm ball keeps exactly the historical 0.02 m/s (`0.1428 * sqrt(9.81 * 0.002) =
+/// 0.02000`). A fixed absolute speed misclassifies resting contacts as impacts (or the reverse) when
+/// the ball size changes by an order of magnitude, which would bias impact statistics differently at
+/// different scales; `sqrt(g d)` is the natural speed of a ball-sized fall.
+const RESTITUTION_THRESHOLD_FROUDE: f32 = 0.1428;
+
+/// Impact-classification speed threshold (m/s) for a ball of radius `radius_m`; see
+/// [`RESTITUTION_THRESHOLD_FROUDE`].
+#[inline]
+pub fn restitution_velocity_threshold(radius_m: f32) -> f32 {
+    RESTITUTION_THRESHOLD_FROUDE * (-GRAVITY * 2.0 * radius_m).sqrt()
+}
+
+/// Empirical constant of the lubrication-cushion restitution law `e = e_dry * exp(-BETA / St)`
+/// (Legendre, Zenit, Daniel & Guiraud 2006, sphere-wall impacts in viscous liquids).
+const WET_CUSHION_BETA: f32 = 35.0;
+
+/// Effective restitution of an impact with approach speed `v_n` (m/s) in a liquid of dynamic
+/// viscosity `mu_pa_s`; `e_dry` unchanged when `mu_pa_s == 0`. `St = rho_ball * v_n * d / (9 mu)`.
+#[inline]
+pub fn wet_cushion_restitution(
+    e_dry: f32,
+    mu_pa_s: f32,
+    rho_ball: f32,
+    diameter_m: f32,
+    v_n: f32,
+) -> f32 {
+    if mu_pa_s <= 0.0 {
+        return e_dry;
+    }
+    let st = rho_ball * v_n.max(0.0) * diameter_m / (9.0 * mu_pa_s);
+    if st <= 0.0 {
+        return 0.0;
+    }
+    e_dry * (-WET_CUSHION_BETA / st).exp()
+}
 
 /// Largest fraction of a ball's own diameter that step 3's non-penetration solve recovers from a
 /// single contact in one iteration. A deep overlap (e.g. from a coarse-grained ball population's
@@ -120,6 +159,28 @@ fn effective_friction(mu_kinetic: f32, mu_static: f32, v_t: f32, velocity_scale_
     let ratio = v_t / velocity_scale_m_s;
     let weight = (-(ratio * ratio)).exp(); // 1.0 at v_t=0, -> 0.0 as |v_t| grows.
     mu_kinetic + (mu_static - mu_kinetic) * weight
+}
+
+/// Which pair a recorded impact happened between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImpactKind {
+    BallBall,
+    BallWall,
+}
+
+/// One fresh impact, as seen by the restitution pass (see
+/// [`DemState::step_recorded`]). Speeds, not energies: energies need a mass, and the 2D disc mass
+/// ([`ball_mass`]) is not the mass of the 3D ball the disc stands for -- a caller converts with
+/// the 3D sphere mass so the result does not depend on the unit-depth convention.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImpactRecord {
+    pub kind: ImpactKind,
+    /// Pre-solve approach speed along the contact normal (m/s, positive).
+    pub normal_speed: f32,
+    /// Magnitude of the pre-solve tangential slip speed at the contact point (m/s), spin included.
+    pub slip_speed: f32,
+    /// Restitution coefficient the solver applied to this impact.
+    pub restitution: f32,
 }
 
 /// Per-sub-step DEM solver diagnostics (docs/PLAN.md ss3.5), returned by
@@ -473,6 +534,24 @@ impl DemState {
         dt: f32,
         external: Option<&crate::coupling::CouplingImpulses>,
     ) -> DemStepStats {
+        self.step_recorded(drum, drum_angle, media, iterations, dt, external, None)
+    }
+
+    /// As [`DemState::step_with_external_forces`], and additionally appends one [`ImpactRecord`]
+    /// per impact whose approach speed exceeds the scale-relative [`restitution_velocity_threshold`] to
+    /// `impacts` when it is `Some`. Recording only reads state the solver already computed, so
+    /// the trajectory is bit-identical with or without it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_recorded(
+        &mut self,
+        drum: &Drum,
+        drum_angle: f32,
+        media: &MediaParams,
+        iterations: u32,
+        dt: f32,
+        external: Option<&crate::coupling::CouplingImpulses>,
+        mut impacts: Option<&mut Vec<ImpactRecord>>,
+    ) -> DemStepStats {
         let balls = &mut self.balls;
         if balls.is_empty() || dt <= 0.0 {
             return DemStepStats::default();
@@ -481,6 +560,16 @@ impl DemState {
         let w = balls.inv_mass();
         let w_rot = balls.inv_inertia();
         let r = balls.radius;
+        // The solver keeps the absolute `RESTITUTION_VELOCITY_THRESHOLD` it was tuned against (the
+        // energy-injection regressions) unless the scale-up runner opts into the ball-relative one
+        // (`media.restitution_threshold_froude`). Recording always uses the ball-relative one.
+        let impact_threshold = restitution_velocity_threshold(r);
+        let solver_threshold = if media.restitution_threshold_froude > 0.0 {
+            media.restitution_threshold_froude * (-GRAVITY * 2.0 * r).sqrt()
+        } else {
+            RESTITUTION_VELOCITY_THRESHOLD
+        };
+        let rho_ball = balls.mass / (PI * r * r);
 
         // --- 0. Sanitize state carried in from the previous sub-step -------------------------
         // Mirrors `pbf::FluidParticles::step_coupled`'s step 0: given finite input this solver
@@ -499,6 +588,12 @@ impl DemState {
         let x0: Vec<Vec2> = balls.x.clone();
         let theta0: Vec<f32> = balls.theta.clone();
         let v_pre: Vec<Vec2> = balls.v.clone();
+        // Only needed to classify recorded impacts (contact-point slip includes spin).
+        let omega_pre: Vec<f32> = if impacts.is_some() {
+            balls.omega.clone()
+        } else {
+            Vec::new()
+        };
         let mut coupling_work_j = 0.0f64;
         for i in 0..n {
             balls.v[i].y += GRAVITY * dt;
@@ -843,7 +938,7 @@ impl DemState {
             let n_hat = if dist > 1e-9 { delta / dist } else { Vec2::X };
 
             let v_n_pre = (v_pre[iu] - v_pre[ju]).dot(n_hat);
-            let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
+            let is_fresh_impact = v_n_pre < -solver_threshold;
             if is_fresh_impact {
                 // A genuine fresh impact (docs/PLAN.md ss3.5): reduced mass `mass/2` for two
                 // equal masses colliding.
@@ -854,10 +949,29 @@ impl DemState {
                 }
             }
             let e = if is_fresh_impact {
-                media.restitution_ball_ball
+                wet_cushion_restitution(
+                    media.restitution_ball_ball,
+                    media.wet_cushion_viscosity_pa_s,
+                    rho_ball,
+                    2.0 * r,
+                    -v_n_pre,
+                )
             } else {
                 0.0
             };
+            if -v_n_pre > impact_threshold {
+                if let Some(log) = impacts.as_deref_mut() {
+                    let t_hat = Vec2::new(-n_hat.y, n_hat.x);
+                    let slip =
+                        (v_pre[iu] - v_pre[ju]).dot(t_hat) - r * omega_pre[iu] - r * omega_pre[ju];
+                    log.push(ImpactRecord {
+                        kind: ImpactKind::BallBall,
+                        normal_speed: -v_n_pre,
+                        slip_speed: slip.abs(),
+                        restitution: e,
+                    });
+                }
+            }
             // `.max(0.0)`: the target can never be negative (a contact cannot pull its pair
             // together), and restitution never reverses the sign of the approach velocity.
             // `.max(v_n_pre.max(0.0))`: if the pair was already separating *before* this solve
@@ -890,7 +1004,7 @@ impl DemState {
             let v_wall = drum.wall_velocity(balls.x[iu] - r * n_hat);
 
             let v_n_pre = (v_pre[iu] - v_wall).dot(n_hat);
-            let is_fresh_impact = v_n_pre < -RESTITUTION_VELOCITY_THRESHOLD;
+            let is_fresh_impact = v_n_pre < -solver_threshold;
             if is_fresh_impact {
                 // Wall has "infinite" mass, so the reduced mass of the pair is just the ball's
                 // own.
@@ -901,10 +1015,28 @@ impl DemState {
                 }
             }
             let e = if is_fresh_impact {
-                media.restitution_ball_wall
+                wet_cushion_restitution(
+                    media.restitution_ball_wall,
+                    media.wet_cushion_viscosity_pa_s,
+                    rho_ball,
+                    2.0 * r,
+                    -v_n_pre,
+                )
             } else {
                 0.0
             };
+            if -v_n_pre > impact_threshold {
+                if let Some(log) = impacts.as_deref_mut() {
+                    let t_hat = Vec2::new(-n_hat.y, n_hat.x);
+                    let slip = (v_pre[iu] - v_wall).dot(t_hat) - r * omega_pre[iu];
+                    log.push(ImpactRecord {
+                        kind: ImpactKind::BallWall,
+                        normal_speed: -v_n_pre,
+                        slip_speed: slip.abs(),
+                        restitution: e,
+                    });
+                }
+            }
             // See the ball-ball restitution pass above for why the target is also floored at the
             // pre-solve separation speed.
             let target = (-e * v_n_pre).max(0.0).max(v_n_pre.max(0.0));
@@ -1411,6 +1543,71 @@ mod tests {
             relative_speed_after >= separation_speed * 0.95,
             "an already-separating pair lost separation speed: before={separation_speed} after={relative_speed_after}"
         );
+    }
+
+    #[test]
+    fn recorded_head_on_impact_reports_speeds_and_does_not_change_the_trajectory() {
+        let r = 0.05;
+        let mass = ball_mass(2.0 * r, 7800.0);
+        let mut media = media_defaults();
+        media.restitution_ball_ball = 0.6;
+        media.friction_ball_ball = 0.0;
+        media.rolling_friction = 0.0;
+        let make = || {
+            let balls = Balls {
+                x: vec![Vec2::new(-0.99 * r, 0.0), Vec2::new(0.99 * r, 0.0)],
+                v: vec![Vec2::new(1.0, 0.0), Vec2::new(-1.0, 0.0)],
+                theta: vec![0.0, 0.0],
+                omega: vec![0.0, 0.0],
+                radius: r,
+                mass,
+                inertia: ball_inertia(mass, r),
+                true_radius: r,
+            };
+            DemState { balls }
+        };
+        let drum = still_drum(1000.0);
+        let dt = 1.0 / 480.0;
+
+        let mut plain = make();
+        let mut recorded = make();
+        let mut log = Vec::new();
+        let plain_stats = plain.step(&drum, 0.0, &media, 4, dt);
+        let rec_stats = recorded.step_recorded(&drum, 0.0, &media, 4, dt, None, Some(&mut log));
+
+        assert_eq!(plain.balls.x, recorded.balls.x);
+        assert_eq!(plain.balls.v, recorded.balls.v);
+        assert_eq!(plain_stats.collision_count, rec_stats.collision_count);
+        assert_eq!(log.len(), rec_stats.collision_count as usize);
+        assert_eq!(log.len(), 1);
+        let rec = log[0];
+        assert_eq!(rec.kind, ImpactKind::BallBall);
+        assert!((rec.normal_speed - 2.0).abs() < 1e-4, "{rec:?}");
+        assert!(rec.slip_speed < 1e-4, "{rec:?}");
+        assert!((rec.restitution - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn relative_threshold_reproduces_the_historical_value_at_2mm() {
+        let t = restitution_velocity_threshold(0.001);
+        assert!(
+            (t - RESTITUTION_VELOCITY_THRESHOLD).abs() < 1e-4,
+            "threshold at 2 mm = {t}"
+        );
+        // Scales as sqrt(d).
+        let ratio = restitution_velocity_threshold(0.004) / t;
+        assert!((ratio - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn wet_cushion_is_off_at_zero_viscosity_and_damps_low_stokes_impacts() {
+        assert_eq!(wet_cushion_restitution(0.7, 0.0, 6000.0, 0.002, 1.0), 0.7);
+        // St = 6000 * 1 * 0.002 / (9 * 0.001) = 1333: nearly dry.
+        let water = wet_cushion_restitution(0.7, 0.001, 6000.0, 0.002, 1.0);
+        assert!(water > 0.68 && water < 0.7, "{water}");
+        // St = 1.33 (viscous oil): bouncing is killed.
+        let oil = wet_cushion_restitution(0.7, 1.0, 6000.0, 0.002, 1.0);
+        assert!(oil < 1e-6, "{oil}");
     }
 
     #[test]

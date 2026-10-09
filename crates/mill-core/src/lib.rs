@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod params;
 pub mod pbf;
 pub mod rng;
+pub mod scaleup;
 pub mod surface;
 
 use dem::DemState;
