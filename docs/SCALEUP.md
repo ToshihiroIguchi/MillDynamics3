@@ -65,11 +65,15 @@ open work.
 3. **Statistics.** The charge is chaotic and the EMA is a 1 s average. Whole-revolution averaging
    is possible with the report window; seed ensembles are not automated *(not done)*: run several
    seeds by hand and average. A batch driver over the same `Simulation` could be added.
-4. **Reaching a large mill.** A production mill cannot be simulated here. Extrapolating needs runs at
-   several `D/d` with identical dimensionless settings and a validated scaling law. The simple
-   drop (`SE/(m g d) ~ D/d`) and shear (`~ d/D`) laws were **not confirmed** at 59 % Nc (fitted
-   exponents -0.31 and +0.31, R^2 0.69 / 0.80); only specific power followed a clean power law
-   (exponent 0.41, R^2 0.998). A cataracting regime (80-90 % Nc) was not tested *(not done)*.
+4. **Reaching a large mill.** Do not extrapolate stress energies in D/d. Measured at 59 % and 85 % Nc
+   (docs/VERIFICATION.md, "D/d sweep of the main simulation"): the dimensionless drop stress energy falls
+   with D/d (slope about -0.3 to -0.4, free-fall expectation +1) and the shear energy rises (+0.1 to
+   +0.4, expectation -1); only specific power follows a clean law (about `sqrt(D)`). What is exact is
+   Froude similarity at a *fixed* D/d (dimensionless values agree within 1.5 % over a 4x scale), which
+   only helps for geometrically similar mills (ball size scaled with the drum). A real scale-up changes
+   D/d, so the way to use the tool is to simulate the target D/d directly, up to what is affordable
+   (a few thousand balls, D/d of roughly 100-150 for J = 0.3; the simulation is then much slower than
+   real time), and to treat anything beyond that as unknown.
 5. **Contact coefficients are not calibrated.** +-20 % on ball-ball friction changes the shear stress
    energy by +17 % / -8 %; +-20 % on ball-ball restitution changes the impact rate by -11 % / +14 %.
    Ratios within about 10-15 % are inside this uncertainty. Check a conclusion by re-running with

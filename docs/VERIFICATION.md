@@ -1520,3 +1520,29 @@ iterations 12 vs 20 differ by 1-3 %, so 12 iterations are enough. The app defaul
 the stress energies by roughly 15 %. (3) Specific power moves < 4 % over all settings (1.03-1.06 W/kg).
 Recommended for impact statistics: 32 sub-steps, 12 iterations, coarse-graining off ("Impact statistics"
 preset); expected accuracy about 5 % for stress energies, 10 % or worse for impact counts.
+
+### D/d sweep of the main simulation, two speeds (`stress_probe --cases dd`, 2026-10-10)
+
+2 mm ball, drum diameter varied (D/d = 20 / 30 / 45 / 60 = 98 / 221 / 498 / 886 balls), 16 sub-steps, 12
+iterations, debounce on, dry, 1 seed (no error bars; seed scatter of earlier runs was about 1-3 %).
+
+| %Nc, D/d | impacts/ball/s | SE drop | SE shear | intensity | W/kg |
+|---|---|---|---|---|---|
+| 59, 20 | 73.3 | 0.1283 | 0.3213 | 0.2235 | 0.813 |
+| 59, 30 | 93.7 | 0.1044 | 0.3421 | 0.2155 | 0.986 |
+| 59, 45 | 106.1 | 0.0900 | 0.3706 | 0.2154 | 1.233 |
+| 59, 60 | 104.6 | 0.0908 | 0.3667 | 0.2151 | 1.456 |
+| 85, 20 | 89.6 | 0.1681 | 0.5070 | 0.3400 | 1.191 |
+| 85, 30 | 113.4 | 0.1461 | 0.5128 | 0.3234 | 1.451 |
+| 85, 45 | 120.9 | 0.1200 | 0.5974 | 0.3351 | 1.741 |
+| 85, 60 | 98.7 | 0.1088 | 0.8257 | 0.4180 | 1.967 |
+
+Between D/d 20 and 60 the log-log slope of the dimensionless drop stress energy is -0.31 (59 % Nc) and
+-0.40 (85 % Nc) against the free-fall expectation +1; the shear energy +0.12 and +0.44 against -1;
+specific power +0.53 and +0.46 (a clean ~sqrt(D) law at both speeds); stress intensity is flat at 59 % Nc
+and rises only at the last point at 85 %. The free-fall / shear-rate scaling laws are **not** supported
+at either speed, i.e. stress energy at a larger D/d cannot be extrapolated from smaller D/d by those
+laws. Plausible reason (not tested): D/d also changes the charge geometry (number of ball layers, ratio of
+free path to ball size), which the velocity-only argument ignores. What does hold is Froude similarity at a
+*fixed* D/d (earlier runner check: 1.5 % over a 4x scale): dimensionless quantities are exactly
+transferable only between geometrically similar mills.

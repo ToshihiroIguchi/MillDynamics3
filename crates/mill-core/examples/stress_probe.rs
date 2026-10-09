@@ -16,8 +16,19 @@ struct Row {
 }
 
 fn run(substeps: u32, iters: u32, debounce: Option<f64>, seed: u64) -> Row {
+    run_with(substeps, iters, debounce, seed, |_| {})
+}
+
+fn run_with(
+    substeps: u32,
+    iters: u32,
+    debounce: Option<f64>,
+    seed: u64,
+    tweak: impl Fn(&mut Params),
+) -> Row {
     let mut p = Params::default();
     p.slurry.enabled = false;
+    tweak(&mut p);
     p.simulation.substeps = substeps;
     p.simulation.dem_iterations = iters;
     p.simulation.seed = seed;
@@ -103,6 +114,25 @@ fn main() {
             for sub in [16u32, 32, 64] {
                 let rows = (1..=n_seeds).map(|s| run(sub, 12, Some(f), s)).collect();
                 line(format!("{f}, {sub}"), rows);
+            }
+        }
+        println!();
+    }
+    if cases.contains("dd") {
+        use mill_core::params::SpeedMode;
+        println!(
+            "## dd: D/d sweep (2 mm ball, 16 sub-steps, 12 iterations, seed 1)
+"
+        );
+        println!("| %Nc, D/d {hdr}");
+        for pc in [59.0f32, 85.0] {
+            for ratio in [20.0f32, 30.0, 45.0, 60.0] {
+                let row = run_with(16, 12, None, 1, |p| {
+                    p.mill.diameter_m = ratio * p.media.ball_diameter_m;
+                    p.mill.speed_mode = SpeedMode::PercentCritical;
+                    p.mill.speed_value = pc;
+                });
+                line(format!("{pc}, {ratio}"), vec![row]);
             }
         }
         println!();
