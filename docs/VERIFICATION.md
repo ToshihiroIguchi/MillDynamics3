@@ -1557,3 +1557,24 @@ The onset count rises +28 % / +22 % per doubling (finer steps split one physical
 touch/separate cycles) and the mean stress energies fall about 10 % per doubling, so it is **worse**
 and was removed. A sub-step-independent impact definition therefore remains open; the shipped definition
 is the least dependent measured (+4 % / +7 % per doubling).
+
+### D/d sweep with error bars (`stress_probe --seeds 3 --cases dd`, 2026-10-10)
+
+Same setup as the 1-seed sweep above, 3 seeds, mean ± standard error:
+
+| %Nc, D/d | impacts/ball/s | SE drop | SE shear | intensity | W/kg |
+|---|---|---|---|---|---|
+| 59, 20 | 73.3 ± 0.3 | 0.1266 ± 0.0012 | 0.329 ± 0.006 | 0.225 ± 0.002 | 0.815 ± 0.002 |
+| 59, 30 | 93.7 ± 0.5 | 0.1049 ± 0.0005 | 0.344 ± 0.004 | 0.217 ± 0.002 | 0.991 ± 0.002 |
+| 59, 45 | 107.4 ± 2.6 | 0.0900 ± 0.0028 | 0.368 ± 0.010 | 0.214 ± 0.002 | 1.237 ± 0.009 |
+| 59, 60 | 99.6 ± 3.0 | 0.0865 ± 0.0022 | 0.398 ± 0.019 | 0.224 ± 0.006 | 1.441 ± 0.008 |
+| 85, 20 | 89.4 ± 0.7 | 0.1647 ± 0.0022 | 0.511 ± 0.009 | 0.341 ± 0.004 | 1.183 ± 0.005 |
+| 85, 30 | 113.4 ± 0.4 | 0.1444 ± 0.0013 | 0.514 ± 0.001 | 0.323 ± 0.001 | 1.458 ± 0.008 |
+| 85, 45 | 122.3 ± 2.2 | 0.1216 ± 0.0019 | 0.586 ± 0.017 | 0.332 ± 0.005 | 1.743 ± 0.015 |
+| 85, 60 | 116.8 ± 9.4 | 0.1211 ± 0.0068 | 0.638 ± 0.096 | 0.352 ± 0.034 | 2.054 ± 0.044 |
+
+Slopes between D/d 20 and 60: drop SE -0.35 (59 %) / -0.28 (85 %) (free-fall expectation +1), shear SE
++0.17 / +0.20 (expectation -1), specific power +0.52 / +0.50. The single-seed 85 % / D/d 60 shear value
+(0.826) was noise (3 seeds: 0.638 ± 0.096); scatter grows with D/d (more balls, longer revolutions) and
+at 85 % Nc. Conclusion unchanged: the free-fall / shear-rate laws are not supported; do not extrapolate
+stress energies in D/d.

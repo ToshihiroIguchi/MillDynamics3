@@ -87,9 +87,26 @@ fn main() {
     let hdr = "| impacts/ball/s | SE drop | SE shear | intensity | W/kg |\n|---|---|---|---|---|";
     let line = |label: String, rows: Vec<Row>| {
         let m = mean_rows(&rows);
+        let n = rows.len() as f64;
+        let col = |g: &dyn Fn(&Row) -> f64| rows.iter().map(g).collect::<Vec<f64>>();
+        let cols = [
+            col(&|r| r.impacts),
+            col(&|r| r.se_drop),
+            col(&|r| r.se_shear),
+            col(&|r| r.intensity),
+            col(&|r| r.spec_power),
+        ];
+        let se = |k: usize| {
+            if rows.len() < 2 {
+                0.0
+            } else {
+                let v = cols[k].iter().map(|x| (x - m[k]).powi(2)).sum::<f64>() / (n - 1.0);
+                (v / n).sqrt()
+            }
+        };
         println!(
-            "| {label} | {:.1} | {:.4} | {:.4} | {:.4} | {:.4} |",
-            m[0], m[1], m[2], m[3], m[4]
+            "| {label} | {:.1} ± {:.1} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} |",
+            m[0], se(0), m[1], se(1), m[2], se(2), m[3], se(3), m[4], se(4)
         );
     };
     if cases.contains("dt") {
@@ -127,12 +144,16 @@ fn main() {
         println!("| %Nc, D/d {hdr}");
         for pc in [59.0f32, 85.0] {
             for ratio in [20.0f32, 30.0, 45.0, 60.0] {
-                let row = run_with(16, 12, None, 1, |p| {
-                    p.mill.diameter_m = ratio * p.media.ball_diameter_m;
-                    p.mill.speed_mode = SpeedMode::PercentCritical;
-                    p.mill.speed_value = pc;
-                });
-                line(format!("{pc}, {ratio}"), vec![row]);
+                let rows: Vec<Row> = (1..=n_seeds)
+                    .map(|seed| {
+                        run_with(16, 12, None, seed, |p| {
+                            p.mill.diameter_m = ratio * p.media.ball_diameter_m;
+                            p.mill.speed_mode = SpeedMode::PercentCritical;
+                            p.mill.speed_value = pc;
+                        })
+                    })
+                    .collect();
+                line(format!("{pc}, {ratio}"), rows);
             }
         }
         println!();
