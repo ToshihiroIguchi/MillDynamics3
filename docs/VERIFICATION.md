@@ -1481,3 +1481,42 @@ differences below ~10-15 % in stress-energy or impact-rate ratios are within the
 (restitution already ~0). Specific power is unchanged (+-1 %), i.e. the cushion does not change the power;
 wet effects other than impact damping (drag, buoyancy, rheology) are not in this runner. The constant 35 was
 not calibrated against `mac/`.
+
+## Impact statistics of the main simulation (`examples/stress_probe`, 2026-10-10)
+
+`cargo run --release -p mill-core --example stress_probe -- --seeds 2 --cases dt,iters,deb`: default scene,
+slurry off (63 mm drum, 2 mm ZrO2, 244 balls, 59 % Nc), `Simulation::step` at 60 Hz frames, mean of the
+`Metrics.stress` EMA values over 4 revolutions after 4 revolutions of warm-up, 2 seeds. Impact episodes
+are debounced (`stress::DEBOUNCE_FACTOR = 0.25`, i.e. re-contacts of a pair within 0.25 sqrt(d/g) = 3.6 ms
+count once). Sub-steps below 16 are raised to 16 by `effective_substeps` at this ball size (identical rows).
+
+| 12 iterations | impacts/ball/s | SE drop | SE shear | intensity | W/kg |
+|---|---|---|---|---|---|
+| 16 sub-steps, no debounce | 136.2 | 0.0820 | 0.3025 | 0.1881 | 1.026 |
+| 32, no debounce | 145.2 | 0.0826 | 0.3144 | 0.1953 | 1.041 |
+| 64, no debounce | 158.5 | 0.0877 | 0.3116 | 0.1971 | 1.064 |
+| 16, debounce 0.25 | 96.2 | 0.1001 | 0.3478 | 0.2150 | 1.026 |
+| 32, debounce 0.25 | 99.9 | 0.1032 | 0.3589 | 0.2242 | 1.041 |
+| 64, debounce 0.25 | 107.0 | 0.1081 | 0.3457 | 0.2210 | 1.064 |
+
+| 32 sub-steps, debounce 0.25 | impacts/ball/s | SE drop | SE shear | intensity | W/kg |
+|---|---|---|---|---|---|
+| 2 iterations | 115.8 | 0.0937 | 0.3140 | 0.1926 | 1.036 |
+| 6 | 105.0 | 0.1015 | 0.3422 | 0.2135 | 1.027 |
+| 12 | 99.9 | 0.1032 | 0.3589 | 0.2242 | 1.041 |
+| 20 | 97.7 | 0.1062 | 0.3595 | 0.2266 | 1.037 |
+
+Debounce window sweep (12 iterations; factor x sub-steps 16 / 32 / 64, impacts/ball/s): 0.25: 96 / 100 / 107;
+0.5: 81 / 83 / 89; 1: 64 / 66 / 71; 2: 47 / 48 / 50.
+
+Findings (honest): (1) the **impact count is not converged in the sub-step**: with debounce it still rises
++4 % (16 -> 32) and +7 % (32 -> 64); without debounce +7 % / +9 %. Lengthening the debounce window
+lowers the absolute count (arbitrarily) but leaves a +7 ... +11 % rise over 16 -> 64 sub-steps, so the
+dependence is not just micro-bounces of resting contacts; the debounce is a modelling choice
+and the count is comparable only between runs with identical settings. (2) The mean stress energies move
+less: intensity 0.215 / 0.224 / 0.221 over 16 / 32 / 64 sub-steps (within ~4 %), and from the default 2 to
+12 / 20 contact iterations drop SE +10 % / +13 %, shear SE +14 % / +14.5 %, intensity +16 % / +18 %:
+iterations 12 vs 20 differ by 1-3 %, so 12 iterations are enough. The app default (2 iterations) understates
+the stress energies by roughly 15 %. (3) Specific power moves < 4 % over all settings (1.03-1.06 W/kg).
+Recommended for impact statistics: 32 sub-steps, 12 iterations, coarse-graining off ("Impact statistics"
+preset); expected accuracy about 5 % for stress energies, 10 % or worse for impact counts.

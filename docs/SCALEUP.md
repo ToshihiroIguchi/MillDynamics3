@@ -51,16 +51,17 @@ Impacts are classified, for ball-ball and ball-wall separately, as **drop** (`v_
 Measured results are in docs/VERIFICATION.md ("Scale-up runner"); items marked *(not done)* are
 open work.
 
-1. **Numerical settings of the main simulation are not converged for impact statistics.** Measured
-   (63 mm drum, 2 mm ZrO2, 59 % Nc, dry): going from 6 to 12 contact iterations moves the mean drop
-   stress energy by +8 %; halving the sub-step moves the stress intensity by 3-7 % and the impact
-   *count* by +5 % / +11 % without converging. The app default is 2 iterations and a fixed sub-step
-   (at 16 sub-steps `dt = 0.073 sqrt(d/g)` for a 2 mm ball). Fix *(not done)*: a scale-up accuracy
-   preset (sub-steps above 16, which the validation range [1, 64] allows but the UI and
-   `effective_substeps` cap, and 12 or more iterations), and always compare runs with the same
-   settings (the UI warns when the settings differ from the stored reference).
-2. **Impact counts depend on the sub-step** (finer steps resolve more small re-contacts). Fix
-   *(not done)*: count one impact per contact episode (debounce re-contacts of the same pair).
+1. **Numerical settings.** The app default (2 contact iterations) understates the stress energies by
+   about 15 % against 12 iterations (12 vs 20: 1-3 %); sub-steps 16 / 32 / 64 move the stress intensity by
+   about 4 % and the specific power by < 4 %. Use the "Impact statistics" accuracy preset (32 sub-steps,
+   12 iterations, coarse-graining off; about 4x slower than the default) and compare only runs with
+   identical settings (the UI warns when the settings differ from the stored reference).
+   Measurements: docs/VERIFICATION.md, "Impact statistics of the main simulation".
+2. **Impact counts are not converged in the sub-step** (+4 % then +7 % per doubling even with
+   re-contacts of the same pair within `0.25 sqrt(d/g)` counted once; the debounce window itself is a
+   modelling choice that scales the absolute count). Treat impact frequency as comparable only at
+   identical settings, and prefer the mean stress energy and the specific power, which are more stable
+   *(a time-step-independent impact definition is not done)*.
 3. **Statistics.** The charge is chaotic and the EMA is a 1 s average. Whole-revolution averaging
    is possible with the report window; seed ensembles are not automated *(not done)*: run several
    seeds by hand and average. A batch driver over the same `Simulation` could be added.

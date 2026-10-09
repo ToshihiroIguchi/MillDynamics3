@@ -119,7 +119,8 @@ export function effectiveSubsteps(
   if (!(dEff > 0) || !(diameterM > 0)) return substeps;
   const vRef = Math.sqrt(2 * GRAVITY_MAG * diameterM);
   const minSubsteps = Math.max(1, Math.ceil(vRef / (60 * TARGET_RATIO * dEff)));
-  return Math.min(16, Math.max(substeps, minSubsteps));
+  // Matches Rust: the auto-raise stops at 16, but an explicit request above that (up to 64) wins.
+  return Math.max(substeps, Math.min(16, minSubsteps));
 }
 
 /**

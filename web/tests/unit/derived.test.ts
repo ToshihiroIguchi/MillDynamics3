@@ -166,6 +166,10 @@ describe("effectiveSubsteps", () => {
     const result = effectiveSubsteps(mill, tinyBallMedia, 50_000, 8);
     expect(result).toBeLessThanOrEqual(16);
   });
+
+  it("keeps an explicit request above 16 (auto-raise stops at 16, explicit up to 64 wins)", () => {
+    expect(effectiveSubsteps(mill, media, 300, 32)).toBe(32);
+  });
 });
 
 describe("criticalSpeedRpm", () => {

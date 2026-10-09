@@ -151,12 +151,21 @@ pub enum ImpactKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ImpactRecord {
     pub kind: ImpactKind,
+    /// The (first) ball involved.
+    pub ball: u32,
+    /// The partner ball, or [`ImpactRecord::WALL`] for a ball-wall impact.
+    pub partner: u32,
     /// Pre-solve approach speed along the contact normal (m/s, positive).
     pub normal_speed: f32,
     /// Magnitude of the pre-solve tangential slip speed at the contact point (m/s), spin included.
     pub slip_speed: f32,
     /// Restitution coefficient the solver applied to this impact.
     pub restitution: f32,
+}
+
+impl ImpactRecord {
+    /// `partner` value of a ball-wall impact.
+    pub const WALL: u32 = u32::MAX;
 }
 
 /// Per-sub-step DEM solver diagnostics (docs/PLAN.md ss3.5), returned by
@@ -929,6 +938,8 @@ impl DemState {
                         (v_pre[iu] - v_pre[ju]).dot(t_hat) - r * omega_pre[iu] - r * omega_pre[ju];
                     log.push(ImpactRecord {
                         kind: ImpactKind::BallBall,
+                        ball: i,
+                        partner: j,
                         normal_speed: -v_n_pre,
                         slip_speed: slip.abs(),
                         restitution: e,
@@ -988,6 +999,8 @@ impl DemState {
                     let slip = (v_pre[iu] - v_wall).dot(t_hat) - r * omega_pre[iu];
                     log.push(ImpactRecord {
                         kind: ImpactKind::BallWall,
+                        ball: i,
+                        partner: ImpactRecord::WALL,
                         normal_speed: -v_n_pre,
                         slip_speed: slip.abs(),
                         restitution: e,

@@ -20,6 +20,7 @@
 
 use crate::dem::{ImpactKind, ImpactRecord};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Number of log-spaced bins of the dimensionless stress-energy histogram.
 pub const SE_BINS: usize = 28;
@@ -37,6 +38,12 @@ pub const CLASS_NAMES: [&str; 4] = [
 /// Stress-energy thresholds (multiples of `m g d`) above which an impact counts as "effective" in
 /// [`StressMetrics::effective_power_per_ball_w`].
 pub const THRESHOLDS_REL: [f64; 6] = [0.03, 0.1, 0.3, 1.0, 3.0, 10.0];
+
+/// Re-contacts of the same pair (or of a ball with the wall) closer in time than
+/// `DEBOUNCE_FACTOR * sqrt(d / g)` count as one impact episode. Without it the impact count keeps
+/// rising as the sub-step shrinks (finer steps resolve more micro-bounces of a resting contact).
+/// The window is ~10x the sub-step of the validated accuracy settings, so it is sub-step independent.
+pub const DEBOUNCE_FACTOR: f64 = 0.25;
 
 /// Edges of the dimensionless stress-energy bins (`SE / (m g d)`), `SE_BINS + 1` values.
 pub fn se_bin_edges() -> Vec<f64> {
@@ -82,25 +89,57 @@ pub struct StressAccum {
     cum_wall_j: f64,
     /// Cumulative stress energy (J, whole population) carried by impacts above each threshold.
     cum_above_j: [f64; THRESHOLDS_REL.len()],
+    /// Time of the last counted impact per ball pair / ball-wall (see [`DEBOUNCE_FACTOR`]).
+    last_counted: BTreeMap<(u32, u32), f64>,
+    /// Debounce window as a multiple of `sqrt(d / g)`; [`DEBOUNCE_FACTOR`] unless overridden.
+    debounce_factor: Option<f64>,
+    updates: u64,
 }
 
 impl StressAccum {
+    /// Overrides the debounce window factor (`0` disables it). Diagnostic use.
+    pub fn set_debounce_factor(&mut self, factor: f64) {
+        self.debounce_factor = Some(factor);
+    }
+
     /// Folds one sub-step's impacts into the EMAs. `m3` is the 3D ball mass (kg), `scale_j = m3 g d`,
     /// `alpha` the EMA weight of this sub-step of length `sub_dt`.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         records: &[ImpactRecord],
         m3: f64,
         scale_j: f64,
+        d: f64,
+        now_s: f64,
         sub_dt: f64,
         alpha: f64,
         wall_work_j: f64,
     ) {
+        let window = self.debounce_factor.unwrap_or(DEBOUNCE_FACTOR) * (d / 9.81).sqrt();
+        self.updates += 1;
+        if self.updates.is_multiple_of(4096) {
+            self.last_counted.retain(|_, t| now_s - *t < 4.0 * window);
+        }
         let mut count = [0.0f64; 4];
         let mut se_hat = [0.0f64; 4];
         let mut hist = [0.0f64; SE_BINS];
         let mut above = [0.0f64; THRESHOLDS_REL.len()];
         for rec in records {
+            if window > 0.0 {
+                let key = (rec.ball.min(rec.partner), rec.ball.max(rec.partner));
+                let key = if rec.partner == ImpactRecord::WALL {
+                    (rec.ball, ImpactRecord::WALL)
+                } else {
+                    key
+                };
+                match self.last_counted.get(&key) {
+                    Some(&t0) if now_s - t0 < window => continue,
+                    _ => {
+                        self.last_counted.insert(key, now_s);
+                    }
+                }
+            }
             let (class, se) = classify(rec, m3);
             let e_hat = se / scale_j;
             count[class] += 1.0;
@@ -238,6 +277,8 @@ mod tests {
     fn rec(kind: ImpactKind, vn: f32, vs: f32) -> ImpactRecord {
         ImpactRecord {
             kind,
+            ball: 0,
+            partner: 1,
             normal_speed: vn,
             slip_speed: vs,
             restitution: 0.7,
@@ -273,11 +314,21 @@ mod tests {
         let (m3, d) = (2.0e-5, 0.002);
         let scale = m3 * 9.81 * d;
         let mut acc = StressAccum::default();
+        acc.set_debounce_factor(0.0);
         let sub_dt = 1e-3;
         // Two identical ball-ball impacts per sub-step -> 2000 impacts/s for the population.
         let r = [rec(ImpactKind::BallBall, 0.5, 0.0); 2];
         for _ in 0..20_000 {
-            acc.update(&r, m3, scale, sub_dt, 1.0 - (-sub_dt / 1.0f64).exp(), 0.0);
+            acc.update(
+                &r,
+                m3,
+                scale,
+                d,
+                0.0,
+                sub_dt,
+                1.0 - (-sub_dt / 1.0f64).exp(),
+                0.0,
+            );
         }
         let m = acc.metrics(100, m3, scale, d, 0.0);
         assert!((m.impacts_per_ball_per_s[0] - 20.0).abs() < 0.05, "{m:?}");
@@ -295,6 +346,29 @@ mod tests {
         );
         let hist_total: f64 = acc.histogram_rate().iter().sum();
         assert!((hist_total - 2000.0).abs() < 5.0);
+    }
+
+    #[test]
+    fn debounce_counts_one_impact_per_episode() {
+        let (m3, d) = (2.0e-5, 0.002);
+        let scale = m3 * 9.81 * d;
+        let window = DEBOUNCE_FACTOR * (d / 9.81f64).sqrt(); // ~3.6 ms
+        let r = [rec(ImpactKind::BallBall, 0.5, 0.0)];
+        let mut acc = StressAccum::default();
+        let sub_dt = 1e-4;
+        // Re-contacts every 0.1 ms for 2 windows -> 2 counted episodes, not 72.
+        let mut t = 0.0;
+        while t < 2.0 * window - sub_dt {
+            acc.update(&r, m3, scale, d, t, sub_dt, 1.0, 0.0);
+            t += sub_dt;
+        }
+        let counted: f64 = acc.histogram_rate().iter().sum::<f64>() * sub_dt;
+        // With alpha = 1 the EMA holds only the last sub-step; use the cumulative energy instead.
+        assert!(counted <= 1.0 + 1e-9);
+        let m = acc.metrics(1, m3, scale, d, 0.0);
+        let se_each = 0.5 * 0.5 * m3 * 0.25;
+        let n_counted = m.cumulative_effective_energy_per_ball_j[0] / se_each;
+        assert!((n_counted - 2.0).abs() < 1e-6, "{n_counted}");
     }
 
     #[test]

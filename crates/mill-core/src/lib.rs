@@ -236,6 +236,12 @@ impl Simulation {
         (m3, m3 * 9.81 * d, d)
     }
 
+    /// Overrides the impact-episode debounce window of the stress statistics (a multiple of
+    /// `sqrt(d / g)`; `0` disables it). Diagnostic use, see [`stress::DEBOUNCE_FACTOR`].
+    pub fn set_stress_debounce_factor(&mut self, factor: f64) {
+        self.stress.set_debounce_factor(factor);
+    }
+
     pub fn params(&self) -> &Params {
         &self.params
     }
@@ -529,11 +535,13 @@ impl Simulation {
 
         // Impact statistics come from the recorded impacts (3D-converted, scale-relative
         // threshold, see `stress`), not from `DemStepStats`' 2D-disc-mass counters.
-        let (m3, scale_j, _) = self.stress_scales();
+        let (m3, scale_j, d) = self.stress_scales();
         self.stress.update(
             &self.impact_log,
             m3,
             scale_j,
+            d,
+            self.sim_time,
             sub_dt as f64,
             alpha as f64,
             (stats.wall_work_j + fluid_wall_work_j) as f64,

@@ -81,6 +81,8 @@ well above the point where a thin wetting film is visually resolvable -- that tr
 and disclosed here, not hidden, and reducing it needs either the M6 performance pass or much more
 aggressive ball coarse-graining than any of these three tiers use.
 
+The fourth preset, "Impact statistics (slow)", additionally sets 32 sub-steps, 12 ball-solver iterations and coarse-graining off (`max_balls` 600, `resolution` 25): it exists because the Grinding proxy (3D) impact statistics were measured to be only reasonably converged (a few percent) at that setting, whereas the app defaults (8 sub-steps, 2 iterations) are not; it runs several times slower than real time, impact counts still drift roughly +5 % per doubling of sub-steps, and runs should be compared only with identical settings.
+
 **Stale `Achieved speed` column.** These figures were measured before `media.ball_diameter_m`'s
 default changed to a 2 mm ball in a 63 mm drum (chosen so the shipped config needs no ball coarse-graining
 -- see the Media table above). At the old default, each tier coarse-grained a

@@ -21,7 +21,7 @@ import {
 } from "../params/derived";
 import { createHelpIcon } from "./helpIcon";
 import { MEDIA_MATERIALS } from "../params/materials";
-import { QUALITY_PRESETS } from "../params/presets";
+import { QUALITY_PRESETS, PRESET_FIELD_PATHS, presetFieldValues, presetMatchesFields } from "../params/presets";
 import {
   fromDisplayValue,
   GROUPS,
@@ -198,13 +198,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     if (!presetSelect || presetSelect.value === "") return;
     const preset = QUALITY_PRESETS.find((p) => p.id === presetSelect!.value);
     if (!preset) return;
-    const maxBallsInput = inputs.get("simulation.max_balls") as HTMLInputElement | undefined;
-    const resolutionInput = inputs.get("simulation.resolution") as HTMLInputElement | undefined;
-    const matches =
-      maxBallsInput !== undefined &&
-      resolutionInput !== undefined &&
-      Number(maxBallsInput.value) === preset.maxBalls &&
-      Number(resolutionInput.value) === preset.resolution;
+    const matches = presetMatchesFields(preset, (path) => inputs.get(path)?.value);
     if (!matches) {
       presetSelect.value = "";
       if (presetNote) presetNote.hidden = true;
@@ -294,18 +288,14 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
           if (presetNote) presetNote.hidden = true;
           return;
         }
-        const maxBallsInput = inputs.get("simulation.max_balls");
-        const resolutionInput = inputs.get("simulation.resolution");
-        // Both values are set *before* either "input" event is dispatched: the generic field
-        // listener's `syncPresetSelectWithFields` call (added for the dropdown-desync fix above)
-        // compares both fields against the preset every time either one changes, so dispatching
-        // them one at a time would see max_balls already updated but resolution still stale,
-        // read that as a mismatch, and immediately reset the dropdown back to "(custom)" right
-        // after this handler had just set it.
-        if (maxBallsInput) maxBallsInput.value = String(preset.maxBalls);
-        if (resolutionInput) resolutionInput.value = String(preset.resolution);
-        if (maxBallsInput) maxBallsInput.dispatchEvent(new Event("input", { bubbles: true }));
-        if (resolutionInput) resolutionInput.dispatchEvent(new Event("input", { bubbles: true }));
+        // All fields are set *before* any "input" event is dispatched, for the reason above.
+        const targets = presetFieldValues(preset)
+          .map(({ path, value }) => ({ input: inputs.get(path), value }))
+          .filter((t): t is { input: HTMLInputElement | HTMLSelectElement; value: string } => t.input !== undefined);
+        for (const { input, value } of targets) input.value = value;
+        for (const { input } of targets) {
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
         if (presetNote) {
           presetNote.textContent = preset.note;
           presetNote.hidden = false;
@@ -418,7 +408,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       input.addEventListener("input", () => {
         setStatus("edited", paramsChangeRequiresReset(currentParams, readFormParams()));
         refreshDerived();
-        if (field.path === "simulation.max_balls" || field.path === "simulation.resolution") {
+        if (PRESET_FIELD_PATHS.has(field.path)) {
           syncPresetSelectWithFields();
         }
         if (field.path === "media.density_kg_m3") {
