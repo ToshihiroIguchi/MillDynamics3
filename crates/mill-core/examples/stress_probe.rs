@@ -13,6 +13,8 @@ struct Row {
     se_shear: f64,
     intensity: f64,
     spec_power: f64,
+    balls: usize,
+    k: f32,
 }
 
 fn run(substeps: u32, iters: u32, debounce: Option<f64>, seed: u64) -> Row {
@@ -43,6 +45,10 @@ fn run_with(
     for _ in 0..warm {
         sim.step(frame);
     }
+    let (balls, k) = {
+        let m = sim.metrics();
+        (m.simulated_ball_count as usize, m.coarse_graining_factor)
+    };
     let mut acc = [0.0f64; 5];
     for _ in 0..meas {
         sim.step(frame);
@@ -60,6 +66,8 @@ fn run_with(
         se_shear: acc[2] / n,
         intensity: acc[3] / n,
         spec_power: acc[4] / n,
+        balls,
+        k,
     }
 }
 
@@ -105,8 +113,8 @@ fn main() {
             }
         };
         println!(
-            "| {label} | {:.1} ± {:.1} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} |",
-            m[0], se(0), m[1], se(1), m[2], se(2), m[3], se(3), m[4], se(4)
+            "| {label} (balls {}, k {:.2}) | {:.1} ± {:.1} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} | {:.4} ± {:.4} |",
+            rows[0].balls, rows[0].k, m[0], se(0), m[1], se(1), m[2], se(2), m[3], se(3), m[4], se(4)
         );
     };
     if cases.contains("dt") {
@@ -142,11 +150,19 @@ fn main() {
 "
         );
         println!("| %Nc, D/d {hdr}");
-        for pc in [59.0f32, 85.0] {
-            for ratio in [20.0f32, 30.0, 45.0, 60.0] {
+        let pcs: Vec<f32> = arg("--pcs")
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+            .unwrap_or_else(|| vec![59.0, 85.0]);
+        let ratios: Vec<f32> = arg("--ratios")
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+            .unwrap_or_else(|| vec![20.0, 30.0, 45.0, 60.0]);
+        for &pc in &pcs {
+            for &ratio in &ratios {
                 let rows: Vec<Row> = (1..=n_seeds)
                     .map(|seed| {
                         run_with(16, 12, None, seed, |p| {
+                            p.simulation.coarse_graining_mode =
+                                mill_core::params::CoarseGrainingMode::Off;
                             p.mill.diameter_m = ratio * p.media.ball_diameter_m;
                             p.mill.speed_mode = SpeedMode::PercentCritical;
                             p.mill.speed_value = pc;

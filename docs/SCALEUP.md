@@ -70,15 +70,15 @@ open work.
    applied settings and reports standard errors and propagated ratio errors (docs/METRICS.md,
    "Repeat runs (seeds)"). It is slow with slurry on, and the number of seeds and revolutions is the
    user's choice; the warm-up needed for steady state is flagged through the power-drift indicator.
-4. **Reaching a large mill.** Do not extrapolate stress energies in D/d. Measured at 59 % and 85 % Nc
-   (docs/VERIFICATION.md, "D/d sweep of the main simulation"): the dimensionless drop stress energy falls
-   with D/d (slope about -0.3 to -0.4, free-fall expectation +1) and the shear energy rises (+0.1 to
-   +0.4, expectation -1); only specific power follows a clean law (about `sqrt(D)`). What is exact is
-   Froude similarity at a *fixed* D/d (dimensionless values agree within 1.5 % over a 4x scale), which
-   only helps for geometrically similar mills (ball size scaled with the drum). A real scale-up changes
-   D/d, so the way to use the tool is to simulate the target D/d directly, up to what is affordable
-   (a few thousand balls, D/d of roughly 100-150 for J = 0.3; the simulation is then much slower than
-   real time), and to treat anything beyond that as unknown.
+4. **Reaching a large mill.** Do not extrapolate stress energies in D/d. With true-size balls
+   (k = 1) at 59 % Nc the stress intensity is flat for D/d 20-45 (0.214-0.225) and then rises
+   (0.256 at D/d 60, 0.277 at 100) while the impact rate per ball jumps from about 100 to 151
+   (docs/VERIFICATION.md; an earlier "flat up to D/d 350" result was a coarse-graining artefact, see
+   the CORRECTION there). The simple free-fall / shear-rate scaling laws are not supported, and only
+   specific power follows a clean law (about `sqrt(D)`). For a 1 m drum with 2 mm media (D/d = 500,
+   about 61 500 discs, above the 50 000-ball limit) no direct or extrapolated number is available yet:
+   direct simulation of D/d 150-250 (5 500-15 000 balls) was started and interrupted. Coarse-graining
+   cannot substitute: even k = 1.2 changed the intensity by 14 % and the shear energy by 25 %.
 5. **Contact coefficients are not calibrated.** +-20 % on ball-ball friction changes the shear stress
    energy by +17 % / -8 %; +-20 % on ball-ball restitution changes the impact rate by -11 % / +14 %.
    Ratios within about 10-15 % are inside this uncertainty. Check a conclusion by re-running with

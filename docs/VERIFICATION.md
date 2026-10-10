@@ -1578,3 +1578,27 @@ Slopes between D/d 20 and 60: drop SE -0.35 (59 %) / -0.28 (85 %) (free-fall exp
 (0.826) was noise (3 seeds: 0.638 ± 0.096); scatter grows with D/d (more balls, longer revolutions) and
 at 85 % Nc. Conclusion unchanged: the free-fall / shear-rate laws are not supported; do not extrapolate
 stress energies in D/d.
+
+### CORRECTION (2026-10-10): the D/d sweeps above for D/d >= 60 were coarse-grained
+
+`stress_probe --cases dd` did not turn coarse-graining off, so with the default `max_balls = 600` every row
+with more than 600 balls (D/d 60 and larger: 886 balls -> k = 1.2, D/d 100 -> k = 2.0, ...) was simulated
+with enlarged balls. **The D/d 60 rows of the 1-seed and 3-seed sweeps and all D/d 100-350 rows measured on
+2026-10-10 before this correction are invalid** (they flatly looked "intensity ~ 0.22 for every D/d up to
+350"; that was an artefact). D/d 20-45 rows (<= 498 balls) are valid. The probe now forces
+`CoarseGrainingMode::Off` and prints the ball count and k per row. It also shows how strongly a small
+coarse-graining distorts the statistics: D/d 60 at k = 1.2 gave intensity 0.224 / shear 0.398, at k = 1.00
+0.256 / 0.500.
+
+Valid 59 % Nc, k = 1.00, 2 seeds (D/d 45 / 60 / 100; D/d 150 and 250 were interrupted):
+
+| D/d (balls) | impacts/ball/s | SE drop | SE shear | intensity | W/kg |
+|---|---|---|---|---|---|
+| 45 (498) | 104.9 ± 1.2 | 0.0876 ± 0.0024 | 0.377 ± 0.007 | 0.2164 ± 0.0010 | 1.228 ± 0.005 |
+| 60 (886) | 100.9 ± 0.8 | 0.0831 ± 0.0035 | 0.500 ± 0.003 | 0.2557 ± 0.0026 | 1.370 ± 0.001 |
+| 100 (2460) | 150.6 ± 1.5 | 0.1080 ± 0.0004 | 0.548 ± 0.003 | 0.2769 ± 0.0020 | 1.666 ± 0.003 |
+
+So with true-size balls the stress intensity does **not** stay flat in D/d: 0.214-0.225 for D/d 20-45,
+then 0.256 (60) and 0.277 (100), and the impact frequency per ball jumps from about 100 to 151 between D/d
+60 and 100. The trend for a 1 m drum with 2 mm media (D/d = 500, about 61 500 discs) is therefore
+unknown, and not flat.
