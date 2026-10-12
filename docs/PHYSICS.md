@@ -12,6 +12,93 @@ and `docs/PARAMETERS.md` for the UI-facing parameter list.
 
 ---
 
+## 0. Overview: what is simulated and how
+
+This section is the big picture. Sections 1–9 give the exact equations, constants and known
+limitations of each piece.
+
+### 0.1 The physical system
+
+A horizontal tumbling ball mill, seen as a **2D cross-section** perpendicular to its axis. A circular
+drum (optionally with lifter bars) rotates at a prescribed angular speed `omega`. Inside are
+(a) many rigid circular grinding balls and (b) a viscous liquid slurry. Gravity acts along `-y`.
+Everything is per metre of axial length (unit-depth discs). The drum drives everything: the wall
+drags balls by friction and slurry by viscous no-slip, the charge is lifted, and then cascades or
+cataracts back down. Balls and slurry push on each other (buoyancy, drag, displacement).
+
+### 0.2 Models at a glance
+
+| Part | Physics | Algorithm | Source | Details |
+|---|---|---|---|---|
+| Drum | Rigid rotating boundary, optional trapezoidal lifters | Signed-distance function (SDF) in the drum frame; wall velocity `omega x r` | `geometry.rs` | §2 |
+| Balls | Rigid-body contact: non-penetration, Coulomb friction, restitution, rolling resistance, gravity | XPBD discs: predict, project overlaps (Gauss–Seidel), rebuild velocities, then friction and restitution | `dem.rs` | §4 |
+| Slurry | Incompressible, viscous (Newtonian) liquid with surface tension and wetting | Position Based Fluids (SPH-style particles with a density constraint) plus implicit viscosity | `pbf.rs` | §5, §6.1a |
+| Ball–slurry coupling | Buoyancy, viscous (Stokes + form) drag, displacement of fluid by balls | Impulse exchange between the two solvers each sub-step | `coupling.rs`, `pbf.rs` | §6 |
+| Free surface | – (visualisation only) | Splat particles to a grid, marching squares | `surface.rs` | §7 |
+| Outputs | Power, torque, impact energies, mixing | Accumulated from the contact/wall work of each sub-step | `metrics.rs`, `stress.rs` | §8 |
+
+### 0.3 One simulation sub-step
+
+`Simulation::step_fixed` advances one fixed sub-step `dt = 1/(60 * substeps)` s (default `1/240`),
+via `coupling::step_recorded`:
+
+1. **Slurry first.** Using the balls' last positions and velocities as moving obstacles, advance the
+   fluid:
+   1. apply gravity and predict positions;
+   2. build neighbour lists (uniform grid with cell size = kernel radius `h`);
+   3. iterate the **density constraint** so the particles stay at rest density, which makes the
+      fluid incompressible (this is the "pressure" solve of PBF);
+   4. add **cohesion** (surface tension) and **adhesion** (wetting) forces, push fluid out of balls,
+      and project particles out of the wall;
+   5. rebuild velocities from the position change, then blend in the wall velocity (no-slip);
+   6. apply **ball drag** and **buoyancy** as impulses, recording the equal and opposite reaction
+      on each ball;
+   7. solve **implicit viscosity** `(I + dt L) v = v*` by conjugate gradient. Implicit means it is
+      stable at any viscosity.
+2. **Balls second.** Apply the fluid reaction impulses, then:
+   1. predict (gravity, `x += v dt`);
+   2. broad-phase pair search on a counting-sort uniform grid;
+   3. project ball–ball and ball–wall/lifter overlaps (`C = distance - (r_i + r_j) >= 0`) with a
+      capped recovery rate;
+   4. rebuild velocities from the position change;
+   5. apply Coulomb friction, restitution (with an energy-injection guard) and rolling resistance.
+3. **Bookkeeping.** Rotate the drum by `omega * dt`. Accumulate wall work (power, torque), the
+   energy budget and the recorded impact energies (§8).
+
+The staggered order (fluid with old ball state, then balls with new fluid impulses) is semi-implicit
+and keeps the coupling stable.
+
+### 0.4 Key ideas behind the algorithm choices
+
+- **Why position-based (XPBD) contact instead of spring–dashpot DEM?** Real ball stiffness would
+  require microsecond time steps at these speeds. Treating contact as a rigid constraint solved by
+  projection is stable at any sub-step; the price is that contact forces are reconstructed, not
+  integrated (§4).
+- **Why PBF for the slurry?** Particle methods handle the violent free surface (splashing,
+  cascading) with no mesh, and PBF's density constraint is unconditionally stable. Viscosity is
+  solved implicitly because slurries are viscous (tens of Pa·s is typical in practice).
+- **Coarse-graining.** If the real ball count is too large for real-time stepping, a smaller number
+  of larger balls is used at the same total mass and footprint area (§3). The UI shows when this
+  is active.
+- **Determinism.** The same `Params` and `seed` always give the same trajectory: fixed time step,
+  deterministic neighbour ordering and a seeded PRNG.
+
+### 0.5 What the model does *not* capture
+
+It is a qualitative 2D model: no axial flow and no 3D packing (2D void fraction is much lower
+than in 3D), no particle breakage or grinding kinetics (only collision energies are measured), no
+slurry-borne fine solids or non-Newtonian rheology in the shipped solver, and slurry percolation
+into a settled bed is limited by the fluid resolution. §9 lists the measured limitations.
+
+### 0.6 Experimental solvers (not used by the shipped simulator)
+
+`crates/mill-core/src/fluid/` (a DFSPH replacement for PBF) and `crates/mill-core/src/mac/` (a
+fixed-grid Navier–Stokes track with cut cells, multigrid-preconditioned CG, resolved ball coupling
+and Bingham/Herschel–Bulkley rheology) are verification and rebuild experiments, documented in
+`docs/VERIFICATION.md`. `Simulation` currently runs DEM + PBF only.
+
+---
+
 ## 1. Units & conventions
 
 - SI throughout the core: metres, kilograms, seconds, Pascal-seconds, radians (`params.rs` module

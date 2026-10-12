@@ -13,6 +13,25 @@ appears unmissably whenever the achieved rate falls behind.
 See [`docs/PLAN.md`](docs/PLAN.md) for the full design and milestone plan, and
 [`CLAUDE.md`](CLAUDE.md) for project conventions.
 
+## How it works (short version)
+
+Each fixed sub-step (1/240 s by default) advances the slurry and then the balls:
+
+- **Slurry**: Position Based Fluids. Particles are predicted under gravity, then a density
+  constraint is iterated to keep the fluid incompressible; Akinci cohesion/adhesion give surface
+  tension and wetting; the drum wall imposes no-slip; viscosity is solved implicitly (conjugate
+  gradient).
+- **Balls**: XPBD rigid discs. Positions are predicted, ball–ball and ball–wall overlaps are
+  projected out, velocities are rebuilt from the position change, then Coulomb friction,
+  restitution and rolling resistance are applied.
+- **Coupling**: buoyancy and viscous drag are exchanged as equal and opposite impulses between
+  fluid and balls, so energy and momentum go from one to the other consistently.
+- **Outputs**: power, torque, impact-energy histograms and mixing come from the work done by the
+  wall and the contact impulses of each sub-step.
+
+[`docs/PHYSICS.md`](docs/PHYSICS.md) §0 gives the full overview. Its later sections give every
+equation, constant and known limitation.
+
 ## Status
 
 Functional simulator with DEM ball solver (position-based rigid discs, wall/lifter continuous collision
