@@ -1620,3 +1620,24 @@ The stress energies grow steeply at large D/d, so no flat or simple power-law tr
 D/d = 500 (a 1 m drum with 2 mm media); the D/d 250 jump (x1.7 in intensity from D/d 150) may be a regime
 change of the charge (not examined) or an unsettled run. Neither the value nor even the sign of the trend
 beyond D/d 250 is known.
+
+### What coarse-graining preserves (`stress_probe --cases cg`, 2026-10-12)
+
+D/d = 45 (90 mm drum, 2 mm ZrO2), 59 % Nc, dry, 16 sub-steps, 12 iterations, 2 seeds, `Manual` coarse-graining
+with k = 1 / 1.5 / 2 / 3 (498 / 221 / 125 / 55 balls; total charge mass and footprint preserved). Window means.
+
+| k | power W/m | dissipated W/m | KE J/m | toe deg | shoulder deg | centroid y mm | intensity | shear SE | drop SE |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 7.686 | 7.239 | 0.0425 | 227.5 | 80.5 | -25.20 | 0.216 | 0.377 | 0.088 |
+| 1.5 | 7.772 | 7.305 | 0.0697 | 227.4 | 75.8 | -24.50 | 0.221 | 0.351 | 0.105 |
+| 2 | 8.018 | 7.549 | 0.0759 | 225.7 | 74.6 | -24.01 | 0.222 | 0.338 | 0.114 |
+| 3 | 8.758 | 8.295 | 0.1013 | 221.8 | 70.7 | -23.04 | 0.229 | 0.299 | 0.160 |
+
+Relative to k = 1: power draw per metre +1 % / +4 % / +14 %; dissipated power the same; toe angle -0.1 / -1.8 /
+-5.7 deg; shoulder -4.7 / -5.9 / -9.8 deg; charge centroid height +3 / +5 / +9 %; **kinetic energy +64 / +79 /
++138 %** (not preserved); the per-impact statistics are not preserved either: drop SE +19 / +30 / +82 %, shear SE
+-7 / -10 / -21 %. The all-impact mean (intensity) moved only +2 / +3 / +6 %, but through opposite-signed
+changes of the two classes, and only because the intensity is flat in D/d at D/d_eff = D/(k d) = 15-45
+(0.22 for D/d 20-45 above): the coarse-grained statistics match those of a true-size mill at **D/d_eff**
+(k = 3 at D/d 45 gives 0.229, true D/d 20 gives 0.225; k = 1.2 at D/d 60 gave 0.224, true D/d 50 is
+about 0.23, true D/d 60 is 0.256). So coarse-graining simulates a mill with larger balls, not the real one.

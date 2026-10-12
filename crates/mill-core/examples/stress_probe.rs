@@ -174,6 +174,76 @@ fn main() {
         }
         println!();
     }
+    if cases.contains("cg") {
+        use mill_core::params::{CoarseGrainingMode, SpeedMode};
+        println!(
+            "## cg: coarse-graining factor k at D/d = 45 (59 % Nc, 16 sub-steps, 12 iterations)
+"
+        );
+        println!("| k | balls | power W/m | dissipated W/m | KE J/m | toe deg | shoulder deg | centroid y mm | intensity | shear SE | drop SE |");
+        println!("|---|---|---|---|---|---|---|---|---|---|---|");
+        for k in [1.0f32, 1.5, 2.0, 3.0] {
+            let mut acc = [0.0f64; 9];
+            let mut balls = 0usize;
+            for seed in 1..=n_seeds {
+                let mut p = Params::default();
+                p.slurry.enabled = false;
+                p.mill.diameter_m = 45.0 * p.media.ball_diameter_m;
+                p.mill.speed_mode = SpeedMode::PercentCritical;
+                p.mill.speed_value = 59.0;
+                p.simulation.substeps = 16;
+                p.simulation.dem_iterations = 12;
+                p.simulation.seed = seed;
+                p.simulation.coarse_graining_mode = CoarseGrainingMode::Manual;
+                p.simulation.coarse_graining_k = k;
+                let rev_s = 60.0 / p.mill.rpm() as f64;
+                let omega = p.mill.omega();
+                let mut sim = Simulation::new(p).unwrap();
+                for _ in 0..(4.0 * rev_s * 60.0) as usize {
+                    sim.step(1.0 / 60.0);
+                }
+                let frames = (4.0 * rev_s * 60.0) as usize;
+                let mut a = [0.0f64; 9];
+                let mut cnt_toe: f64 = 0.0;
+                for _ in 0..frames {
+                    sim.step(1.0 / 60.0);
+                    let m = sim.metrics();
+                    balls = m.simulated_ball_count as usize;
+                    a[0] += m.power_draw_w as f64;
+                    a[1] += m.dissipated_power_w as f64;
+                    a[2] += m.total_kinetic_energy_j as f64;
+                    if let (Some(t), Some(sh)) = (m.toe_angle_rad, m.shoulder_angle_rad) {
+                        a[3] += mill_core::metrics::to_vertical_degrees(t, omega) as f64;
+                        a[4] += mill_core::metrics::to_vertical_degrees(sh, omega) as f64;
+                        cnt_toe += 1.0;
+                    }
+                    a[5] += m
+                        .charge_centroid_m
+                        .map(|c| c.1 as f64 * 1000.0)
+                        .unwrap_or(0.0);
+                    a[6] += m.stress.stress_intensity_scaled as f64;
+                    a[7] += m.stress.mean_se_scaled_shear as f64;
+                    a[8] += m.stress.mean_se_scaled_drop as f64;
+                }
+                let n = frames as f64;
+                for (i, v) in a.iter().enumerate() {
+                    let d = if i == 3 || i == 4 {
+                        cnt_toe.max(1.0)
+                    } else {
+                        n
+                    };
+                    acc[i] += v / d;
+                }
+            }
+            let ns = n_seeds as f64;
+            println!(
+                "| {k} | {balls} | {:.3} | {:.3} | {:.4} | {:.1} | {:.1} | {:.2} | {:.3} | {:.3} | {:.3} |",
+                acc[0] / ns, acc[1] / ns, acc[2] / ns, acc[3] / ns, acc[4] / ns, acc[5] / ns,
+                acc[6] / ns, acc[7] / ns, acc[8] / ns
+            );
+        }
+        println!();
+    }
     if cases.contains("iters") {
         println!("## iters: contact iterations (32 sub-steps, debounce on)\n");
         println!("| iterations {hdr}");

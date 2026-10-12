@@ -38,8 +38,13 @@ Impacts are classified, for ball-ball and ball-wall separately, as **drop** (`v_
 
 1. Same %Nc, fill J, ball material; change the quantity under study. Keep **every** numerical
    setting identical between compared runs (sub-steps, solver iterations, coarse-graining), see below.
-2. Keep coarse-graining off (`k = 1`): the rows are meaningless when `k > 1` (the simulated ball is
-   not the real ball). This limits the size that can be simulated (a few thousand balls).
+2. Keep coarse-graining off (`k = 1`) for the stress statistics: the rows are meaningless when `k > 1`.
+   Coarse-graining simulates a mill with larger balls: its statistics follow `D/d_eff = D/(k d)`
+   (docs/VERIFICATION.md, "What coarse-graining preserves"). What it keeps within a few percent up to
+   `k` of about 2 (tested only at D/d = 45): power draw per metre (+1 % at k 1.5, +4 % at 2, +14 % at 3),
+   dissipated power, toe angle (within 2 deg for k <= 2) and charge centroid (within 5 %); it does **not**
+   keep kinetic energy (+64 % ... +138 %), the shoulder angle (-5 ... -10 deg), the impact counts or the
+   drop/shear stress energies. This limits the simulated size to a few thousand balls for the statistics.
 3. Let the run settle, then use "Repeat runs (seeds)" in the Grinding proxy (3D) group: it runs the
    same simulation with the same applied settings for seeds 1..N over whole revolutions and gives mean
    +- standard error per row, so the ratio to the lab condition ("Use as reference" on its batch) comes
