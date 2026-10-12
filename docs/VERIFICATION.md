@@ -1602,3 +1602,21 @@ So with true-size balls the stress intensity does **not** stay flat in D/d: 0.21
 then 0.256 (60) and 0.277 (100), and the impact frequency per ball jumps from about 100 to 151 between D/d
 60 and 100. The trend for a 1 m drum with 2 mm media (D/d = 500, about 61 500 discs) is therefore
 unknown, and not flat.
+
+### D/d 150 and 250 with true-size balls (`stress_probe --cases dd --pcs 59`, 2026-10-12)
+
+59 % Nc, k = 1.00, 16 sub-steps, 12 iterations, dry. D/d 150: 2 seeds; D/d 250: **1 seed** (no error bar; the
+probe does not report the steady-state drift, so a not-yet-settled charge cannot be excluded for this row).
+
+| D/d (balls) | impacts/ball/s | SE drop | SE shear | intensity | W/kg |
+|---|---|---|---|---|---|
+| 150 (5535) | 199.3 ± 10.5 | 0.1775 ± 0.0016 | 0.664 ± 0.047 | 0.361 ± 0.010 | 1.872 ± 0.048 |
+| 250 (15375) | 208.9 | 0.330 | 1.139 | 0.625 | 2.195 |
+
+Together with the valid rows above, stress intensity vs D/d (20-250): 0.225, 0.217, 0.216, 0.256, 0.277,
+0.361, 0.625; impact rate per ball: 73, 94, 105, 101, 151, 199, 209; specific power: 0.81, 0.99, 1.23, 1.37,
+1.67, 1.87, 2.20 (growth slows: exponent about 0.30 between D/d 100 and 250, against about 0.5 below D/d 100).
+The stress energies grow steeply at large D/d, so no flat or simple power-law trend exists to extrapolate to
+D/d = 500 (a 1 m drum with 2 mm media); the D/d 250 jump (x1.7 in intensity from D/d 150) may be a regime
+change of the charge (not examined) or an unsettled run. Neither the value nor even the sign of the trend
+beyond D/d 250 is known.

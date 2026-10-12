@@ -71,14 +71,17 @@ open work.
    "Repeat runs (seeds)"). It is slow with slurry on, and the number of seeds and revolutions is the
    user's choice; the warm-up needed for steady state is flagged through the power-drift indicator.
 4. **Reaching a large mill.** Do not extrapolate stress energies in D/d. With true-size balls
-   (k = 1) at 59 % Nc the stress intensity is flat for D/d 20-45 (0.214-0.225) and then rises
-   (0.256 at D/d 60, 0.277 at 100) while the impact rate per ball jumps from about 100 to 151
-   (docs/VERIFICATION.md; an earlier "flat up to D/d 350" result was a coarse-graining artefact, see
-   the CORRECTION there). The simple free-fall / shear-rate scaling laws are not supported, and only
-   specific power follows a clean law (about `sqrt(D)`). For a 1 m drum with 2 mm media (D/d = 500,
-   about 61 500 discs, above the 50 000-ball limit) no direct or extrapolated number is available yet:
-   direct simulation of D/d 150-250 (5 500-15 000 balls) was started and interrupted. Coarse-graining
-   cannot substitute: even k = 1.2 changed the intensity by 14 % and the shear energy by 25 %.
+   (k = 1) at 59 % Nc the stress intensity is 0.22 for D/d 20-45, then rises: 0.26 (60), 0.28 (100),
+   0.36 (150), 0.62 (250, 1 seed); the impact rate per ball rises from about 100 to 200 (D/d 45 -> 150) and
+   specific power grows more slowly than `sqrt(D)` at large D/d (docs/VERIFICATION.md; an earlier "flat up to
+   D/d 350" result was a coarse-graining artefact, see the CORRECTION there). The simple free-fall /
+   shear-rate scaling laws are not supported. For a 1 m drum with 2 mm media (D/d = 500, about 61 500
+   discs, above the 50 000-ball limit) no number is available: the trend is steep and unexplained, and
+   direct simulation at D/d 500 is out of reach. Coarse-graining cannot substitute: even k = 1.2 changed the
+   intensity by 14 % and the shear energy by 25 %. What would be needed: an explanation of why the
+   stress energies grow with D/d (e.g. a change of the charge's motion regime with the relative charge
+   depth), checked with the existing `Impact statistics` preset and the seed batch, and runs at D/d
+   300-400 with steady-state checks.
 5. **Contact coefficients are not calibrated.** +-20 % on ball-ball friction changes the shear stress
    energy by +17 % / -8 %; +-20 % on ball-ball restitution changes the impact rate by -11 % / +14 %.
    Ratios within about 10-15 % are inside this uncertainty. Check a conclusion by re-running with
