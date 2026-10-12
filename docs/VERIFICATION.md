@@ -1641,3 +1641,30 @@ changes of the two classes, and only because the intensity is flat in D/d at D/d
 (0.22 for D/d 20-45 above): the coarse-grained statistics match those of a true-size mill at **D/d_eff**
 (k = 3 at D/d 45 gives 0.229, true D/d 20 gives 0.225; k = 1.2 at D/d 60 gave 0.224, true D/d 50 is
 about 0.23, true D/d 60 is 0.256). So coarse-graining simulates a mill with larger balls, not the real one.
+
+### Coarse-graining at D/d 150 and 250 (`stress_probe --cases cg --cgdd 150|250 --ks ...`, 2026-10-12)
+
+Same protocol as above (59 % Nc, dry, 16 sub-steps, 12 iterations, 4 warm-up + 4 measured revolutions unless
+noted). k = 1 at D/d 150 (5535 balls, 1 seed): power 133.5 W/m after 4 warm-up revolutions and 136.0 W/m after
+12 (+2 %: settled), so the k = 1 reference is 136 W/m; the 2-seed 1.87 W/kg of the earlier sweep converts to
+130 W/m, consistent. At D/d 250 only the 1-seed 2.195 W/kg of the k = 1 sweep exists (424 W/m by conversion).
+
+| D/d | k (balls) | power W/m | vs k = 1 | toe deg | shoulder deg | centroid y mm | KE J/m | intensity | shear SE | drop SE |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 150 | 1 (5535) | 136.0 | - | 231.8 | 91.6 | -85.7 | 4.04 | 0.368 | 0.633 | 0.195 |
+| 150 | 2 (1384) | 159.0 | +17 % | 227.8 | 86.6 | -85.2 | 1.17 | 0.264 | 0.548 | 0.077 |
+| 150 | 3 (615) | 162.7 | +20 % | 227.8 | 79.2 | -83.3 | 1.80 | 0.226 | 0.393 | 0.091 |
+| 150 | 5 (221) | 160.1 | +18 % | 227.6 | 76.3 | -81.7 | 2.45 | 0.219 | 0.347 | 0.104 |
+| 250 | 2 (3844) | 537.6 | +27 % | 229.8 | 90.8 | -141.9 | 13.2 | 0.295 | 0.601 | 0.104 |
+| 250 | 3 (1708) | 581.8 | +37 % | 228.0 | 86.0 | -140.9 | 7.31 | 0.279 | 0.565 | 0.084 |
+| 250 | 5 (615) | 591.1 | +39 % | 227.6 | 78.1 | -137.9 | 9.17 | 0.231 | 0.400 | 0.091 |
+
+(D/d 150 k = 2 with 12 warm-up revolutions: 159.0 W/m, intensity 0.264; k = 2 at 4 warm-up: 158.6, 0.261.)
+
+Findings: (1) the **power draw is not preserved** at large D/d: +17...20 % at D/d 150 and +27...39 % at D/d
+250 (versus +1 / +4 / +14 % at D/d 45), but nearly independent of k for k = 2...5 (160 +- 2 W/m at D/d 150), so
+the discrepancy looks like a step between k = 1 and any coarse-graining, not a gradual k effect; the cause is
+not known. (2) The charge **centroid height** is preserved within 1 % (k = 2) and 5 % (k = 5) at D/d 150
+and the **toe angle** within 4-5 deg, the shoulder angle within 5-15 deg. (3) Kinetic energy and every
+per-impact statistic change strongly and not monotonically in k (e.g. D/d 150 KE 4.0 / 1.2 / 1.8 / 2.5 J/m for
+k = 1 / 2 / 3 / 5). Stress intensity at k = 2 (0.264) is far from k = 1 (0.368).

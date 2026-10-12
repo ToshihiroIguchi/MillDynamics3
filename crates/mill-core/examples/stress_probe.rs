@@ -176,19 +176,24 @@ fn main() {
     }
     if cases.contains("cg") {
         use mill_core::params::{CoarseGrainingMode, SpeedMode};
-        println!(
-            "## cg: coarse-graining factor k at D/d = 45 (59 % Nc, 16 sub-steps, 12 iterations)
-"
-        );
+        let warm_revs: f64 = arg("--warmrevs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4.0);
+        let cg_dd: f32 = arg("--cgdd").and_then(|v| v.parse().ok()).unwrap_or(45.0);
+        let ks: Vec<f32> = arg("--ks")
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+            .unwrap_or_else(|| vec![1.0, 1.5, 2.0, 3.0]);
+        println!("## cg: coarse-graining factor k at D/d = {cg_dd} (59 % Nc, 16 sub-steps, 12 iterations)");
+        println!();
         println!("| k | balls | power W/m | dissipated W/m | KE J/m | toe deg | shoulder deg | centroid y mm | intensity | shear SE | drop SE |");
         println!("|---|---|---|---|---|---|---|---|---|---|---|");
-        for k in [1.0f32, 1.5, 2.0, 3.0] {
+        for &k in &ks {
             let mut acc = [0.0f64; 9];
             let mut balls = 0usize;
             for seed in 1..=n_seeds {
                 let mut p = Params::default();
                 p.slurry.enabled = false;
-                p.mill.diameter_m = 45.0 * p.media.ball_diameter_m;
+                p.mill.diameter_m = cg_dd * p.media.ball_diameter_m;
                 p.mill.speed_mode = SpeedMode::PercentCritical;
                 p.mill.speed_value = 59.0;
                 p.simulation.substeps = 16;
@@ -199,7 +204,7 @@ fn main() {
                 let rev_s = 60.0 / p.mill.rpm() as f64;
                 let omega = p.mill.omega();
                 let mut sim = Simulation::new(p).unwrap();
-                for _ in 0..(4.0 * rev_s * 60.0) as usize {
+                for _ in 0..(warm_revs * rev_s * 60.0) as usize {
                     sim.step(1.0 / 60.0);
                 }
                 let frames = (4.0 * rev_s * 60.0) as usize;
