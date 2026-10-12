@@ -74,3 +74,16 @@ describe("quality presets", () => {
     expect(presetMatchesFields(preset("impact_stats"), () => undefined)).toBe(false);
   });
 });
+
+describe("presets and coarse-graining", () => {
+  it("no preset changes the coarse-graining mode except to Off", () => {
+    for (const p of QUALITY_PRESETS) {
+      const mode = presetFieldValues(p).find((f) => f.path === "simulation.coarse_graining_mode");
+      if (mode) expect(mode.value, p.id).toBe("off");
+    }
+    for (const id of ["realtime", "balanced", "accuracy"]) {
+      const p = QUALITY_PRESETS.find((x) => x.id === id)!;
+      expect(p.coarseGrainingMode, id).toBeUndefined();
+    }
+  });
+});

@@ -50,7 +50,7 @@ function mediaSubstitutionOf(
       density_kg_m3: media.density_kg_m3,
     },
     simulation.max_balls,
-    (simulation.coarse_graining_mode as CoarseGrainingMode | undefined) ?? "auto",
+    (simulation.coarse_graining_mode as CoarseGrainingMode | undefined) ?? "off",
     simulation.coarse_graining_k ?? 1,
   );
   return { trueDiameterM: eff.trueDiameterM, diameterM: eff.diameterM, ballCount: eff.ballCount, scaleFactor: eff.scaleFactor };
@@ -99,6 +99,12 @@ export function createHud(): Hud {
   mediaBadge.hidden = true;
   el.appendChild(mediaBadge);
 
+  // Coarse-graining tag: shown whenever the live simulation runs enlarged balls (k > 1).
+  const coarseTag = document.createElement("div");
+  coarseTag.className = "hud-coarse";
+  coarseTag.hidden = true;
+  el.appendChild(coarseTag);
+
   // Recording indicator: only shown while video/recorder.ts's `CanvasRecorder` is active (see
   // main.ts's `onToggleRecord`). Elapsed time is sim-time-based (simTime - recordingStartSimTime),
   // not wall-clock, matching how every other duration in this HUD is accounted for.
@@ -135,7 +141,12 @@ export function createHud(): Hud {
       speedRow.classList.toggle("hud-speed-slow", !isRealTime);
       el.classList.toggle("hud-slow-motion", !isRealTime);
 
+      // Prefer the live simulation's own factor (metrics); fall back to the params-derived one.
       const media = mediaSubstitutionOf(state.params);
+      const liveK = state.metrics?.coarse_graining_factor ?? media?.scaleFactor ?? 1;
+      coarseTag.hidden = !(liveK > 1);
+      if (liveK > 1) coarseTag.textContent = `COARSE-GRAINED k=${liveK.toFixed(1)} -- not physically reliable`;
+
       if (media && media.scaleFactor > 1) {
         mediaBadge.hidden = false;
         mediaBadge.textContent =

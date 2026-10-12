@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   criticalSpeedRpm,
+  trueCountGuard,
+  TRUE_COUNT_BLOCK_THRESHOLD,
+  TRUE_COUNT_WARN_THRESHOLD,
   effectiveMedia,
   effectiveSubsteps,
   fluidParticleCountEstimate,
@@ -175,5 +178,22 @@ describe("effectiveSubsteps", () => {
 describe("criticalSpeedRpm", () => {
   it("matches the mill-core formula for a 1 m drum", () => {
     expect(criticalSpeedRpm(1.0)).toBeCloseTo(42.3, 1);
+  });
+});
+
+describe("trueCountGuard", () => {
+  it("only restricts mode off", () => {
+    expect(trueCountGuard("auto", 1e6)).toBe("ok");
+    expect(trueCountGuard("manual", 1e6)).toBe("ok");
+  });
+
+  it("warns above the warn threshold and blocks above the block threshold (off)", () => {
+    expect(TRUE_COUNT_WARN_THRESHOLD).toBe(3000);
+    expect(TRUE_COUNT_BLOCK_THRESHOLD).toBe(30000);
+    expect(trueCountGuard("off", 244)).toBe("ok");
+    expect(trueCountGuard("off", 3000)).toBe("ok");
+    expect(trueCountGuard("off", 3001)).toBe("warn");
+    expect(trueCountGuard("off", 30000)).toBe("warn");
+    expect(trueCountGuard("off", 30001)).toBe("block");
   });
 });

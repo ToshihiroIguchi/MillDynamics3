@@ -19,9 +19,10 @@
 // this specific fidelity gap remains -- or much more aggressive ball coarse-graining than any of
 // these three tiers use.
 //
-// As of the 2 mm ball in a 63 mm drum (see `crates/mill-core/src/params.rs`'s
-// `shipped_defaults_need_no_coarse_graining` test) `N_true` (~244) sits under every tier's
-// `maxBalls`, so no tier coarse-grains -- only `resolution` (fluid particle count) differs. The
+// Coarse-graining is Off by default and no preset changes the mode except `impact_stats`, which
+// sets it to "off" explicitly; `maxBalls` only matters if the user later picks Auto. At the
+// 2 mm ball in a 63 mm drum `N_true` (~244) is small anyway, so only `resolution` (fluid
+// particle count) differs between tiers. The
 // notes below give native (not browser) ms/frame from `examples/perf_probe` with the water default
 // (2026-10-08) and the power error from `examples/coarse_graining_probe --reference`; the older
 // "achieved speed" browser figures in docs/PERF.md pre-date that default.
@@ -99,14 +100,14 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Balanced",
     maxBalls: 300,
     resolution: 30,
-    note: "Native 72 ms/frame (1143 fluid particles). Mill power within about +-3 % of a converged reference at the 2 mm / 63 mm default with water (docs/VERIFICATION.md); a thin film is still coarse. Coarse-graining the balls (k > 1) is not within +-3 %: about +10-20 % power at k = 2.",
+    note: "Native 72 ms/frame (1143 fluid particles). Mill power within about +-3 % of a converged reference at the 2 mm / 63 mm default with water (docs/VERIFICATION.md); a thin film is still coarse. Coarse-graining is Off; if chosen explicitly it is not within +-3 % (about +10-20 % power at k = 2).",
   },
   {
     id: "accuracy",
     label: "Accuracy",
     maxBalls: 600,
     resolution: 50,
-    note: "Native 202 ms/frame (3174 fluid particles). The finest tier: mill power within about +-3 % of the converged reference (-1 % at this resolution). Same ball population as every tier at the current default.",
+    note: "Native 202 ms/frame (3174 fluid particles). The finest tier: mill power within about +-3 % of the converged reference (-1 % at this resolution). Same true-size ball population as every tier at the current default (coarse-graining Off).",
   },
   {
     id: "impact_stats",
@@ -116,6 +117,6 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     substeps: 32,
     demIterations: 12,
     coarseGrainingMode: "off",
-    note: "About 4x the sub-steps of the default (32 vs 8, plus 12 ball-solver iterations), so the simulation runs several times slower than real time. The Grinding proxy impact statistics are only reasonably converged this way: impact counts still drift roughly +5 % per doubling of sub-steps and mean stress energies move 3-5 %, so compare runs only with identical settings. Coarse-graining is off (true-size balls), so the ball count can be large for small balls: warn above a few thousand balls.",
+    note: "About 4x the sub-steps of the default (32 vs 8, plus 12 ball-solver iterations), so the simulation runs several times slower than real time. The Grinding proxy impact statistics are only reasonably converged this way: impact counts still drift roughly +5 % per doubling of sub-steps and mean stress energies move 3-5 %, so compare runs only with identical settings. Coarse-graining is off (true-size balls), so the ball count can be large for small balls (the panel warns above 3000 and blocks Apply above 30000 true balls).",
   },
 ];

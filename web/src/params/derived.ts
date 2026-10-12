@@ -41,6 +41,24 @@ export function trueBallCount(diameterM: number, media: MediaLike): number {
   return (media.fill_fraction * media.packing_fraction_2d * drumArea) / (Math.PI * rTrue * rTrue);
 }
 
+/** With coarse-graining Off, a true ball count above this draws an amber "much slower than real time" warning. */
+export const TRUE_COUNT_WARN_THRESHOLD = 3000;
+/** With coarse-graining Off, a true ball count above this blocks Apply (coarse-graining must then be chosen explicitly). */
+export const TRUE_COUNT_BLOCK_THRESHOLD = 30000;
+
+export type TrueCountGuard = "ok" | "warn" | "block";
+
+/**
+ * Guards the true-size ball count. Only mode "off" is restricted (auto/manual bound the count by
+ * construction and keep their existing behaviour): warn above 3000, block above 30000.
+ */
+export function trueCountGuard(mode: string, trueCount: number): TrueCountGuard {
+  if (mode !== "off") return "ok";
+  if (trueCount > TRUE_COUNT_BLOCK_THRESHOLD) return "block";
+  if (trueCount > TRUE_COUNT_WARN_THRESHOLD) return "warn";
+  return "ok";
+}
+
 /** Mirrors `CoarseGrainingMode` (params.rs). */
 export type CoarseGrainingMode = "auto" | "off" | "manual";
 

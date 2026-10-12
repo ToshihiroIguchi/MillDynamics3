@@ -94,7 +94,7 @@ export const SCHEMA: FieldSchema[] = [
   // Media: geometry/mass fields (baked into the ball population at seed time, params.rs's
   // `Params::effective_media`) need a reset; the physics coefficients below them are read fresh
   // every sub-step (`dem.rs`'s `step_with_external_forces`) and hot-apply correctly.
-  { path: "media.ball_diameter_m", group: "Media", label: "Ball diameter", unit: "mm", type: "number", min: 0.5, max: 200, step: 0.1, displayScale: 1000, resetRequired: true, help: "True diameter of one grinding ball. With Fill fraction and 2D packing fraction it sets the true ball count; ignored while coarse-graining is active (see Max balls)." },
+  { path: "media.ball_diameter_m", group: "Media", label: "Ball diameter", unit: "mm", type: "number", min: 0.5, max: 200, step: 0.1, displayScale: 1000, resetRequired: true, help: "True diameter of one grinding ball. With Fill fraction and 2D packing fraction it sets the true ball count; ignored while coarse-graining is active (Coarse-graining is Off by default)." },
   { path: "media.fill_fraction", group: "Media", label: "Fill fraction (J)", type: "number", min: 0, max: 0.9, step: 0.01, resetRequired: true, help: "Fraction of the drum cross-section occupied by the ball bed at rest, voids included (industrial range 0.25-0.45)." },
   { path: "media.packing_fraction_2d", group: "Media", label: "2D packing fraction", type: "number", min: 0.5, max: 0.907, step: 0.001, resetRequired: true, help: "Area fraction of a settled bed that is solid ball (the rest is void). 0.907 is the hexagonal maximum; random 2D packing is about 0.82. Converts J into a ball count." },
   { path: "media.density_kg_m3", group: "Media", label: "Media density", unit: "kg/m3", type: "number", min: 100, max: 20000, step: 100, resetRequired: true, help: "Material density of the balls (steel is about 7700 kg/m3). Sets ball mass, hence inertia, impact energy and power draw." },
@@ -146,21 +146,21 @@ export const SCHEMA: FieldSchema[] = [
   // fresh every sub-step/call; `max_balls`, `seed`, and `resolution` are baked into the ball/fluid
   // population at seed time (same reason as `media.*`/`slurry.*` geometry above -- `resolution`
   // sets the fluid lattice's spacing/kernel radius/particle mass in `seed_lattice`).
-  { path: "simulation.max_balls", group: "Numerical accuracy", label: "Max balls (coarse-graining target)", type: "number", min: 10, max: 50000, step: 10, resetRequired: true, help: "Upper bound on simulated balls. If the true count exceeds it, balls are enlarged by k (coarse-graining) and Ball diameter stops mattering." },
+  { path: "simulation.max_balls", group: "Numerical accuracy", label: "Max balls (Auto coarse-graining only)", type: "number", min: 10, max: 50000, step: 10, resetRequired: true, help: "Only used when Coarse-graining is Auto: the upper bound on simulated balls, above which balls are enlarged by k and Ball diameter stops mattering. Ignored (greyed out) when Coarse-graining is Off or Manual, which is the default." },
   {
     path: "simulation.coarse_graining_mode",
     group: "Numerical accuracy",
     label: "Coarse-graining",
     type: "select",
     options: [
-      { value: "auto", label: "Auto (target Max balls)" },
-      { value: "off", label: "Off (always true ball size)" },
-      { value: "manual", label: "Manual (fixed k)" },
+      { value: "off", label: "Off (true-size balls, default)" },
+      { value: "auto", label: "Auto (coarse-grained, target Max balls)" },
+      { value: "manual", label: "Manual (coarse-grained, fixed k)" },
     ],
     resetRequired: true,
-    help: "How balls are enlarged to keep the count manageable while preserving total charge mass and footprint. Auto targets Max balls; Off always simulates true-size balls (can be very slow); Manual uses a fixed k.",
+    help: "Coarse-graining enlarges the balls to keep the count small, and it changes the physics. It is Off by default and should be used only for qualitative charge-shape checks. It does not preserve kinetic energy, per-impact stress statistics or the shoulder angle, and mill power draw is off by 17-39 % at large D/d (docs/VERIFICATION.md). Auto targets Max balls; Manual uses a fixed k. Off simulates true-size balls, which can be very slow for small balls.",
   },
-  { path: "simulation.coarse_graining_k", group: "Numerical accuracy", label: "Manual k", type: "number", min: 1, max: 1000, step: 0.1, resetRequired: true, help: "Ball-size scale factor used when Coarse-graining is Manual (1 = true size). Ignored in Auto and Off." },
+  { path: "simulation.coarse_graining_k", group: "Numerical accuracy", label: "Manual k (Manual coarse-graining only)", type: "number", min: 1, max: 1000, step: 0.1, resetRequired: true, help: "Ball-size scale factor used only when Coarse-graining is Manual (1 = true size; k > 1 changes the physics). Ignored (greyed out) in Off and Auto." },
   { path: "simulation.resolution", group: "Numerical accuracy", label: "Slurry resolution (particles/radius)", type: "number", min: 4, max: 200, step: 1, resetRequired: true, help: "Fluid particles across the drum radius; higher is more accurate but slower. Slurry barely seeps into a settled ball bed in this model: fluid spacing is comparable to the gaps between balls (finer resolution helps only up to a point) and 2D packing has a lower, less-connected void fraction than 3D." },
   { path: "simulation.substeps", group: "Numerical accuracy", label: "Sub-steps / frame", type: "number", min: 1, max: 64, step: 1, resetRequired: false, help: "Solver sub-steps per rendered frame. More is more stable and accurate but costs proportionally more time per frame (32 sub-steps is about 4x the cost of 8); the Grinding proxy impact statistics need about 32 to be reasonably converged; the solver may raise this automatically for coarse-grained charges (see Effective sub-steps in Derived)." },
   { path: "simulation.dem_iterations", group: "Numerical accuracy", label: "Ball solver iterations", type: "number", min: 1, max: 20, step: 1, resetRequired: false, help: "Contact-solver passes per sub-step for the balls. More passes reduce ball overlap at a higher cost." },

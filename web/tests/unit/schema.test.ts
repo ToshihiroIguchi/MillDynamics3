@@ -68,7 +68,7 @@ describe("paramsChangeRequiresReset", () => {
     const before = baseParams();
     let after = withPath(before, "mill.speed_value", 45); // hot
     after = withPath(after, "simulation.max_balls", 300); // resetRequired
-    expect(paramsChangeRequiresReset(before, after)).toBe("Max balls (coarse-graining target)");
+    expect(paramsChangeRequiresReset(before, after)).toBe("Max balls (Auto coarse-graining only)");
   });
 
   it("every SCHEMA path round-trips through getPath/withPath on the base fixture", () => {
@@ -85,5 +85,21 @@ describe("paramsChangeRequiresReset", () => {
     for (const field of SCHEMA as FieldSchema[]) {
       expect(typeof field.resetRequired, `${field.path} is missing resetRequired`).toBe("boolean");
     }
+  });
+});
+
+describe("coarse-graining schema", () => {
+  const mode = SCHEMA.find((f) => f.path === "simulation.coarse_graining_mode");
+
+  it("lists Off first with an explicit default label", () => {
+    expect(mode?.options?.map((o) => o.value)).toEqual(["off", "auto", "manual"]);
+    expect(mode?.options?.[0]?.label).toBe("Off (true-size balls, default)");
+    expect(mode?.options?.[1]?.label).toBe("Auto (coarse-grained, target Max balls)");
+    expect(mode?.options?.[2]?.label).toBe("Manual (coarse-grained, fixed k)");
+  });
+
+  it("help warns that coarse-graining changes the physics", () => {
+    expect(mode?.help).toMatch(/changes the physics/);
+    expect(mode?.help).toMatch(/17-39 %/);
   });
 });

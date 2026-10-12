@@ -243,6 +243,16 @@ body.params-collapsed .params-panel {
   color: #ffd27a;
 }
 
+/* Coarse-graining tag (ui/hud.ts): amber, bold, shown while the live k > 1. */
+.hud-coarse {
+  color: #ffb020;
+  font-weight: 700;
+}
+
+.hud-coarse[hidden] {
+  display: none;
+}
+
 /* Recording indicator (ui/hud.ts): a pulsing red dot + sim-time-based elapsed duration, shown only
    while video/recorder.ts's `CanvasRecorder` is active. Reuses the same dot-pulse keyframe as the
    speed indicator above and the toolbar's Record button badge. */

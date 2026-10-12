@@ -753,11 +753,11 @@ export function createMetricsPanel(
       coarseGrainingWarnEl.hidden = kReason === null;
       if (kReason !== null && state.metrics) {
         const k = state.metrics.coarse_graining_factor.toFixed(2);
-        const nTrue = state.metrics.true_ball_count.toFixed(0);
         coarseGrainingWarnEl.textContent =
           `Coarse-graining is active (k = ${k}). Collision rate and the impact energy distribution ` +
           `are hidden -- impact counts scale as 1/k^2 and per-impact energies as k^2, so both would ` +
-          `be misleading. Raise Max balls above ${nTrue} to show them.`;
+          `be misleading. Coarse-graining was chosen explicitly; switch it off (Numerical accuracy -> ` +
+          `Coarse-graining = Off) to show them.`;
       }
     }
 
@@ -768,7 +768,8 @@ export function createMetricsPanel(
         proxyBannerEl.textContent =
           `Coarse-graining is active (k = ${state.metrics.coarse_graining_factor.toFixed(2)}). The 3D grinding ` +
           `proxy is hidden: the simulated ball is not the real ball, so impact energies and rates are not ` +
-          `meaningful. Raise Max balls above ${state.metrics.true_ball_count.toFixed(0)} to show it.`;
+          `meaningful. Coarse-graining was chosen explicitly; switch it off (Numerical accuracy -> ` +
+          `Coarse-graining = Off) to show it.`;
       } else if (!proxyBannerEl.hidden) {
         proxyBannerEl.textContent = "No grinding-proxy data yet.";
       }

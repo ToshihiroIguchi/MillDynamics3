@@ -112,8 +112,10 @@ radius)** reads much smaller with no lifters (~1-2%) but **~31-33% with `lifters
 
 `docs/PHYSICS.md` §3's mass-preserving substitution: when the true physical ball count exceeds
 `simulation.max_balls`, the solver simulates `Simulated balls` fewer, larger discs (`Effective
-diameter`, scaled by `k`) instead. `k = 1` means coarse-graining is inactive. **The shipped
-default needs no coarse-graining** (`k = 1.0` at a 63 mm drum / 2 mm balls, `N_true` ~244, under every quality
+diameter`, scaled by `k`) instead. `k = 1` means coarse-graining is inactive. **Coarse-graining is Off by default**
+(`simulation.coarse_graining_mode = "off"`; it must be chosen explicitly as Auto or Manual because it does not preserve
+per-impact statistics or kinetic energy, `docs/VERIFICATION.md`). **The shipped
+default needs no coarse-graining either** (`k = 1.0` at a 63 mm drum / 2 mm balls, `N_true` ~244, under every quality
 preset's `max_balls`, including the smallest, 300) -- the default drum/ball sizes were chosen for
 exactly this reason. Coarse-graining is still very much a live path, though: dropping to a smaller ball
 diameter, or raising `media.fill_fraction`/`mill.diameter_m` enough to push `N_true` back above
@@ -125,9 +127,8 @@ banner explaining why: both are derived from *simulated* impacts, whose count sc
 whose energy scales as `k^2` relative to the true (uncoarsened) population, since a coarse-grained
 ball's mass is `k^2` times a true ball's (`docs/PHYSICS.md` §9). Every other metric on this panel
 (power draw, torque, total kinetic energy, toe/shoulder, overlap fractions) is unaffected, since
-total charge mass is preserved regardless of `k`. Raise `Max balls` above `True ball count` (or, as
-above, keep `True ball count` below `Max balls` in the first place) to disable coarse-graining and
-see genuine per-impact statistics.
+total charge mass is preserved regardless of `k`. Because coarse-graining is only active when chosen explicitly, the banner says so; set
+Numerical accuracy -> Coarse-graining = Off to disable it and see genuine per-impact statistics.
 
 ---
 

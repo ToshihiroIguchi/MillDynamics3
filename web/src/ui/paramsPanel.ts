@@ -17,7 +17,10 @@ import {
   percentCriticalOf,
   rpmOf,
   substepDisplacementOverDiameter,
+  TRUE_COUNT_BLOCK_THRESHOLD,
+  TRUE_COUNT_WARN_THRESHOLD,
   trueBallCount,
+  trueCountGuard,
 } from "../params/derived";
 import { createHelpIcon } from "./helpIcon";
 import { MEDIA_MATERIALS } from "../params/materials";
@@ -186,6 +189,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   let materialSelect: HTMLSelectElement | null = null;
   let materialNote: HTMLParagraphElement | null = null;
   let coarseGrainingWarn: HTMLParagraphElement | null = null;
+  let coarseModeNotice: HTMLParagraphElement | null = null;
 
   /**
    * Resets the Quality preset dropdown to "(custom)" once `simulation.max_balls`/`resolution` no
@@ -419,6 +423,13 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       rowsByPath.set(field.path, row);
       row.appendChild(input);
       details.appendChild(row);
+      if (field.path === "simulation.coarse_graining_mode") {
+        // Persistent amber notice directly under the mode row; shown whenever mode != off.
+        coarseModeNotice = document.createElement("p");
+        coarseModeNotice.className = "params-warn";
+        coarseModeNotice.hidden = true;
+        details.appendChild(coarseModeNotice);
+      }
     }
 
     if (group === "Media") {
@@ -464,6 +475,42 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   derived.className = "params-derived";
   derivedDetails.appendChild(derived);
   form.appendChild(derivedDetails);
+
+  function setRowEnabled(path: string, enabled: boolean): void {
+    const row = rowsByPath.get(path);
+    const input = inputs.get(path);
+    if (input) (input as HTMLInputElement).disabled = !enabled;
+    row?.classList.toggle("is-ineffective", !enabled);
+  }
+
+  function trueCountBlockMessage(nTrue: number): string {
+    return (
+      `True ball count ${nTrue.toFixed(0)} exceeds ${TRUE_COUNT_BLOCK_THRESHOLD} with Coarse-graining Off: ` +
+      `too slow to run. Increase Ball diameter or lower Fill fraction, or, if you really want a ` +
+      `coarse-grained run, choose Coarse-graining Auto or Manual explicitly.`
+    );
+  }
+
+  /** Error text when the form's true ball count is too large to run with coarse-graining Off, else null. */
+  function trueCountError(): string | null {
+    const dIn = inputs.get("mill.diameter_m");
+    const bIn = inputs.get("media.ball_diameter_m");
+    const fIn = inputs.get("media.fill_fraction");
+    const pIn = inputs.get("media.packing_fraction_2d");
+    const mIn = inputs.get("simulation.coarse_graining_mode");
+    if (!dIn || !bIn || !fIn || !pIn || !mIn) return null;
+    const dField = SCHEMA.find((f) => f.path === "mill.diameter_m");
+    const bField = SCHEMA.find((f) => f.path === "media.ball_diameter_m");
+    const drum = dField ? fromDisplayValue(dField, Number(dIn.value)) : Number(dIn.value);
+    const ball = bField ? fromDisplayValue(bField, Number(bIn.value)) : Number(bIn.value);
+    const n = trueBallCount(drum, {
+      ball_diameter_m: ball,
+      fill_fraction: Number(fIn.value),
+      packing_fraction_2d: Number(pIn.value),
+      density_kg_m3: 0,
+    });
+    return trueCountGuard(mIn.value, n) === "block" ? trueCountBlockMessage(n) : null;
+  }
 
   function refreshDerived(): void {
     const diameterInput = inputs.get("mill.diameter_m");
@@ -522,14 +569,20 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     const substeps = Number(substepsInput.value);
     const resolution = Number(resolutionInput.value);
     const slurryFill = Number(slurryFillInput.value);
-    const coarseGrainingMode = (coarseModeInput.value || "auto") as CoarseGrainingMode;
+    const coarseGrainingMode = (coarseModeInput.value || "off") as CoarseGrainingMode;
     const coarseGrainingK = Number(coarseKInput.value);
 
-    // "Manual k" is only meaningful (and only editable) when the mode select is set to Manual --
-    // hide the row the rest of the time so a stale/unused value can't be mistaken for the one
-    // actually in effect (Off ignores it; Auto derives k from Max balls instead).
-    const coarseGrainingKRow = rowsByPath.get("simulation.coarse_graining_k");
-    if (coarseGrainingKRow) coarseGrainingKRow.hidden = coarseGrainingMode !== "manual";
+    // Dependent rows: Max balls only matters in Auto, Manual k only in Manual. They are greyed out
+    // and disabled (still readable; readFormParams reads their values regardless) otherwise.
+    setRowEnabled("simulation.max_balls", coarseGrainingMode === "auto");
+    setRowEnabled("simulation.coarse_graining_k", coarseGrainingMode === "manual");
+    if (coarseModeNotice) {
+      coarseModeNotice.hidden = coarseGrainingMode === "off";
+      coarseModeNotice.textContent =
+        "Coarse-grained run: results are not physically reliable. Kinetic energy, per-impact stress " +
+        "statistics and the shoulder angle are not preserved and power draw is off by 17-39 % at " +
+        "large D/d. Use only for qualitative charge-shape checks; set Coarse-graining to Off for any measurement.";
+    }
 
     const nTrue = trueBallCount(diameterM, media);
     const eff = effectiveMedia(diameterM, media, maxBalls, coarseGrainingMode, coarseGrainingK);
@@ -683,12 +736,14 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     if (coarseGrainingWarn) {
       const messages: string[] = [];
       const nSimVsTarget = maxBalls > 0 ? eff.ballCount / maxBalls : 0;
-      if (coarseGrainingMode === "off" && nSimVsTarget > 2) {
+      const guard = trueCountGuard(coarseGrainingMode, nTrue);
+      if (guard === "warn") {
         messages.push(
-          `Coarse-graining is Off: the solver will simulate the true ball count (${eff.ballCount}), ` +
-            `${nSimVsTarget.toFixed(1)}x above your Max balls target (${maxBalls}). Expect a large ` +
-            `slowdown and higher memory use; switch to Auto or Manual to bound N_sim.`,
+          `Coarse-graining is Off: the solver will simulate the true ball count (${eff.ballCount}). ` +
+            `Above ${TRUE_COUNT_WARN_THRESHOLD} balls the simulation runs much slower than real time.`,
         );
+      } else if (guard === "block") {
+        messages.push(trueCountBlockMessage(nTrue));
       }
       if (coarseGrainingMode === "manual") {
         if (nSimVsTarget > 2) {
@@ -762,6 +817,14 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const failures = validate();
+    const countError = failures.length === 0 ? trueCountError() : null;
+    if (countError) {
+      errorBanner.hidden = false;
+      errorBanner.textContent = countError;
+      setStatus("error");
+      rowsByPath.get("simulation.coarse_graining_mode")?.scrollIntoView({ block: "center" });
+      return;
+    }
     if (failures.length > 0) {
       for (const row of rowsByPath.values()) {
         row.classList.remove("is-invalid");
