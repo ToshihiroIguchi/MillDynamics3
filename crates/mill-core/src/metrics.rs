@@ -728,6 +728,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 300;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -881,6 +882,7 @@ mod tests {
         let mut params = Params::default();
         params.slurry.dye_pattern = DyePattern::LeftRight;
         params.simulation.max_balls = 150;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.simulation.resolution = 20; // keep the fluid population small for a fast test
         let mut sim = Simulation::new(params).unwrap();
 
@@ -956,6 +958,7 @@ mod tests {
 
         let mut params = Params::default();
         params.simulation.max_balls = 300;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         // The shipped 2 mm / 63 mm default at `dem_iterations = 2` shows 0.3-0.5 radius transient
         // ball overlap (measured 2026-09-29: dry and static drum too, so it is DEM contact
         // resolution of a dense 244-ball pile, not the slurry); 6 iterations bring it to ~0.12.
@@ -1049,6 +1052,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 150;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.simulation.resolution = 15;
         params.validate().unwrap();
 

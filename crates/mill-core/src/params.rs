@@ -33,10 +33,13 @@ pub enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoarseGrainingMode {
-    /// Auto-derive `k` from `simulation.max_balls` (the historical, and still default, behavior):
+    /// Auto-derive `k` from `simulation.max_balls` (the historical behavior, no longer the default):
     /// `k = sqrt(N_true / max_balls)` when `N_true > max_balls`, else `k = 1` (no coarsening).
+    /// Must be chosen explicitly: coarse-graining changes the physics (docs/VERIFICATION.md, "What
+    /// coarse-graining preserves"; power draw +17...39 % at large D/d, per-impact statistics not
+    /// preserved).
     Auto,
-    /// Force `k = 1`: never coarse-grain, regardless of `max_balls`. `N_sim` then equals `N_true`
+    /// Force `k = 1`: never coarse-grain, regardless of `max_balls`. **The default.** `N_sim` then equals `N_true`
     /// and can exceed `max_balls` by a large margin for a small `media.ball_diameter_m` -- the UI
     /// must warn when that makes `N_sim` unreasonably large (see `paramsPanel.ts`).
     Off,
@@ -489,7 +492,7 @@ impl Default for SimulationParams {
             frame_budget_ms: 12.0,
             max_balls: 600,
             seed: 1,
-            coarse_graining_mode: CoarseGrainingMode::Auto,
+            coarse_graining_mode: CoarseGrainingMode::Off,
             coarse_graining_k: 1.0,
         }
     }
@@ -813,6 +816,7 @@ mod tests {
             },
             simulation: SimulationParams {
                 max_balls: 2000,
+                coarse_graining_mode: CoarseGrainingMode::Auto,
                 ..SimulationParams::default()
             },
             ..Params::default()
@@ -840,6 +844,10 @@ mod tests {
             media: MediaParams {
                 ball_diameter_m: 0.010,
                 ..MediaParams::default()
+            },
+            simulation: SimulationParams {
+                coarse_graining_mode: CoarseGrainingMode::Auto,
+                ..SimulationParams::default()
             },
             ..Params::default()
         };
@@ -926,6 +934,26 @@ mod tests {
     }
 
     #[test]
+    fn coarse_graining_is_off_by_default_and_needs_an_explicit_choice() {
+        let mut params = Params::default();
+        assert_eq!(
+            params.simulation.coarse_graining_mode,
+            CoarseGrainingMode::Off
+        );
+        // Even far more balls than `max_balls` are NOT coarse-grained unless asked for.
+        params.media.ball_diameter_m = 0.001;
+        params.simulation.max_balls = 100;
+        let n_true = params.true_ball_count();
+        assert!(n_true > 100.0);
+        let eff = params.effective_media();
+        assert_eq!(eff.scale_factor, 1.0);
+        assert!((eff.ball_count as f32 - n_true).abs() <= 1.0);
+        // The explicit choice still works.
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
+        assert!(params.effective_media().scale_factor > 1.0);
+    }
+
+    #[test]
     fn shipped_defaults_need_no_coarse_graining() {
         // The point of the 2 mm ball / 63 mm drum default: at J = 0.30 / packing 0.82,
         // N_true ~= 244, under every shipped
@@ -937,6 +965,7 @@ mod tests {
         for max_balls in [300u32, 600] {
             let mut params = Params::default();
             params.simulation.max_balls = max_balls;
+            params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
             let n_true = params.true_ball_count();
             assert!(
                 n_true <= max_balls as f32,
@@ -1038,6 +1067,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 1500;
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
         params.simulation.resolution = 15;
 
         let d_eff = params.effective_media().diameter_m;
@@ -1055,6 +1085,7 @@ mod tests {
         let mut params = Params::default();
         params.media.ball_diameter_m = 0.0006;
         params.simulation.max_balls = 50_000;
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
         params.simulation.resolution = 4;
 
         let resolution = params.effective_fluid_resolution();
@@ -1069,6 +1100,7 @@ mod tests {
         for max_balls in [300u32, 600] {
             let mut params = Params::default();
             params.simulation.max_balls = max_balls;
+            params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
             assert_eq!(
                 params.effective_substeps(),
                 16,
@@ -1107,6 +1139,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 1500;
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
         params.simulation.resolution = 15;
 
         let substeps = params.effective_substeps();
@@ -1126,6 +1159,7 @@ mod tests {
         let mut params = Params::default();
         params.media.ball_diameter_m = 0.0006;
         params.simulation.max_balls = 50_000;
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
 
         let substeps = params.effective_substeps();
         assert!(substeps <= 16);

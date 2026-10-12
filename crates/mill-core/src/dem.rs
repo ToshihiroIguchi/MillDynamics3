@@ -1630,6 +1630,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 150;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -1688,6 +1689,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 300;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -1810,6 +1812,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 300;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -1907,6 +1910,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 300;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -1988,6 +1992,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 400;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -2083,6 +2088,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 400;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -2154,6 +2160,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 400;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();

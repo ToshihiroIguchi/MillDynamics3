@@ -581,6 +581,8 @@ mod tests {
         // Legacy 1 m drum: at the shipped 2 mm / 63 mm default `effective_substeps` raises to 16.
         params.mill.diameter_m = 1.0;
         params.simulation.substeps = 8;
+        // 2 mm balls in a 1 m drum are ~61 500 discs: this test needs the coarse-grained population.
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         let sim = Simulation::new(params).unwrap();
         assert!((sim.fixed_sub_dt() - 1.0 / 480.0).abs() < 1e-9);
     }
@@ -614,6 +616,7 @@ mod tests {
     fn reset_frame_stats_zeroes_the_per_frame_diagnostics() {
         let mut params = Params::default();
         params.simulation.max_balls = 100;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         let mut sim = Simulation::new(params).unwrap();
         for _ in 0..30 {
             sim.step_fixed();
@@ -698,6 +701,7 @@ mod tests {
         let mut params = Params::default();
         params.mill.speed_value = 0.0; // isolate settling under gravity from wall-driven motion
         params.simulation.max_balls = 100;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         let mut sim = Simulation::new(params).unwrap();
         let start: Vec<_> = sim.balls().x.clone();
 
@@ -725,6 +729,7 @@ mod tests {
         let mut params = Params::default();
         // Keep it small so this integration test runs quickly.
         params.simulation.max_balls = 100;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         let mut sim = Simulation::new(params).unwrap();
         assert!(
             !sim.fluid().x.is_empty(),
@@ -790,6 +795,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 150;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let effective = params.effective_media();
@@ -893,6 +899,7 @@ mod tests {
                 ..Params::default()
             };
             params.simulation.max_balls = 150;
+            params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
             params.validate().unwrap();
 
             let mut sim = Simulation::new(params).unwrap();
@@ -953,6 +960,7 @@ mod tests {
             ..Params::default()
         };
         params.simulation.max_balls = 150;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
 
         let mut sim = Simulation::new(params).unwrap();
@@ -997,6 +1005,7 @@ mod tests {
         params.mill.speed_value = 30.0;
         params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 150;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         let mut sim = Simulation::new(params).unwrap();
 
         for _ in 0..(3 * 60) {
@@ -1094,6 +1103,7 @@ mod tests {
         params.mill.speed_value = 30.0;
         params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 1500;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.simulation.resolution = 15;
         params.validate().unwrap();
 
@@ -1160,6 +1170,7 @@ mod tests {
         params.mill.speed_value = 30.0;
         params.media.ball_diameter_m = 0.010;
         params.simulation.max_balls = 1500;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.simulation.resolution = 15;
         params.validate().unwrap();
 
@@ -1195,6 +1206,7 @@ mod tests {
         let mut params = Params::default();
         params.simulation.resolution = 15;
         params.simulation.max_balls = 100;
+        params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;
         params.validate().unwrap();
         let omega = params.mill.omega() as f64;
         let mut sim = Simulation::new(params).unwrap();

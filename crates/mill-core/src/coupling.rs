@@ -965,6 +965,7 @@ mod tests {
             lifters: LiftersParams::default(), // count = 0, smooth wall
             simulation: SimulationParams {
                 max_balls: 150,
+                coarse_graining_mode: crate::params::CoarseGrainingMode::Auto,
                 resolution: 15,
                 ..SimulationParams::default()
             },
@@ -1154,6 +1155,7 @@ mod tests {
         // actually starts at, matching the reported screenshots exactly.
         params.simulation = SimulationParams {
             max_balls: 150,
+            coarse_graining_mode: crate::params::CoarseGrainingMode::Auto,
             resolution: 15,
             ..params.simulation
         };

@@ -43,6 +43,7 @@ fn main() {
     }
     if let Ok(v) = std::env::var("PROBE_MAX_BALLS") {
         params.simulation.max_balls = v.parse().expect("PROBE_MAX_BALLS");
+        params.simulation.coarse_graining_mode = mill_core::params::CoarseGrainingMode::Auto;
     }
     println!(
         "max_balls={} slurry={} rpm-mode value={}",

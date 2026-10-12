@@ -85,6 +85,7 @@ fn main() {
 
     let mut params = Params::default();
     params.simulation.max_balls = args.max_balls;
+    params.simulation.coarse_graining_mode = mill_core::params::CoarseGrainingMode::Auto;
     params.simulation.resolution = args.resolution;
     params.simulation.seed = args.seed;
     params.slurry.enabled = true;
