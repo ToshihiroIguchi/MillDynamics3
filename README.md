@@ -119,3 +119,16 @@ npm run e2e  # requires scripts/build-wasm.sh (or .ps1 on Windows) to have been 
   3D model. Results are qualitative, not a quantitative replacement for a 3D DEM/CFD study.
 - Default drum wall is smooth (no lifters); lifters can be enabled and configured in the Parameters
   modal.
+
+## Run with Python only (no Rust / Node.js)
+
+The WASM core and web UI are shipped prebuilt in `python/milldynamics/static/`.
+
+```
+python run.py                 # from a checkout, nothing to install
+# or
+pip install .                 # then: milldynamics   (or: python -m milldynamics)
+```
+
+Options: `--port N` (default 8765), `--no-browser`. Only the standard library is used.
+Maintainers refresh the bundle after changing Rust/TS with `python scripts/bundle_python.py`.

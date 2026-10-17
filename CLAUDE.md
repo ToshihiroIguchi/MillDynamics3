@@ -34,3 +34,9 @@ See docs/PLAN.md, docs/PHYSICS.md, docs/PARAMETERS.md.
 - Deterministic: every run is reproducible from `Params` + `seed`.
 - `cargo fmt`, `cargo clippy -D warnings`, `npm run lint` must pass before finishing a task.
 - Do not commit `web/src/wasm/` build output or `target/`.
+- `python/milldynamics/static/` (prebuilt WASM + web bundle for the Python-only launcher, `python run.py`)
+  IS committed on purpose, unlike `web/src/wasm/`. After any change under `crates/` or `web/src/`,
+  run `python scripts/bundle_python.py` before finishing and commit the refreshed bundle, otherwise
+  the Python launcher serves stale code. The Python package must stay standard-library only.
+- Text files are UTF-8 with LF line endings (`.gitattributes`). In Python always pass `encoding="utf-8"` to
+  `open()` / `read_text()` / `write_text()`; the Windows default (cp932) breaks on non-ASCII.

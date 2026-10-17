@@ -29,3 +29,10 @@ npm-debug.log*
 web/test-results/
 web/playwright-report/
 web/coverage/
+
+# Python packaging
+build/
+*.egg-info/
+__pycache__/
+# Python launcher bundle: built by CI (python-release job) or scripts/bundle_python.py
+python/milldynamics/static/
