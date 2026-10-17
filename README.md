@@ -122,13 +122,19 @@ npm run e2e  # requires scripts/build-wasm.sh (or .ps1 on Windows) to have been 
 
 ## Run with Python only (no Rust / Node.js)
 
-The WASM core and web UI are shipped prebuilt in `python/milldynamics/static/`.
+The WASM core and web UI are built by CI and published on the rolling `python-latest` release.
 
 ```
-python run.py                 # from a checkout, nothing to install
-# or
-pip install .                 # then: milldynamics   (or: python -m milldynamics)
+pip install https://github.com/ToshihiroIguchi/MillDynamics3/releases/download/python-latest/milldynamics-0.1.0-py3-none-any.whl
+milldynamics                   # or: python -m milldynamics
 ```
 
-Options: `--port N` (default 8765), `--no-browser`. Only the standard library is used.
-Maintainers refresh the bundle after changing Rust/TS with `python scripts/bundle_python.py`.
+Alternative, from a clone (nothing to install; the bundle is downloaded on first run):
+
+```
+python run.py
+```
+
+Options: `--port N` (default 8765; falls back to a free port if busy), `--no-browser`. Only the
+standard library is used. Maintainers can build the bundle locally (needs Rust + Node.js) with
+`python scripts/bundle_python.py`.

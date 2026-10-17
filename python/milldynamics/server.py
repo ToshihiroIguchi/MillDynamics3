@@ -5,10 +5,13 @@ import http.server
 import threading
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
-STATIC_DIR = Path(__file__).parent / "static"
+from .fetch import STATIC_DIR, ensure_static
+
 # The bundle is built with Vite `base: "/MillDynamics3/"`, so every asset URL is rooted here.
 BASE_PATH = "/MillDynamics3/"
+DEFAULT_PORT = 8765
 
 _TYPES = {
     ".wasm": "application/wasm",
@@ -24,11 +27,18 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path in ("", "/"):
-            self.send_response(302)
-            self.send_header("Location", BASE_PATH)
-            self.end_headers()
+            self._redirect(302, BASE_PATH)
+            return
+        if self.path == BASE_PATH.rstrip("/"):
+            self._redirect(301, BASE_PATH)
             return
         super().do_GET()
+
+    def _redirect(self, code: int, location: str) -> None:
+        self.send_response(code)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def translate_path(self, path: str) -> str:
         if path.startswith(BASE_PATH):
@@ -41,16 +51,34 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
-    """Serve the simulator until interrupted (Ctrl+C)."""
-    if not (STATIC_DIR / "index.html").exists():
-        raise RuntimeError(
-            f"{STATIC_DIR} has no index.html; run `python scripts/bundle_python.py` first."
-        )
-    handler = functools.partial(_Handler, directory=str(STATIC_DIR))
-    with http.server.ThreadingHTTPServer((host, port), handler) as httpd:
+def make_server(
+    host: str = "127.0.0.1", port: int = 8765, static_dir: Path = STATIC_DIR
+) -> http.server.ThreadingHTTPServer:
+    """Create (but do not start) the HTTP server serving ``static_dir``."""
+    handler = functools.partial(_Handler, directory=str(static_dir))
+    return http.server.ThreadingHTTPServer((host, port), handler)
+
+
+def serve(
+    host: str = "127.0.0.1", port: Optional[int] = None, open_browser: bool = True
+) -> None:
+    """Serve the simulator until interrupted (Ctrl+C).
+
+    ``port=None`` means the default (8765), falling back to a free port if it is busy; an
+    explicit port that is busy is an error.
+    """
+    ensure_static(STATIC_DIR)
+    try:
+        httpd = make_server(host, DEFAULT_PORT if port is None else port)
+    except OSError as exc:
+        if port is not None:
+            raise RuntimeError(
+                f"Port {port} is not available ({exc}); choose another with --port, or 0 for any free port."
+            ) from exc
+        httpd = make_server(host, 0)
+    with httpd:
         url = f"http://{host}:{httpd.server_address[1]}{BASE_PATH}"
-        print(f"MillDynamics3 running at {url}  (Ctrl+C to stop)")
+        print(f"MillDynamics3 running at {url}  (Ctrl+C to stop)", flush=True)
         if open_browser:
             threading.Timer(0.3, webbrowser.open, args=(url,)).start()
         try:

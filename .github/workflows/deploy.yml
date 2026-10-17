@@ -81,6 +81,13 @@ jobs:
         with:
           path: web/dist
 
+      # Same bundle again as a plain artifact, for the `python-release` job.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
   # Publish the artifact `build` uploaded. Least-privilege: only this job gets Pages write access.
   deploy:
     needs: build
@@ -94,3 +101,45 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Package the Python-only launcher: a pure wheel (bundle inside) plus a standalone static zip,
+  # published on the rolling prerelease `python-latest` (replaced on every push to main).
+  python-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: python/milldynamics/static
+
+      - name: Build wheel and static zip
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip wheel . --no-deps -w pydist/
+          (cd python/milldynamics/static && zip -qr "$GITHUB_WORKSPACE/pydist/milldynamics-static.zip" .)
+          ls -l pydist
+
+      - name: Test Python launcher
+        run: python -m unittest discover python/tests
+        env:
+          PYTHONPATH: python
+
+      - name: Replace rolling prerelease python-latest
+        run: |
+          gh release delete python-latest --yes --cleanup-tag || true
+          gh release create python-latest pydist/*.whl pydist/milldynamics-static.zip \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Python launcher (latest main)" \
+            --notes "Rolling prerelease rebuilt on every push to main. Install: pip install the .whl asset, then run milldynamics."
