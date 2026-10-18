@@ -22,8 +22,14 @@ test("derived N_sim readout in the parameters panel never exceeds the max-balls 
 
   await expect(page.locator("#params-panel")).toBeVisible();
 
-  // "Max balls" lives in the "Numerical accuracy" group, which is collapsed by default.
-  const maxBallsInput = await openField(page, "Max balls (coarse-graining target)");
+  // Coarse-graining is Off by default, which hides Max balls and makes the N_sim <= Max balls
+  // invariant moot; switch to Auto first (this also opens the collapsed "Numerical accuracy" group).
+  const modeRow = page.locator(".params-row", { has: page.locator("span", { hasText: "Coarse-graining" }) });
+  await modeRow.locator("xpath=ancestor::details").evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
+  await modeRow.locator("select").selectOption("auto");
+  const maxBallsInput = await openField(page, "Max balls (Auto coarse-graining only)");
   const maxBallsValue = Number(await maxBallsInput.inputValue());
 
   const nSimDd = page.locator("dt", { hasText: "Simulated balls (N_sim)" }).locator("xpath=following-sibling::dd[1]");
@@ -137,4 +143,55 @@ test("an out-of-range value shows a visible error without freezing the simulatio
   await expect
     .poll(() => hud.textContent())
     .not.toBe(hudTextBefore);
+});
+
+test("lifter height is hidden at count 0 and shown once lifters are added", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".hud", { hasText: /rpm/ }).waitFor();
+
+  const countInput = await openField(page, "Lifter count");
+  const heightRow = page.locator(".params-row", { has: page.locator("span", { hasText: /^Height/ }) });
+  await expect(countInput).toHaveValue("0");
+  await expect(heightRow).toBeHidden();
+
+  await countInput.fill("2");
+  await countInput.dispatchEvent("input");
+  await expect(heightRow).toBeVisible();
+});
+
+test("Max balls is hidden with coarse-graining Off and shown in Auto", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".hud", { hasText: /rpm/ }).waitFor();
+
+  const modeRow = page.locator(".params-row", { has: page.locator("span", { hasText: "Coarse-graining" }) });
+  await modeRow.locator("xpath=ancestor::details").evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
+  const maxBallsRow = page.locator(".params-row", { has: page.locator("span", { hasText: "Max balls" }) });
+
+  await modeRow.locator("select").selectOption("off");
+  await expect(maxBallsRow).toBeHidden();
+  await modeRow.locator("select").selectOption("auto");
+  await expect(maxBallsRow).toBeVisible();
+});
+
+test("an out-of-range Advanced field opens its group and Advanced section on Apply", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".hud", { hasText: /rpm/ }).waitFor();
+
+  // Restitution is in Media > Advanced; collapse both levels after editing so Apply must reopen them.
+  const restitutionInput = await openField(page, "Restitution (ball-ball)");
+  await restitutionInput.fill("5");
+  await page.locator(".params-subgroup").first().evaluate((el) => {
+    (el as HTMLDetailsElement).open = false;
+  });
+  await page.locator(".params-group").nth(1).evaluate((el) => {
+    (el as HTMLDetailsElement).open = false;
+  });
+  await expect(restitutionInput).toBeHidden();
+
+  await page.getByRole("button", { name: /^Apply/ }).click();
+
+  await expect(page.locator(".params-error")).toBeVisible();
+  await expect(restitutionInput).toBeVisible();
 });

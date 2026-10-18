@@ -2,6 +2,10 @@
 
 This reference documents every user-facing simulation parameter. The table data is generated from `web/src/params/schema.ts` (UI-facing ranges, units, and display scaling) and `crates/mill-core/src/params.rs` (SI defaults, validation ranges, and physical descriptions). SI units are used internally throughout `mill-core`; the UI converts via the `displayScale` factor noted below. Regenerate this table after changing parameter defaults or ranges in either source file.
 
+## Panel layout: Advanced sections and hidden fields
+
+In the parameters panel, rarely-touched fields (`advanced: true` in `schema.ts`) are folded into a collapsed **Advanced** sub-section per group: Media (packing fraction, restitution, friction, rolling friction), Lifters (base width, top width, phase), Slurry (wall no-slip, wettability, surface tension, dye pattern) and Numerical accuracy (sub-steps, ball solver iterations, seed). Fields with no effect under the current settings are hidden instead of greyed out: lifter geometry when Lifter count is 0; Max balls when Coarse-graining is Off (it stays visible but greyed out in Manual); Manual k unless Coarse-graining is Manual; all other Slurry rows when Slurry is disabled. A hidden field still keeps and sends its value, and a field that fails validation is always revealed (with its group and Advanced section opened). This is UI-only: `Params`, presets and reproducibility are unchanged.
+
 ## Mill Parameters
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |

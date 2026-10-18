@@ -8,8 +8,13 @@ import type { Page } from "@playwright/test";
  * first (fields in collapsed groups aren't fillable/readable via Playwright). */
 export async function openField(page: Page, labelText: string) {
   const row = page.locator(".params-row", { has: page.locator("span", { hasText: labelText }) });
-  await row.locator("xpath=ancestor::details[1]").evaluate((el) => {
-    (el as HTMLDetailsElement).open = true;
-  });
+  // Every ancestor <details> (the group and, for rarely-used fields, its Advanced sub-section).
+  const ancestors = row.locator("xpath=ancestor::details");
+  const count = await ancestors.count();
+  for (let i = 0; i < count; i++) {
+    await ancestors.nth(i).evaluate((el) => {
+      (el as HTMLDetailsElement).open = true;
+    });
+  }
   return row.locator("input");
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getPath, paramsChangeRequiresReset, withPath, type FieldSchema, SCHEMA } from "../../src/params/schema";
+import { GROUPS, getPath, paramsChangeRequiresReset, withPath, type FieldSchema, SCHEMA } from "../../src/params/schema";
 import type { ParamsJson } from "../../src/protocol";
 
 // A minimal but structurally-real params tree: one representative field per group SCHEMA
@@ -101,5 +101,20 @@ describe("coarse-graining schema", () => {
   it("help warns that coarse-graining changes the physics", () => {
     expect(mode?.help).toMatch(/changes the physics/);
     expect(mode?.help).toMatch(/17-39 %/);
+  });
+});
+
+describe("advanced fields", () => {
+  it("only mark fields that belong to a known group", () => {
+    for (const field of SCHEMA.filter((f) => f.advanced)) {
+      expect(GROUPS).toContain(field.group);
+    }
+  });
+
+  it("leave every group at least one non-advanced field", () => {
+    for (const group of GROUPS) {
+      const fields = SCHEMA.filter((f) => f.group === group);
+      expect(fields.some((f) => !f.advanced)).toBe(true);
+    }
   });
 });

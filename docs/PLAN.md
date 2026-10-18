@@ -443,6 +443,9 @@ granularity hint only. A sticky header holds `Apply (resets simulation)`, `Rever
 indicator (`Applied` / `Edited — not applied` / `Error`, driven by the worker's `ready`/`error`
 messages). On a validation failure the offending rows are marked invalid, their group is forced
 open, and an error banner explains why — without touching the running simulation.
+Rarely-touched fields (`advanced: true` in `schema.ts`) sit in a collapsed per-group **Advanced**
+sub-section, and fields with no effect under the current settings are hidden rather than greyed out
+(see `docs/PARAMETERS.md`); neither changes `Params`.
 Derived read-only values shown in the modal: critical speed, %Nc, true vs. simulated ball count,
 coarse-graining factor `k` and effective media diameter (see ss3.2; `k = 1.0`/"no coarse-graining"
 when the true count is already <= `simulation.max_balls`), fluid particle count, shared sub-step

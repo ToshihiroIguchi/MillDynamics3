@@ -44,6 +44,12 @@ const DEFAULT_GROUP_OPEN: Record<string, boolean> = {
   Slurry: false,
   "Numerical accuracy": false,
   Derived: true,
+  // Collapsed "Advanced" sub-sections, keyed `${group}/Advanced` (readGroupOpenPrefs only keeps
+  // keys listed here).
+  "Media/Advanced": false,
+  "Lifters/Advanced": false,
+  "Slurry/Advanced": false,
+  "Numerical accuracy/Advanced": false,
 };
 
 function readGroupOpenPrefs(): Record<string, boolean> {
@@ -182,6 +188,8 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
   const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
   const rowsByPath = new Map<string, HTMLElement>();
   const detailsByGroup = new Map<string, HTMLDetailsElement>();
+  // Advanced sub-sections: the <details> plus the field paths it holds (to hide it when empty).
+  const advancedByGroup = new Map<string, { details: HTMLDetailsElement; paths: string[] }>();
   let currentParams: ParamsJson = {};
   let mediaWarn: HTMLParagraphElement | null = null;
   let presetSelect: HTMLSelectElement | null = null;
@@ -357,7 +365,25 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       });
     }
 
-    for (const field of SCHEMA.filter((f) => f.group === group)) {
+    const groupFields = SCHEMA.filter((f) => f.group === group);
+    let advancedDetails: HTMLDetailsElement | null = null;
+    if (groupFields.some((f) => f.advanced)) {
+      const advancedKey = `${group}/Advanced`;
+      const sub = document.createElement("details");
+      sub.className = "params-subgroup";
+      sub.open = groupOpenPrefs[advancedKey] ?? false;
+      sub.addEventListener("toggle", () => {
+        groupOpenPrefs[advancedKey] = sub.open;
+        writeGroupOpenPrefs(groupOpenPrefs);
+      });
+      const subSummary = document.createElement("summary");
+      subSummary.textContent = "Advanced";
+      sub.appendChild(subSummary);
+      advancedDetails = sub;
+      advancedByGroup.set(group, { details: sub, paths: [] });
+    }
+
+    for (const field of groupFields) {
       const row = document.createElement("label");
       row.className = "params-row";
 
@@ -422,7 +448,12 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       inputs.set(field.path, input);
       rowsByPath.set(field.path, row);
       row.appendChild(input);
-      details.appendChild(row);
+      if (field.advanced && advancedDetails) {
+        advancedDetails.appendChild(row);
+        advancedByGroup.get(group)?.paths.push(field.path);
+      } else {
+        details.appendChild(row);
+      }
       if (field.path === "simulation.coarse_graining_mode") {
         // Persistent amber notice directly under the mode row; shown whenever mode != off.
         coarseModeNotice = document.createElement("p");
@@ -431,6 +462,9 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         details.appendChild(coarseModeNotice);
       }
     }
+
+    // After the basic rows, before the group-wide warn/note paragraphs below.
+    if (advancedDetails) details.appendChild(advancedDetails);
 
     if (group === "Media") {
       mediaWarn = document.createElement("p");
@@ -483,6 +517,22 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     row?.classList.toggle("is-ineffective", !enabled);
   }
 
+  /**
+   * Shows/hides a field's row by dependency. A row marked invalid stays visible so a failed
+   * validation never points at an invisible field (values are always sent to the core regardless).
+   */
+  function setRowVisible(path: string, visible: boolean): void {
+    const row = rowsByPath.get(path);
+    if (row) row.hidden = !visible && !row.classList.contains("is-invalid");
+  }
+
+  /** Hides an Advanced sub-section when every row inside it is hidden. */
+  function refreshAdvancedVisibility(): void {
+    for (const { details: sub, paths } of advancedByGroup.values()) {
+      sub.hidden = paths.every((p) => rowsByPath.get(p)?.hidden === true);
+    }
+  }
+
   function trueCountBlockMessage(nTrue: number): string {
     return (
       `True ball count ${nTrue.toFixed(0)} exceeds ${TRUE_COUNT_BLOCK_THRESHOLD} with Coarse-graining Off: ` +
@@ -512,7 +562,32 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     return trueCountGuard(mIn.value, n) === "block" ? trueCountBlockMessage(n) : null;
   }
 
+  /**
+   * Applies the dependency rules that hide fields with no effect under the current settings.
+   * Runs before refreshDerived's early returns so invalid rows are revealed even when the derived
+   * readout cannot be computed. Missing inputs count as "visible".
+   */
+  function refreshVisibility(): void {
+    const liftersCountInput = inputs.get("lifters.count");
+    const slurryEnabledInput = inputs.get("slurry.enabled") as HTMLInputElement | undefined;
+    const coarseMode = inputs.get("simulation.coarse_graining_mode")?.value || "off";
+    // setRowVisible keeps invalid rows visible. Max balls stays visible in Manual (greyed out)
+    // because the Manual warning in refreshDerived refers to it.
+    const noLifters = liftersCountInput !== undefined && Number(liftersCountInput.value) === 0;
+    for (const path of ["lifters.height_m", "lifters.base_width_m", "lifters.top_width_m", "lifters.phase_deg"]) {
+      setRowVisible(path, !noLifters);
+    }
+    setRowVisible("simulation.max_balls", coarseMode !== "off");
+    setRowVisible("simulation.coarse_graining_k", coarseMode === "manual");
+    const slurryOff = slurryEnabledInput !== undefined && !slurryEnabledInput.checked;
+    for (const field of SCHEMA) {
+      if (field.group === "Slurry" && field.path !== "slurry.enabled") setRowVisible(field.path, !slurryOff);
+    }
+    refreshAdvancedVisibility();
+  }
+
   function refreshDerived(): void {
+    refreshVisibility();
     const diameterInput = inputs.get("mill.diameter_m");
     const modeInput = inputs.get("mill.speed_mode");
     const valueInput = inputs.get("mill.speed_value");
@@ -835,9 +910,13 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         if (!row) continue;
         row.classList.add("is-invalid");
         if (!firstRow) firstRow = row;
-        const details = row.closest("details");
-        if (details) details.open = true;
+        // Open every ancestor <details> (group and its Advanced sub-section).
+        for (let d = row.closest("details"); d; d = d.parentElement?.closest("details") ?? null) {
+          d.open = true;
+        }
       }
+      // Reveal invalid rows that a dependency rule would otherwise hide.
+      refreshDerived();
       errorBanner.hidden = false;
       errorBanner.textContent = failures.map((f) => f.message).join("; ");
       setStatus("error");
@@ -846,6 +925,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     }
 
     clearInvalid();
+    refreshDerived();
     setStatus("applying");
     onApply(readFormParams());
   });

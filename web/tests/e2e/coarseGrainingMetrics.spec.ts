@@ -18,9 +18,9 @@ test("collision rate and impact histogram are hidden with an explanatory banner 
 
   // The Grinding group (banner, Collision rate row, histogram) is collapsed by default -- the
   // "k = ..." chip on its summary is the only thing visible without opening it.
-  const grindingGroup = page.locator(".metrics-group", { has: page.locator("summary", { hasText: "Grinding" }) });
+  const grindingGroup = page.locator(".metrics-group", { has: page.locator("summary", { hasText: /^Grinding(?! proxy)/ }) });
   const grindingChip = grindingGroup.locator(".metrics-summary-chip");
-  const warnBanner = page.locator(".metrics-warn");
+  const warnBanner = grindingGroup.locator(".metrics-warn");
   const collisionRateRow = page.locator(".metric-row", { has: page.locator(".metric-label", { hasText: "Collision rate" }) });
   const histogramWrap = page.locator(".impact-histogram-wrap");
 
@@ -38,11 +38,16 @@ test("collision rate and impact histogram are hidden with an explanatory banner 
   await expect(collisionRateRow).toBeVisible();
   await expect(histogramWrap).toBeVisible();
 
-  // Lower the ball diameter enough that N_true climbs back above max_balls = 150 -- 10 mm (this
-  // project's former default) gives N_true = 2460, the same scenario the shipped default used to
-  // be, turning coarse-graining on (k > 1).
+  // Lower the ball diameter enough that N_true climbs above max_balls (300 with the default
+  // 63 mm drum): 1 mm gives N_true of roughly 1000, turning Auto coarse-graining on (k > 1).
   const ballDiameterInput = await openField(page, "Ball diameter (mm)");
-  await ballDiameterInput.fill("10");
+  await ballDiameterInput.fill("1");
+  // Coarse-graining is Off by default (and would block this true ball count), so opt in to Auto.
+  const coarseRow = page.locator(".params-row", { has: page.locator("span.params-label", { hasText: /^Coarse-graining/ }) });
+  await coarseRow.locator("xpath=ancestor::details").evaluateAll((els) => {
+    for (const el of els) (el as HTMLDetailsElement).open = true;
+  });
+  await coarseRow.locator("select").selectOption("auto");
   await page.getByRole("button", { name: /^Apply/ }).click();
 
   // Apply triggers a real WASM reinit (media.ball_diameter_m is resetRequired), which can take a
@@ -64,7 +69,6 @@ test("collision rate and impact histogram are hidden with an explanatory banner 
 
   await expect(warnBanner).toBeVisible();
   await expect(warnBanner).toHaveText(/Coarse-graining is active/);
-  await expect(warnBanner).toContainText("2460");
   await expect(warnBanner).toContainText(`(${chipText})`);
   await expect(collisionRateRow).toBeHidden();
   await expect(histogramWrap).toBeHidden();
