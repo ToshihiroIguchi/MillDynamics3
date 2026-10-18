@@ -90,7 +90,13 @@ export function createHud(): Hud {
   speedBar.appendChild(speedBarFill);
   const speedText = document.createElement("span");
   speedText.className = "hud-speed-text";
-  speedRow.append(speedDot, speedBar, speedText);
+  // Two separate boxes: the text box (variable length) and a fixed-size indicator box (dot + bar).
+  // The row is anchored to the right edge and the indicator box is last, so a changing text length
+  // only grows/shrinks the text box leftwards; the indicator box never moves or resizes.
+  const speedIndicator = document.createElement("span");
+  speedIndicator.className = "hud-speed-indicator";
+  speedIndicator.append(speedDot, speedBar);
+  speedRow.append(speedText, speedIndicator);
 
   // Media-substitution badge: only shown once coarse-graining is actually active (the params
   // panel's Derived section shows this too, but that panel can be collapsed -- this keeps the

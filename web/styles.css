@@ -173,9 +173,13 @@ body.params-collapsed .params-panel {
 /* Unmissable, not a subtle number: this simulator is not running at real time right now (see
    ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). Applied to the speed badge (top-right) only,
    so the shortfall is visible at a glance; the bottom-left HUD keeps its normal colours. */
-.hud-speed-badge.hud-slow-motion {
+.hud-speed-badge.hud-slow-motion .hud-speed-text,
+.hud-speed-badge.hud-slow-motion .hud-speed-indicator {
   color: #ffd27a;
   background: rgba(64, 40, 12, 0.85);
+}
+
+.hud-speed-badge.hud-slow-motion .hud-speed-text {
   font-weight: 600;
 }
 
@@ -186,17 +190,30 @@ body.params-collapsed .params-panel {
   z-index: 10;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  color: #b7bfcc;
-  background: rgba(18, 22, 28, 0.7);
-  padding: 6px 10px;
-  border-radius: 4px;
   pointer-events: none;
 }
 
 .hud-speed {
   display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+/* Two separate boxes (text, then the fixed-size indicator): text length changes only resize the text
+   box leftwards, the indicator box stays where it is (ui/hud.ts). */
+.hud-speed-text,
+.hud-speed-indicator {
+  color: #b7bfcc;
+  background: rgba(18, 22, 28, 0.7);
+  padding: 6px 10px;
+  border-radius: 4px;
+}
+
+.hud-speed-indicator {
+  display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
 /* Graphical speed indicator, alongside (not instead of) the text figure: a status dot plus a
