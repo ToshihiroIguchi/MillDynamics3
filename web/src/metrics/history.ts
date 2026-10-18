@@ -62,10 +62,12 @@ export class MetricsHistory {
 
   /** Renders the full history as CSV: `sim_time_s` first, then one column per entry in
    * `columns`, labelled `"label (unit)"` (or just `label` when `unit` is omitted). A missing/null
-   * value renders as an empty cell. */
-  toCsv(columns: CsvColumn[]): string {
+   * value renders as an empty cell. `headerComments` are written first as `# ...` lines (one per
+   * entry; embedded newlines are split so every physical line stays a comment). */
+  toCsv(columns: CsvColumn[], headerComments: string[] = []): string {
     const header = ["sim_time_s", ...columns.map((c) => (c.unit ? `${c.label} (${c.unit})` : c.label))];
-    const lines = [header.join(",")];
+    const lines = headerComments.flatMap((c) => c.split("\n").map((l) => `# ${l}`));
+    lines.push(header.join(","));
     for (const sample of this.samples) {
       const cells = [sample.simTime.toFixed(3)];
       for (const col of columns) {

@@ -34,6 +34,10 @@ Impacts are classified, for ball-ball and ball-wall separately, as **drop** (`v_
 | `cumulative_*` | Wall work and above-threshold stress energy per ball since the simulation started (monotone; take differences between two times). The time two conditions need to reach the same cumulative effective energy is the relative-grinding-time proxy. |
 | `impact_energy_histogram` | Pooled stress-energy histogram (28 log bins, joules, 3D mass). |
 
+The one-ball-thick slab is equivalent to an implied 3D solid fraction `phi_3D = (2/3) * packing_fraction_2d`
+(0.547 at the default 0.82; a real loose ball bed is about 0.6), and ratios between conditions do not
+depend on this depth basis. See `docs/METRICS.md`, "Units and the 2D-to-3D basis".
+
 ## How to use it for scale-up
 
 1. Same %Nc, fill J, ball material; change the quantity under study. Keep **every** numerical

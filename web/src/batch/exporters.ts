@@ -3,6 +3,8 @@
 
 import type { ProxyReference } from "../metrics/reference";
 import type { ParamsJson } from "../protocol";
+import { modelBasisLines } from "../report/assumptions";
+import { versionLine } from "../version";
 import { buildTable } from "./table";
 import type { Combined, SeedResult } from "./stats";
 
@@ -16,6 +18,10 @@ export interface BatchRecord {
   reference: ProxyReference | null;
   /** Creation time as an ISO string (passed in so the builders stay pure). */
   createdAt: string;
+  /** Software version (defaults to this build's commit). */
+  softwareVersion?: string;
+  /** Model-basis statements (defaults to `modelBasisLines(params)`). */
+  modelBasis?: string[];
 }
 
 function csvField(v: string): string {
@@ -33,11 +39,13 @@ export function buildBatchCsv(rec: BatchRecord): string {
   const lines: string[] = [
     "# MillDynamics repeat runs (same Simulation and params as the main screen; only the seed differs)",
     `# created: ${rec.createdAt}`,
+    `# software: ${rec.softwareVersion ?? versionLine()}`,
     `# seeds: ${rec.results.map((r) => r.seed).join(" ")}`,
     `# warmup_revolutions: ${rec.warmupRevolutions}`,
     `# measure_revolutions: ${rec.measureRevolutions}`,
     `# window_s: ${num(rec.results[0]?.window_s ?? null)}`,
     `# params_json: ${JSON.stringify(rec.params)}`,
+    ...(rec.modelBasis ?? modelBasisLines(rec.params)).map((l) => `# basis: ${l}`),
   ];
   const header = [
     "name",
@@ -78,6 +86,8 @@ export function buildBatchJson(rec: BatchRecord): string {
       format: "milldynamics-repeat-runs",
       version: 1,
       createdAt: rec.createdAt,
+      software_version: rec.softwareVersion ?? versionLine(),
+      model_basis: rec.modelBasis ?? modelBasisLines(rec.params),
       seeds: rec.results.map((r) => r.seed),
       warmupRevolutions: rec.warmupRevolutions,
       measureRevolutions: rec.measureRevolutions,
