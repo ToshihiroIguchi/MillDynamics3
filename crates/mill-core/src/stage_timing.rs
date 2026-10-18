@@ -48,7 +48,31 @@ mod imp {
         "DEM step",
     ];
 
+    /// Solver event counters (diagnostics only; see [`counters`]).
+    #[derive(Clone, Copy, Default, Debug)]
+    pub struct Counters {
+        /// Sub-steps run.
+        pub substeps: u64,
+        /// Histogram of the final density-loop iteration count (index = count, clamped to 12).
+        pub density_hist: [u64; 13],
+        /// Sum of step-7 viscosity CG iterations.
+        pub cg_sum: u64,
+        /// Histogram of CG iterations: 0, 1, 2-5, 6-10, 11-25, 26-50, 51-100, 101+.
+        pub cg_hist: [u64; 8],
+        /// Sub-steps where the with-balls viscosity solve ran.
+        pub ball_solves: u64,
+        /// Boundary pairs built in those sub-steps.
+        pub pairs: u64,
+        /// Pair c relative to the max c of the same fluid particle: <1%, 1-5%, 5-20%, >=20%.
+        pub pair_c_hist: [u64; 4],
+        /// Squeeze links built.
+        pub links_built: u64,
+        /// Squeeze links surviving the active-set filter.
+        pub links_active: u64,
+    }
+
     thread_local! {
+        static COUNTERS: Cell<Counters> = Cell::new(Counters::default());
         static LAST: Cell<Option<Instant>> = const { Cell::new(None) };
         static TOTALS_NS: Cell<[u64; STAGE_COUNT]> = const { Cell::new([0; STAGE_COUNT]) };
     }
@@ -75,7 +99,85 @@ mod imp {
 
     /// Zeroes the accumulated per-stage totals.
     pub fn clear_totals() {
+        COUNTERS.with(|c| c.set(Counters::default()));
         TOTALS_NS.with(|t| t.set([0; STAGE_COUNT]));
+    }
+
+    fn upd(f: impl FnOnce(&mut Counters)) {
+        COUNTERS.with(|c| {
+            let mut v = c.get();
+            f(&mut v);
+            c.set(v);
+        });
+    }
+
+    /// Records a sub-step's final density-loop iteration count.
+    pub fn density_iters(n: u32) {
+        upd(|c| {
+            c.substeps += 1;
+            c.density_hist[(n as usize).min(12)] += 1;
+        });
+    }
+
+    /// Records a sub-step's viscosity CG iteration count (0 when no solve ran).
+    pub fn cg_iters(n: u32) {
+        upd(|c| {
+            c.cg_sum += n as u64;
+            let b = match n {
+                0 => 0,
+                1 => 1,
+                2..=5 => 2,
+                6..=10 => 3,
+                11..=25 => 4,
+                26..=50 => 5,
+                51..=100 => 6,
+                _ => 7,
+            };
+            c.cg_hist[b] += 1;
+        });
+    }
+
+    /// Records the boundary pairs `(fluid index, c)` of one with-balls solve; `n` = fluid count.
+    pub fn ball_pairs(pairs: impl Iterator<Item = (u32, f32)> + Clone, n: usize) {
+        let mut max = vec![0.0f32; n];
+        let mut count = 0u64;
+        for (f, c) in pairs.clone() {
+            count += 1;
+            let m = &mut max[f as usize];
+            *m = m.max(c);
+        }
+        upd(|k| {
+            k.ball_solves += 1;
+            k.pairs += count;
+            for (f, c) in pairs {
+                let r = c / max[f as usize];
+                let b = if r < 0.01 {
+                    0
+                } else if r < 0.05 {
+                    1
+                } else if r < 0.20 {
+                    2
+                } else {
+                    3
+                };
+                k.pair_c_hist[b] += 1;
+            }
+        });
+    }
+
+    /// Records squeeze links built.
+    pub fn links_built(n: usize) {
+        upd(|c| c.links_built += n as u64);
+    }
+
+    /// Records squeeze links surviving the active-set filter.
+    pub fn links_active(n: usize) {
+        upd(|c| c.links_active += n as u64);
+    }
+
+    /// Accumulated event counters.
+    pub fn counters() -> Counters {
+        COUNTERS.with(|c| c.get())
     }
 
     /// Accumulated per-stage totals in nanoseconds.
@@ -109,4 +211,16 @@ macro_rules! stage_reset {
 #[cfg(not(feature = "stage-timing"))]
 macro_rules! stage_reset {
     () => {};
+}
+
+/// Records a solver event via `stage_timing::$f(args)`; no-op (args unevaluated) without the feature.
+#[cfg(feature = "stage-timing")]
+macro_rules! count {
+    ($f:ident, $($a:expr),*) => {
+        $crate::stage_timing::$f($($a),*)
+    };
+}
+#[cfg(not(feature = "stage-timing"))]
+macro_rules! count {
+    ($f:ident, $($a:expr),*) => {};
 }

@@ -24,6 +24,39 @@
 use std::env;
 use std::time::Instant;
 
+#[cfg(feature = "stage-timing")]
+mod alloc_count {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static CALLS: AtomicU64 = AtomicU64::new(0);
+    pub static BYTES: AtomicU64 = AtomicU64::new(0);
+
+    /// Counting wrapper around the system allocator (diagnostics only).
+    pub struct Counting;
+
+    // SAFETY: every method forwards unchanged to `System`, only adding relaxed counters.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            CALLS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(l.size() as u64, Relaxed);
+            System.alloc(l)
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            System.dealloc(p, l)
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            CALLS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(n as u64, Relaxed);
+            System.realloc(p, l, n)
+        }
+    }
+}
+
+#[cfg(feature = "stage-timing")]
+#[global_allocator]
+static ALLOC: alloc_count::Counting = alloc_count::Counting;
+
 use mill_core::params::{Direction, LiftersParams, MediaParams, SlurryParams, SpeedMode};
 use mill_core::{Params, Simulation};
 
@@ -276,6 +309,14 @@ fn run_config(cfg: &Config, args: &Args) {
     let stages = env::var("PERF_STAGES").is_ok_and(|v| v == "1");
     #[cfg(feature = "stage-timing")]
     mill_core::stage_timing::clear_totals();
+    #[cfg(feature = "stage-timing")]
+    let alloc0 = {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            alloc_count::CALLS.load(Relaxed),
+            alloc_count::BYTES.load(Relaxed),
+        )
+    };
     let mut viscosity_iters_sum = 0u64;
     let mut shear_rate_sum = 0.0f64;
     let start = Instant::now();
@@ -285,6 +326,14 @@ fn run_config(cfg: &Config, args: &Args) {
         shear_rate_sum += sim.mean_shear_rate_per_s() as f64;
     }
     let elapsed = start.elapsed();
+    #[cfg(feature = "stage-timing")]
+    let alloc1 = {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            alloc_count::CALLS.load(Relaxed),
+            alloc_count::BYTES.load(Relaxed),
+        )
+    };
     let ms_per_frame = elapsed.as_secs_f64() * 1000.0 / args.frames as f64;
     let mean_viscosity_iters = viscosity_iters_sum as f64 / args.frames as f64;
     let mean_shear_rate = shear_rate_sum / args.frames as f64;
@@ -307,6 +356,8 @@ fn run_config(cfg: &Config, args: &Args) {
 
     if stages {
         print_stage_table(ms_per_frame, args.frames);
+        #[cfg(feature = "stage-timing")]
+        print_counters(args.frames, alloc1.0 - alloc0.0, alloc1.1 - alloc0.1);
     }
 }
 
@@ -328,6 +379,51 @@ fn print_stage_table(ms_per_frame: f64, frames: u32) {
     println!(
         "  {:<36} {:>10.4}  (frame wall-clock {:.4}; with timers on)",
         "sum of stages", total_ms, ms_per_frame
+    );
+}
+
+#[cfg(feature = "stage-timing")]
+fn print_counters(frames: u32, alloc_calls: u64, alloc_bytes: u64) {
+    let c = mill_core::stage_timing::counters();
+    let pct = |h: &[u64], total: u64| -> String {
+        h.iter()
+            .map(|&x| format!("{:.1}%", 100.0 * x as f64 / total.max(1) as f64))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    println!(
+        "  counters ({} sub-steps, {:.2}/frame):",
+        c.substeps,
+        c.substeps as f64 / frames as f64
+    );
+    println!(
+        "    density iters hist [1..=11,12+]: {}",
+        pct(&c.density_hist[1..], c.substeps)
+    );
+    println!(
+        "    CG iters mean/substep {:.2}; hist [0,1,2-5,6-10,11-25,26-50,51-100,101+]: {}",
+        c.cg_sum as f64 / c.substeps.max(1) as f64,
+        pct(&c.cg_hist, c.substeps)
+    );
+    println!(
+        "    ball solves {} ({:.1}% of sub-steps); pairs {} ({:.1}/solve); pair c/max_c [<1%,1-5%,5-20%,>=20%]: {}",
+        c.ball_solves,
+        100.0 * c.ball_solves as f64 / c.substeps.max(1) as f64,
+        c.pairs,
+        c.pairs as f64 / c.ball_solves.max(1) as f64,
+        pct(&c.pair_c_hist, c.pairs)
+    );
+    println!(
+        "    links built {} ({:.1}/substep), surviving {} ({:.1}%)",
+        c.links_built,
+        c.links_built as f64 / c.substeps.max(1) as f64,
+        c.links_active,
+        100.0 * c.links_active as f64 / c.links_built.max(1) as f64
+    );
+    println!(
+        "    allocs/frame {:.0}, bytes/frame {:.0}",
+        alloc_calls as f64 / frames as f64,
+        alloc_bytes as f64 / frames as f64
     );
 }
 

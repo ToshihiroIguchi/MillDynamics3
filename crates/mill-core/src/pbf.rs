@@ -1277,6 +1277,7 @@ impl FluidParticles {
         }
 
         stage_mark!(Density);
+        count!(density_iters, iter_count);
         // --- 3.5 Ball overlap projection (docs/PLAN.md ss3.4 step 1): push fluid particles out
         // of any ball they've penetrated, accumulating the Newton's-third-law reaction on that
         // ball. `balls` is a fixed boundary for this call (see this method's doc comment).
@@ -2119,11 +2120,13 @@ impl FluidParticles {
             }
             stage_mark!(ViscBoundary);
             let links = squeeze_links(balls, drum.radius_m, 0.5 * h, mu, dt);
+            count!(links_built, links.len());
             stage_mark!(ViscLinks);
             if pairs.is_empty() && links.is_empty() {
                 viscosity_iterations =
                     solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
             } else {
+                count!(ball_pairs, pairs.iter().map(|p| (p.fluid, p.c)), n);
                 // Start from the ball velocities *after* this sub-step's earlier impulses
                 // (overlap push, form drag, buoyancy) so the no-slip solve sees them and does not
                 // double-count the same relative velocity.
@@ -2151,6 +2154,7 @@ impl FluidParticles {
                         l.n.dot(vi - vj) > 0.0
                     })
                     .collect();
+                count!(links_active, links.len());
                 viscosity_iterations = solve_viscosity_with_balls(
                     &neighbors,
                     &weights,
@@ -2177,6 +2181,7 @@ impl FluidParticles {
             }
         }
         stage_mark!(ViscosityCg);
+        count!(cg_iters, viscosity_iterations);
         let mean_shear_rate_per_s =
             mean_shear_rate(&self.x, &self.v, &neighbors, &density, mass, h);
 
