@@ -171,7 +171,7 @@ body.params-collapsed .params-panel {
 }
 
 /* Unmissable, not a subtle number: this simulator is not running at real time right now (see
-   ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). Applied to the speed badge (top-right) only,
+   ui/speedSmoother.ts and docs/PERF.md). Applied to the speed badge (top-right) only,
    so the shortfall is visible at a glance; the bottom-left HUD keeps its normal colours. */
 .hud-speed-badge.hud-slow-motion .hud-speed-text,
 .hud-speed-badge.hud-slow-motion .hud-speed-indicator {
@@ -256,7 +256,7 @@ body.params-collapsed .params-panel {
   display: block;
   height: 100%;
   background: #5fd97a;
-  transition: width 0.2s ease-out;
+  transition: width 0.5s ease-out;
 }
 
 .hud-speed-slow .hud-speed-bar-fill {

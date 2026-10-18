@@ -6,6 +6,7 @@
 import { type CoarseGrainingMode, effectiveMedia, criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
 import type { AppState } from "../state";
+import { SpeedSmoother } from "./speedSmoother";
 
 export interface Hud {
   el: HTMLElement;
@@ -59,15 +60,6 @@ function mediaSubstitutionOf(
   return { trueDiameterM: eff.trueDiameterM, diameterM: eff.diameterM, ballCount: eff.ballCount, scaleFactor: eff.scaleFactor };
 }
 
-/**
- * Threshold, as a fraction of `1.0x`, below which the achieved rate reads as "SLOW MOTION" rather
- * than "REAL TIME". Not exactly `1.0`: `achievedTimeScale` is itself noisy frame-to-frame (a
- * single frame's `stepsRun` is an integer count of a possibly-large `fixedSubDt()`, see
- * worker.ts), so requiring *exactly* `>= 1.0` would flicker between states on an otherwise-healthy
- * run. `0.98` absorbs that noise without hiding a real, sustained shortfall.
- */
-const REAL_TIME_THRESHOLD = 0.98;
-
 export function createHud(): Hud {
   const el = document.createElement("div");
   el.className = "hud";
@@ -97,6 +89,10 @@ export function createHud(): Hud {
   speedIndicator.className = "hud-speed-indicator";
   speedIndicator.append(speedDot, speedBar);
   speedRow.append(speedText, speedIndicator);
+
+  // The badge shows a smoothed, slowly refreshed reading (ui/speedSmoother.ts) so the figures are
+  // readable and REAL TIME / SLOW MOTION does not flicker; the other HUD rows still update every frame.
+  const speedSmoother = new SpeedSmoother();
 
   // Media-substitution badge: only shown once coarse-graining is actually active (the params
   // panel's Derived section shows this too, but that panel can be collapsed -- this keeps the
@@ -131,7 +127,6 @@ export function createHud(): Hud {
     update(state, fps) {
       const mill = millOf(state.params);
       const ballCount = state.ballPositions.length / 2;
-      const isRealTime = state.achievedTimeScale >= REAL_TIME_THRESHOLD;
 
       const lines = [`t = ${state.simTime.toFixed(1)} s`, `balls: ${ballCount}`, `fps: ${fps.toFixed(0)}`];
       if (mill) {
@@ -142,13 +137,20 @@ export function createHud(): Hud {
       // Deliberately not a subtle number: a simulator whose physics runs slower than the clock
       // it's being watched against must say so plainly, not bury it in a "speed: 0.12x" figure
       // easy to read as a setting rather than a shortfall (docs/PERF.md).
-      speedText.textContent = isRealTime
-        ? `REAL TIME (${state.achievedTimeScale.toFixed(2)}x)`
-        : `SLOW MOTION ${state.achievedTimeScale.toFixed(2)}x -- ${state.subStepsPerSecondAchieved.toFixed(0)}/${state.subStepsPerSecondRequired.toFixed(0)} sub-steps/s`;
-      const fillPct = Math.max(0, Math.min(1, state.achievedTimeScale)) * 100;
-      speedBarFill.style.width = `${fillPct}%`;
-      speedRow.classList.toggle("hud-speed-slow", !isRealTime);
-      speedRow.classList.toggle("hud-slow-motion", !isRealTime);
+      const speed = speedSmoother.push(
+        performance.now(),
+        state.achievedTimeScale,
+        state.subStepsPerSecondAchieved,
+        state.subStepsPerSecondRequired,
+      );
+      if (speed) {
+        speedText.textContent = speed.slow
+          ? `SLOW MOTION ${speed.timeScale.toFixed(2)}x -- ${speed.subStepsAchieved.toFixed(0)}/${speed.subStepsRequired.toFixed(0)} sub-steps/s`
+          : `REAL TIME (${speed.timeScale.toFixed(2)}x)`;
+        speedBarFill.style.width = `${Math.max(0, Math.min(1, speed.timeScale)) * 100}%`;
+        speedRow.classList.toggle("hud-speed-slow", speed.slow);
+        speedRow.classList.toggle("hud-slow-motion", speed.slow);
+      }
 
       // Prefer the live simulation's own factor (metrics); fall back to the params-derived one.
       const media = mediaSubstitutionOf(state.params);
