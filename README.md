@@ -31,6 +31,9 @@ Each fixed sub-step (1/240 s by default) advances the slurry and then the balls:
 
 [`docs/PHYSICS.md`](docs/PHYSICS.md) §0 gives the full overview. Its later sections give every
 equation, constant and known limitation.
+[`docs/TECHNOLOGY.md`](docs/TECHNOLOGY.md) is the self-contained technology overview: every model
+with its equations and source locations, the software architecture, the verification status, what
+is (and is not) innovative, and the literature references.
 
 ## Status
 
