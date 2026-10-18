@@ -32,6 +32,7 @@ import type { ImpactEnergyHistogram } from "../metrics/types";
 import { criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
 import { ReportAggregator } from "../report/aggregator";
+import { windowSecondsFromRevs } from "../report/window";
 import { buildReportPdf, downloadReportPdf, energyCumulativeFraction } from "../report/pdf";
 import type { AppState } from "../state";
 import { createBatchSection, type BatchSection } from "./batchSection";
@@ -180,8 +181,10 @@ const WARN_THRESHOLDS = new Map<string, number>([
   ["max_ball_overlap", MAX_BALL_OVERLAP_WARN_THRESHOLD],
 ]);
 
-const DEFAULT_REPORT_WARMUP_S = 2;
-const DEFAULT_REPORT_END_S = 7;
+// Report window inputs are in drum revolutions (converted to sim seconds at the current rpm):
+// >= 4 warm-up revolutions for steady state (same as the Batch default), then whole revolutions.
+const DEFAULT_REPORT_WARMUP_REV = 4;
+const DEFAULT_REPORT_MEASURE_REV = 8;
 const GENERATE_LABEL = "Generate report now";
 
 const GROUPS_STORAGE_KEY = "milldynamics.metricsGroups";
@@ -260,7 +263,7 @@ export function createMetricsPanel(
   reportHeading.textContent = "Report";
   reportSection.appendChild(reportHeading);
 
-  function makeNumberRow(id: string, labelText: string, value: string): HTMLInputElement {
+  function makeNumberRow(id: string, labelText: string, value: string, step: string): HTMLInputElement {
     const row = document.createElement("div");
     row.className = "metrics-report-row";
     const label = document.createElement("label");
@@ -271,15 +274,15 @@ export function createMetricsPanel(
     input.id = id;
     input.className = "metrics-report-input";
     input.min = "0";
-    input.step = "0.5";
+    input.step = step;
     input.value = value;
     row.appendChild(label);
     row.appendChild(input);
     reportSection.appendChild(row);
     return input;
   }
-  const reportWarmupInput = makeNumberRow("metrics-report-warmup", "Warm-up (s)", String(DEFAULT_REPORT_WARMUP_S));
-  const reportEndTimeInput = makeNumberRow("metrics-report-end-time", "Report end (s)", String(DEFAULT_REPORT_END_S));
+  const reportWarmupInput = makeNumberRow("metrics-report-warmup", "Warm-up (rev)", String(DEFAULT_REPORT_WARMUP_REV), "0.5");
+  const reportEndTimeInput = makeNumberRow("metrics-report-end-time", "Measure (rev)", String(DEFAULT_REPORT_MEASURE_REV), "1");
   reportEndTimeInput.placeholder = "off";
 
   const autoRow = document.createElement("div");
@@ -308,56 +311,72 @@ export function createMetricsPanel(
   const reportNote = document.createElement("div");
   reportNote.className = "metrics-note";
   reportNote.textContent =
-    "PDF summary (stats, time series, snapshot, impact spectrum) over the window [warm-up, end]. " +
-    "Samples outside the window are ignored. Generating before the end uses [warm-up, now]. " +
-    "End = 0 or empty disables the end.";
+    "PDF summary (stats, time series, snapshot, impact spectrum) over the window [warm-up, warm-up + measure] " +
+    "in drum revolutions at the current speed. Use >= 4 warm-up revolutions for steady state and measure " +
+    "whole revolutions (4-8): the motion repeats per revolution. Samples outside the window are ignored. " +
+    "Generating before the end uses [warm-up, now]. Measure = 0 or empty disables the end.";
   reportSection.appendChild(reportNote);
 
   container.appendChild(reportSection);
 
   const reportAggregator = new ReportAggregator();
-  let reportWarmupS = DEFAULT_REPORT_WARMUP_S;
-  let reportEndTimeS = DEFAULT_REPORT_END_S;
-  reportAggregator.setWindow(reportWarmupS, reportEndTimeS);
+  let reportWarmupS = 0;
+  let reportEndTimeS = 0;
+  reportAggregator.setWindow(0, 0);
   let reportArmed = true;
   let windowComplete = false;
   let lastAggregatedMetrics: AppState["metrics"] = null;
   let latestState: AppState | null = null;
   let latestRpm: number | null = null;
+  // Rpm the aggregator window was last computed for (recomputed when the drum speed changes).
+  let windowRpm: number | null = null;
+  // Frame captured the moment the window first completed, so a later (manual) report embeds the
+  // frame at the report end rather than a later one; null while the window is not complete.
+  let endSnapshotPng: string | null = null;
+  let endSnapshotSimTimeS: number | null = null;
 
   function refreshReportUi(): void {
     let note: string;
-    if (reportEndTimeS <= 0) note = "No end time set.";
-    else if (latestRpm === null) note = "";
-    else {
-      const revs = (latestRpm * Math.max(0, reportEndTimeS - reportWarmupS)) / 60;
-      note = `≈ ${revs.toFixed(1)} revolutions in the window`;
-    }
+    if (latestRpm === null || latestRpm <= 0) note = "Set a drum speed > 0";
+    else if (reportEndTimeS <= 0) note = `= ${reportWarmupS.toFixed(1)} s warm-up, no end time set.`;
+    else note = `= ${reportWarmupS.toFixed(1)} s warm-up, window ends at ${reportEndTimeS.toFixed(1)} s`;
     if (revNote.textContent !== note) revNote.textContent = note;
-    const label = windowComplete ? "Report window complete – download report" : GENERATE_LABEL;
+    const label = windowComplete ? "Report window complete \u2013 download report" : GENERATE_LABEL;
     if (generateReportButton.textContent !== label) generateReportButton.textContent = label;
     generateReportButton.classList.toggle("is-complete", windowComplete);
   }
 
+  function clearEndSnapshot(): void {
+    endSnapshotPng = null;
+    endSnapshotSimTimeS = null;
+  }
+
   function applyWindowInputs(): void {
-    const w = Number(reportWarmupInput.value);
-    const e = Number(reportEndTimeInput.value);
-    reportWarmupS = Number.isFinite(w) && w > 0 ? w : 0;
-    reportEndTimeS = Number.isFinite(e) && e > 0 ? e : 0;
+    const w = windowSecondsFromRevs(Number(reportWarmupInput.value), Number(reportEndTimeInput.value), latestRpm);
+    windowRpm = latestRpm;
+    reportWarmupS = w.warmupS;
+    reportEndTimeS = w.endS;
     reportAggregator.setWindow(reportWarmupS, reportEndTimeS);
     // Any window edit re-arms the end trigger (raising the end after a completed window resumes it).
     reportArmed = true;
-    windowComplete = latestState !== null && reportAggregator.isPastEnd(latestState.simTime);
+    windowComplete = latestState !== null && reportEndTimeS > 0 && reportAggregator.isPastEnd(latestState.simTime);
+    clearEndSnapshot();
     refreshReportUi();
   }
 
   function generateReport(state: AppState): void {
+    // After the window completed, use the frame captured at the end (stats stop there too).
+    const useEnd = windowComplete && endSnapshotPng !== null;
     const doc = buildReportPdf({
+      warmupRev: Number(reportWarmupInput.value),
+      measureRev: Number(reportEndTimeInput.value),
+      rpm: windowRpm,
       params: state.params,
       aggregator: reportAggregator,
       impactEnergyHistogram: reportAggregator.windowHistogram() ?? state.metrics?.impact_energy_histogram,
       simTimeAtGeneration: state.simTime,
-      snapshotPng: getSnapshotPng ? getSnapshotPng() : null,
+      snapshotPng: useEnd ? endSnapshotPng : getSnapshotPng ? getSnapshotPng() : null,
+      snapshotSimTimeS: useEnd ? (endSnapshotSimTimeS ?? undefined) : undefined,
     });
     downloadReportPdf(doc, state.simTime);
   }
@@ -674,9 +693,12 @@ export function createMetricsPanel(
     // Window end: the first time sim time passes the end, mark the window complete; with the
     // auto checkbox on, also pause + generate + download once (re-armed by reset()/window edits).
     latestRpm = mill ? rpmOf(mill) : null;
+    if (latestRpm !== windowRpm) applyWindowInputs(); // drum speed changed: recompute the window
     if (reportArmed && reportEndTimeS > 0 && reportAggregator.isPastEnd(state.simTime)) {
       reportArmed = false;
       windowComplete = true;
+      endSnapshotPng = getSnapshotPng ? getSnapshotPng() : null;
+      endSnapshotSimTimeS = state.simTime;
       if (autoCheckbox.checked) {
         onAutoReportPause();
         generateReport(state);
@@ -836,6 +858,7 @@ export function createMetricsPanel(
       reportAggregator.reset();
       reportArmed = true;
       windowComplete = false;
+      clearEndSnapshot();
       lastAggregatedMetrics = null;
       refreshReportUi();
     },

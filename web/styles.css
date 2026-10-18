@@ -171,12 +171,26 @@ body.params-collapsed .params-panel {
 }
 
 /* Unmissable, not a subtle number: this simulator is not running at real time right now (see
-   ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). Applied to the whole HUD backdrop so the
-   shortfall is visible even at a glance, not just when reading the speed line's text. */
-.hud-slow-motion {
+   ui/hud.ts's REAL_TIME_THRESHOLD and docs/PERF.md). Applied to the speed badge (top-right) only,
+   so the shortfall is visible at a glance; the bottom-left HUD keeps its normal colours. */
+.hud-speed-badge.hud-slow-motion {
   color: #ffd27a;
   background: rgba(64, 40, 12, 0.85);
   font-weight: 600;
+}
+
+.hud-speed-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #b7bfcc;
+  background: rgba(18, 22, 28, 0.7);
+  padding: 6px 10px;
+  border-radius: 4px;
+  pointer-events: none;
 }
 
 .hud-speed {

@@ -1,6 +1,7 @@
-// On-screen HUD: sim time, rpm/%Nc, fps, achieved time scale. Everything else (toe/shoulder,
+// On-screen HUD (bottom-left): sim time, rpm/%Nc, fps, achieved time scale. Everything else (toe/shoulder,
 // pool extent, mixing index, grinding/solver diagnostics, ...) lives in the metrics panel
-// (ui/metricsPanel.ts, docs/PLAN.md ss4.4) now that it exists.
+// (ui/metricsPanel.ts, docs/PLAN.md ss4.4) now that it exists. The speed indicator is a separate
+// top-right badge (`speedEl`).
 
 import { type CoarseGrainingMode, effectiveMedia, criticalSpeedRpm, percentCriticalOf, rpmOf } from "../params/derived";
 import type { ParamsJson } from "../protocol";
@@ -8,6 +9,8 @@ import type { AppState } from "../state";
 
 export interface Hud {
   el: HTMLElement;
+  /** Speed badge (REAL TIME / SLOW MOTION), a separate top-right overlay; main.ts appends it to the scene wrapper. */
+  speedEl: HTMLElement;
   update(state: AppState, fps: number): void;
 }
 
@@ -73,11 +76,11 @@ export function createHud(): Hud {
   statsLine.className = "hud-line";
   el.appendChild(statsLine);
 
-  // Speed indicator: a graphical dot + proportional bar alongside the existing text, so a
+  // Speed badge (own element, top-right): a graphical dot + proportional bar alongside the existing text, so a
   // sustained shortfall reads at a glance rather than requiring the number to be parsed (user
   // feedback: a text-only "0.37x" is easy to skim past).
   const speedRow = document.createElement("div");
-  speedRow.className = "hud-speed";
+  speedRow.className = "hud-speed hud-speed-badge";
   const speedDot = document.createElement("span");
   speedDot.className = "hud-speed-dot";
   const speedBar = document.createElement("span");
@@ -88,7 +91,6 @@ export function createHud(): Hud {
   const speedText = document.createElement("span");
   speedText.className = "hud-speed-text";
   speedRow.append(speedDot, speedBar, speedText);
-  el.appendChild(speedRow);
 
   // Media-substitution badge: only shown once coarse-graining is actually active (the params
   // panel's Derived section shows this too, but that panel can be collapsed -- this keeps the
@@ -119,6 +121,7 @@ export function createHud(): Hud {
 
   return {
     el,
+    speedEl: speedRow,
     update(state, fps) {
       const mill = millOf(state.params);
       const ballCount = state.ballPositions.length / 2;
@@ -139,7 +142,7 @@ export function createHud(): Hud {
       const fillPct = Math.max(0, Math.min(1, state.achievedTimeScale)) * 100;
       speedBarFill.style.width = `${fillPct}%`;
       speedRow.classList.toggle("hud-speed-slow", !isRealTime);
-      el.classList.toggle("hud-slow-motion", !isRealTime);
+      speedRow.classList.toggle("hud-slow-motion", !isRealTime);
 
       // Prefer the live simulation's own factor (metrics); fall back to the params-derived one.
       const media = mediaSubstitutionOf(state.params);

@@ -235,6 +235,7 @@ sceneWrap.appendChild(toolbar.el);
 
 const hud = createHud();
 sceneWrap.appendChild(hud.el);
+sceneWrap.appendChild(hud.speedEl);
 
 /** Pauses the simulation programmatically (not via the toolbar button's own click), mirroring
  * `togglePlay`'s "pause" branch exactly -- same `state.running` update, same `send({type:

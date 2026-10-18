@@ -368,6 +368,13 @@ export interface ReportInput {
   simTimeAtGeneration: number;
   /** PNG data URL of the `#scene` canvas at generation time; `null`/absent/blank => omitted. */
   snapshotPng?: string | null;
+  /** Sim time at which `snapshotPng` was captured; falls back to `simTimeAtGeneration`. */
+  snapshotSimTimeS?: number;
+  /** Optional window inputs in revolutions and the rpm they were converted at, so the PDF can
+   * state the window in revolutions as well as seconds. */
+  warmupRev?: number;
+  measureRev?: number;
+  rpm?: number | null;
 }
 
 /** The headline results block's metric ids, in display order -- a subset of
@@ -399,7 +406,22 @@ export function buildReportPdf(input: ReportInput): jsPDF {
 
   const hasWindow = aggregator.startTime !== null && aggregator.endTime !== null;
   const win = aggregator.getWindow();
-  const windowSetting = `warm-up ${win.warmupS.toFixed(1)} s, end ${win.endS > 0 ? `${win.endS.toFixed(1)} s` : "none"}`;
+  const endText = win.endS > 0 ? `${win.endS.toFixed(1)} s` : "none";
+  const revsKnown =
+    input.warmupRev !== undefined &&
+    input.measureRev !== undefined &&
+    Number.isFinite(input.warmupRev) &&
+    Number.isFinite(input.measureRev) &&
+    input.rpm !== undefined &&
+    input.rpm !== null &&
+    input.rpm > 0;
+  const windowSetting = revsKnown
+    ? `warm-up ${input.warmupRev!.toFixed(1)} rev (${win.warmupS.toFixed(1)} s), end ` +
+      (win.endS > 0
+        ? `${(input.warmupRev! + input.measureRev!).toFixed(1)} rev (${endText})`
+        : "none") +
+      ` at ${input.rpm!.toFixed(1)} rpm`
+    : `warm-up ${win.warmupS.toFixed(1)} s, end ${endText}`;
   const windowText = hasWindow
     ? `Report window (${windowSetting}): t =${aggregator.startTime!.toFixed(1)} s -> ${aggregator.endTime!.toFixed(1)} s ` +
       `(duration ${(aggregator.endTime! - aggregator.startTime!).toFixed(1)} s, ${aggregator.samples} samples)`
@@ -421,7 +443,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
       doc.setFont("helvetica", "italic");
       doc.setFontSize(8.5);
       doc.setTextColor(110, 110, 110);
-      doc.text(`Mill snapshot at t = ${simTimeAtGeneration.toFixed(1)} s`, PAGE_MARGIN_MM + w + 4, cursor.y + 4);
+      doc.text(`Mill snapshot at t = ${(input.snapshotSimTimeS ?? simTimeAtGeneration).toFixed(1)} s`, PAGE_MARGIN_MM + w + 4, cursor.y + 4);
       cursor.y += h + 6;
     } catch {
       // A malformed/empty snapshot must never block the report.

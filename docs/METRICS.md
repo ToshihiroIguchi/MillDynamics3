@@ -183,6 +183,23 @@ x axis is labelled once per decade starting from the first edge.
 
 ---
 
+## Report window (revolutions)
+
+The PDF report averages samples over a window set in **drum revolutions**, converted to seconds with
+the current rpm (`web/src/report/window.ts`; recomputed when the speed changes): *Warm-up (rev)*,
+default 4, then *Measure (rev)*, default 8, so the window ends at `(warm-up + measure) * 60 / rpm`
+(12 rev = 7.2 s at the default 100 rpm). Measure = 0 or empty disables the end.
+
+**Why revolutions.** The charge needs at least ~4 revolutions to reach its steady state (the same
+default and 5 %/rev drift criterion as the Batch section below), and the motion repeats per revolution,
+so the window should span whole revolutions (4-8). A fixed number of seconds would give far fewer
+revolutions at low rpm. The 4 / 8 defaults are conventions, not measured for every setup; use the Batch
+drift readout to check a given case.
+
+**Snapshot.** The mill picture in the PDF is captured once, when the window completes, so it matches the
+report end time rather than whenever the button is pressed. A report generated before the end uses the
+live frame.
+
 ## Repeat runs (seeds)
 
 Located at the bottom of the Grinding proxy (3D) group (`web/src/ui/batchSection.ts`, pure logic in
