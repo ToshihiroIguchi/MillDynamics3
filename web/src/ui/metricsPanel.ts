@@ -18,6 +18,8 @@ import {
 } from "../metrics/specs";
 import { formatEdgeJ, tickEdgeIndices } from "../metrics/histogramAxis";
 import { MetricsHistory, type CsvColumn } from "../metrics/history";
+import { modelBasisLines } from "../report/assumptions";
+import { versionLine } from "../version";
 import {
   buildReference,
   formatRatio,
@@ -632,7 +634,14 @@ export function createMetricsPanel(
   let lastSimTime = 0;
 
   exportButton.addEventListener("click", () => {
-    const csv = history.toCsv(csvColumns);
+    const params = latestState?.params ?? null;
+    const headerComments = [
+      versionLine(),
+      `params_json: ${JSON.stringify(params)}`,
+      ...modelBasisLines(params).map((l) => `basis: ${l}`),
+      ...METRIC_SPECS.filter((s) => s.csv && s.basis).map((s) => `basis: ${s.label}${s.unit ? ` (${s.unit})` : ""} = ${s.basis}`),
+    ];
+    const csv = history.toCsv(csvColumns, headerComments);
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     try {

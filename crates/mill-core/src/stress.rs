@@ -14,7 +14,9 @@
 //! ([`CLASS_NAMES`]); the two scale differently with drum and ball size.
 //!
 //! Conventions: "per ball" powers use a one-ball-thick slab (depth = ball diameter), i.e. the 2D
-//! per-metre-depth power times `d` divided by the ball count. Results are meant for **relative**
+//! per-metre-depth power times `d` divided by the ball count. This is equivalent to an implied 3D
+//! solid fraction `phi_3D = (2/3) * packing_fraction_2d` (0.547 at the default 0.82); ratios between
+//! conditions do not depend on this depth basis. Results are meant for **relative**
 //! comparison between conditions run with the same code and the same numerical settings.
 //! With coarse-graining (`k > 1`) the simulated ball is not the real ball: do not use them.
 

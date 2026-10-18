@@ -7,7 +7,7 @@
 // synthetic `<a download>` click), just fed jsPDF's own Blob output instead of a hand-built string.
 
 import { jsPDF } from "jspdf";
-import { METRIC_GROUPS, METRIC_SPECS, type MetricSpec } from "../metrics/specs";
+import { BASIS_LEGEND, BASIS_SHORT, METRIC_GROUPS, METRIC_SPECS, type MetricSpec } from "../metrics/specs";
 import { formatEdgeJ, tickEdgeIndices } from "../metrics/histogramAxis";
 import type { ImpactEnergyHistogram } from "../metrics/types";
 import {
@@ -21,7 +21,9 @@ import {
   type MillLike,
 } from "../params/derived";
 import type { ParamsJson } from "../protocol";
+import { versionLine } from "../version";
 import type { ReportAggregator } from "./aggregator";
+import { modelBasisLines, numericsLines } from "./assumptions";
 
 const PAGE_MARGIN_MM = 14;
 const PAGE_WIDTH_MM = 210; // A4 portrait
@@ -383,6 +385,31 @@ export interface ReportInput {
  * with"). `mixing_index` is appended conditionally (slurry-only). */
 const HEADLINE_METRIC_IDS = ["power_draw", "torque", "collision_rate", "dissipated_power"] as const;
 
+/** Tier-2 (intensive / per-mass) headline rows. Grinding-proxy values are meaningless while
+ * coarse-graining is active (k > 1), so they are dropped then, like the collision rate. */
+const HEADLINE_TIER2_IDS = [
+  "proxy_specific_power",
+  "proxy_stress_intensity",
+  "proxy_impacts_total",
+  "toe_angle_deg",
+  "shoulder_angle_deg",
+] as const;
+
+/** Draws wrapped plain text at the left margin, advancing the cursor. */
+function drawParagraph(doc: jsPDF, cursor: Cursor, text: string, fontSize = 9, color: [number, number, number] = [60, 60, 60]): void {
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(fontSize);
+  doc.setTextColor(...color);
+  const lineH = fontSize * 0.5;
+  const lines = doc.splitTextToSize(text, CONTENT_RIGHT_MM - PAGE_MARGIN_MM) as string[];
+  for (const line of lines) {
+    ensureSpace(doc, cursor, lineH);
+    doc.text(line, PAGE_MARGIN_MM, cursor.y);
+    cursor.y += lineH;
+  }
+  cursor.y += 1;
+}
+
 /** Builds the full report as a jsPDF document. Pure with respect to global state except for
  * `document.createElement("canvas")` in `renderHistogramImage` (browser-only; this module is never
  * imported by the aggregator's unit tests). */
@@ -429,7 +456,17 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   doc.text(windowText, PAGE_MARGIN_MM, cursor.y);
   cursor.y += 5;
   doc.text(`Sim time at generation: ${simTimeAtGeneration.toFixed(1)} s`, PAGE_MARGIN_MM, cursor.y);
-  cursor.y += 8;
+  cursor.y += 5;
+  doc.text(`Software: ${versionLine()}`, PAGE_MARGIN_MM, cursor.y);
+  cursor.y += 5;
+  drawParagraph(
+    doc,
+    cursor,
+    '"+/-" in this report is the standard deviation over the time window, not a standard error; for a standard error of the mean use Repeat runs (seeds).',
+    9,
+    [110, 110, 110],
+  );
+  cursor.y += 2;
 
   // --- Mill snapshot (skipped when the canvas is missing/blank) ---------------------------------
   if (snapshotPng && snapshotPng.startsWith("data:image/png") && snapshotPng.length > 1000) {
@@ -496,12 +533,34 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     } else {
       drawKeyValueRow(doc, cursor, "Slurry", "Disabled");
     }
-    drawKeyValueRow(doc, cursor, "Random seed", String(config.seed));
+    for (const line of numericsLines(params)) {
+      const idx = line.indexOf(": ");
+      drawKeyValueRow(doc, cursor, line.slice(0, idx), line.slice(idx + 2));
+    }
     cursor.y += 2;
   }
 
+  // --- Model basis and assumptions ---------------------------------------------------------------
+  ensureSpace(doc, cursor, 14);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
+  doc.setTextColor(20, 20, 20);
+  doc.text("Model basis and assumptions", PAGE_MARGIN_MM, cursor.y);
+  cursor.y += 6;
+  for (const line of modelBasisLines(params)) {
+    drawParagraph(doc, cursor, `- ${line}`, 9);
+  }
+  cursor.y += 3;
+
   // --- Headline results (visually distinguished box) ------------------------------------------
-  const headlineIds = config?.slurryEnabled ? [...HEADLINE_METRIC_IDS, "mixing_index"] : [...HEADLINE_METRIC_IDS];
+  const coarse = config
+    ? effectiveMedia(config.mill.diameter_m, config.media, config.maxBalls, config.coarseGrainingMode, config.coarseGrainingK).scaleFactor > 1
+    : false;
+  const headlineIds: string[] = [
+    ...HEADLINE_METRIC_IDS.filter((id) => !(coarse && id === "collision_rate")),
+    ...(coarse ? [] : HEADLINE_TIER2_IDS),
+    ...(config?.slurryEnabled ? ["mixing_index"] : []),
+  ];
   const headlineSpecs = headlineIds
     .map((id) => METRIC_SPECS.find((s) => s.id === id))
     .filter((s): s is MetricSpec => s !== undefined);
@@ -525,7 +584,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   doc.setFontSize(11.5);
   for (const spec of headlineSpecs) {
     const stats = aggregator.statsFor(spec.id);
-    const unitSuffix = spec.unit ? ` ${spec.unit}` : "";
+    const unitSuffix = (spec.unit ? ` ${spec.unit}` : "") + (spec.basis ? ` [${BASIS_SHORT[spec.basis]}]` : "");
     const valueText = stats ? `${fmt(spec, stats.mean)} +/- ${fmt(spec, stats.std)}${unitSuffix}` : "No data";
     doc.setFont("helvetica", "normal");
     doc.text(spec.label, PAGE_MARGIN_MM + 5, boxY);
@@ -544,17 +603,19 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   cursor.y += 7;
 
   const colMetricX = PAGE_MARGIN_MM;
-  const colMeanX = 110;
-  const colStdX = 140;
-  const colMinX = 165;
-  const colMaxX = 190;
+  const colMeanX = 112;
+  const colStdX = 134;
+  const colMinX = 156;
+  const colMaxX = 178;
+  const colBasisX = 182;
 
   function drawTableHeader(): void {
     ensureSpace(doc, cursor, 6);
     doc.setFont("courier", "bold");
-    doc.setFontSize(8.5);
+    doc.setFontSize(8);
     doc.setTextColor(90, 90, 90);
     doc.text("Metric", colMetricX, cursor.y);
+    doc.text("Basis", colBasisX, cursor.y);
     doc.text("Mean", colMeanX, cursor.y, { align: "right" });
     doc.text("Std", colStdX, cursor.y, { align: "right" });
     doc.text("Min", colMinX, cursor.y, { align: "right" });
@@ -565,6 +626,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     doc.line(PAGE_MARGIN_MM, cursor.y - 3, CONTENT_RIGHT_MM, cursor.y - 3);
   }
 
+  drawParagraph(doc, cursor, BASIS_LEGEND, 8, [110, 110, 110]);
   drawTableHeader();
   for (const group of METRIC_GROUPS) {
     const specsInGroup = METRIC_SPECS.filter((s) => s.group === group);
@@ -578,13 +640,14 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     cursor.y += 4.5;
 
     doc.setFont("courier", "normal");
-    doc.setFontSize(8.5);
+    doc.setFontSize(8);
     doc.setTextColor(30, 30, 30);
     for (const spec of specsInGroup) {
       ensureSpace(doc, cursor, 4.5);
       const stats = aggregator.statsFor(spec.id);
       const label = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
-      doc.text(label.length > 44 ? `${label.slice(0, 43)}...` : label, colMetricX, cursor.y);
+      doc.text(label.length > 56 ? `${label.slice(0, 55)}...` : label, colMetricX, cursor.y);
+      if (spec.basis) doc.text(BASIS_SHORT[spec.basis], colBasisX, cursor.y);
       doc.text(fmt(spec, stats?.mean ?? null), colMeanX, cursor.y, { align: "right" });
       doc.text(fmt(spec, stats?.std ?? null), colStdX, cursor.y, { align: "right" });
       doc.text(fmt(spec, stats?.min ?? null), colMinX, cursor.y, { align: "right" });
@@ -595,9 +658,6 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   }
 
   // --- Time series (small multiples) --------------------------------------------------------------
-  const coarse = config
-    ? effectiveMedia(config.mill.diameter_m, config.media, config.maxBalls, config.coarseGrainingMode, config.coarseGrainingK).scaleFactor > 1
-    : false;
   const seriesIds = [
     "power_draw",
     "torque",

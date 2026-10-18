@@ -66,7 +66,23 @@ export interface MetricSpec {
   /** Show a "x ref" ratio (current / stored reference) next to the value (Grinding proxy rows
    * only; not meaningful for cumulative quantities, which just grow with time). */
   refRatio?: boolean;
+  /** Which 2D-to-3D basis the value is on (docs/METRICS.md "Units and the 2D-to-3D basis"):
+   * `per_depth` = extensive, per metre of drum length; `intensive` = dimensionless or per-mass/
+   * per-ball-per-impact (needs no depth); `per_ball_slab` = per-ball absolute value from wall power
+   * on a one-ball-thick slab. Omitted for solver/diagnostic rows. */
+  basis?: MetricBasis;
 }
+
+export type MetricBasis = "per_depth" | "intensive" | "per_ball_slab";
+
+/** Short basis tags for tables/CSV, with a legend in `BASIS_LEGEND`. */
+export const BASIS_SHORT: Record<MetricBasis, string> = { per_depth: "/m", intensive: "int", per_ball_slab: "slab" };
+export const BASIS_LEGEND =
+  "Basis: /m = per metre of drum length (2D, not scalable by a drum length); int = intensive/dimensionless; " +
+  "slab = per ball on a one-ball-thick slab (implied 3D solid fraction phi_3D = 2/3 x packing_fraction_2d).";
+
+/** Stress-energy thresholds in units of m*g*d. Mirrors `THRESHOLDS_REL` in crates/mill-core/src/stress.rs. */
+export const THRESHOLDS_REL: readonly number[] = [0.03, 0.1, 0.3, 1, 3, 10];
 
 /** The key-results block's metric ids, in display order. Kept as an explicit list (rather than
  * `METRIC_SPECS.filter((s) => s.key)`) so the block's order is independent of where each spec
@@ -118,9 +134,9 @@ function sig(digits: number): (v: number) => string {
 
 const PROXY_NOTE =
   " SE = relative kinetic energy of an impact, computed with the 3D sphere mass each disc stands for; " +
-  "'scaled' means divided by m*g*d (d = ball diameter). Per-ball powers use a one-ball-thick slab " +
-  "(depth = ball diameter). For RELATIVE comparison only (use Set reference); meaningless when " +
-  "coarse-graining is active (k > 1).";
+  "'scaled' means divided by m*g*d (d = ball diameter). Per-ball powers assume a one-ball-thick slab " +
+  "(implied 3D solid fraction phi_3D = 2/3 x packing_fraction_2d). For RELATIVE comparison only " +
+  "(use Set reference); meaningless when coarse-graining is active (k > 1).";
 
 const proxy = (key: keyof NonNullable<Metrics["stress"]>) =>
   (ctx: MetricContext): number | null => {
@@ -147,7 +163,7 @@ const proxyHideUnlessThreshold = (i: number) => (_value: number | null, ctx: Met
 
 const PROXY_BASE = { group: PROXY_GROUP, csv: true, unavailable: (_v: number | null, ctx: MetricContext) => proxyReason(ctx), hideWhenUnavailable: true } as const;
 
-const THRESHOLD_COUNT = 6;
+const THRESHOLD_COUNT = THRESHOLDS_REL.length;
 
 function effectivePowerSpecs(): MetricSpec[] {
   const out: MetricSpec[] = [];
@@ -156,12 +172,13 @@ function effectivePowerSpecs(): MetricSpec[] {
       id: `proxy_eff_power_${i}`,
       help: `Power per ball carried by impacts whose scaled stress energy exceeds this threshold (a mechanistic grinding model counts only sufficiently strong impacts as effective).${PROXY_NOTE}`,
       ...PROXY_BASE,
-      label: "Effective power, SE > threshold",
+      label: `Effective power, SE > ${THRESHOLDS_REL[i]} m·g·d`,
       labelFor: thresholdLabel("Eff. power,", i),
       unit: "W/ball",
       value: proxyAt("effective_power_per_ball_w", i),
       format: sig(3),
       refRatio: true,
+      basis: "per_ball_slab",
       unavailable: proxyHideUnlessThreshold(i),
     });
   }
@@ -175,11 +192,12 @@ function cumulativeEffectiveSpecs(): MetricSpec[] {
       id: `proxy_cum_eff_energy_${i}`,
       help: `Cumulative stress energy per ball carried by impacts above this threshold since the simulation started. The time two conditions need to reach the same value is a relative grinding-time proxy.${PROXY_NOTE}`,
       ...PROXY_BASE,
-      label: "Cumulative effective energy, SE > threshold",
+      label: `Cumulative effective energy, SE > ${THRESHOLDS_REL[i]} m·g·d`,
       labelFor: thresholdLabel("Cum. eff. energy,", i),
       unit: "J/ball",
       value: proxyAt("cumulative_effective_energy_per_ball_j", i),
       format: sig(3),
+      basis: "per_ball_slab",
       unavailable: proxyHideUnlessThreshold(i),
     });
   }
@@ -192,7 +210,31 @@ const m = <K extends keyof Metrics>(key: K) =>
     return typeof value === "number" ? value : null;
   };
 
-export const METRIC_SPECS: MetricSpec[] = [
+const BASIS_BY_ID: Record<string, MetricBasis> = {
+  total_kinetic_energy: "per_depth",
+  power_draw: "per_depth",
+  torque: "per_depth",
+  collision_rate: "per_depth",
+  dissipated_power: "per_depth",
+  toe_angle_deg: "intensive",
+  shoulder_angle_deg: "intensive",
+  centroid_x: "intensive",
+  centroid_y: "intensive",
+  mixing_index: "intensive",
+  proxy_specific_power: "intensive",
+  proxy_wall_power: "per_ball_slab",
+  proxy_impacts_total: "intensive",
+  proxy_impacts_bb_drop: "intensive",
+  proxy_impacts_bb_shear: "intensive",
+  proxy_impacts_bw_drop: "intensive",
+  proxy_impacts_bw_shear: "intensive",
+  proxy_mean_se_drop: "intensive",
+  proxy_mean_se_shear: "intensive",
+  proxy_stress_intensity: "intensive",
+  proxy_cum_specific_energy: "intensive",
+};
+
+const RAW_METRIC_SPECS: MetricSpec[] = [
   // --- Drum -------------------------------------------------------------------------------
   { id: "sim_time", help: "Simulated (physical) time elapsed since the last reset.", group: "Drum", label: "Sim time", unit: "s", value: (ctx) => ctx.simTime, format: fixed(1), csv: true },
   { id: "fps", help: "Rendered frames per second of the browser display loop.", group: "Drum", label: "FPS", value: (ctx) => ctx.fps, format: fixed(0) },
@@ -338,5 +380,11 @@ export const METRIC_SPECS: MetricSpec[] = [
   { id: "coupling_clamp_hits", help: "Times the ball-fluid coupling force was limited for stability in the latest step. Any nonzero value warns of an over-stressed coupling.", group: "Solver", label: "Coupling clamp hits", value: m("coupling_clamp_hits"), format: fixed(0), sparkline: true, csv: true },
   { id: "substep_displacement", help: "Largest distance a ball moves in one sub-step, relative to its diameter. Should stay well below 1; above 0.5 warns of tunnelling risk.", group: "Solver", label: "Substep displacement / diameter", value: m("max_substep_displacement_over_diameter"), format: fixed(3), csv: true },
 ];
+
+/** Specs with `basis` filled in from `BASIS_BY_ID` (the threshold rows set theirs inline). */
+export const METRIC_SPECS: MetricSpec[] = RAW_METRIC_SPECS.map((spec) => {
+  const basis = spec.basis ?? BASIS_BY_ID[spec.id];
+  return basis ? { ...spec, basis } : spec;
+});
 
 export const METRIC_GROUPS: MetricGroupName[] = ["Drum", "Media", "Grinding", PROXY_GROUP, "Slurry", "Solver"];

@@ -132,6 +132,30 @@ Numerical accuracy -> Coarse-graining = Off to disable it and see genuine per-im
 
 ---
 
+## Units and the 2D-to-3D basis
+
+The simulation is a 2D cross-section, so every number sits on one of three bases. The PDF report, the
+live-metrics CSV and the repeat-run exports state this, and the report table tags each row
+(`/m`, `int`, `slab`).
+
+| Tier | Basis tag | Examples | How to use |
+|---|---|---|---|
+| 1. Extensive, per unit depth | `/m` | power draw (W/m), torque (N·m/m), kinetic energy (J/m), dissipated power, collision rate (1/s/m) | The raw 2D output, no 3D assumption. Report for reproducibility and verification. Do **not** multiply by a real drum length `L`: the 2D disc packing (0.82) against a 3D bed (about 0.6) alone overstates the charge mass by about 1.37x, and there are no end walls or axial flow. |
+| 2. Intensive / dimensionless | `int` | %Nc, toe/shoulder angles, impacts per ball per second, `SE/(m g d)`, stress intensity, specific power (W/kg), cumulative specific energy (J/kg), mixing index | Needs no length. These carry the headline results. |
+| 3. Per-ball absolute | `slab` | wall power per ball (W/ball), effective power per ball, cumulative effective energy per ball (J/ball) | Depend on the one-ball-thick-slab assumption below. Show the assumption with the value. |
+
+**Implied 3D solid fraction.** A slab of thickness `d` (one ball diameter) holding the 2D disc packing
+`phi_2D` has, per ball, a volume `d * (pi d^2 / 4) / phi_2D`, while the ball volume is `pi d^3 / 6`.
+The ratio is the implied 3D solid fraction `phi_3D = (2/3) * phi_2D`: 0.547 at the default
+`packing_fraction_2d = 0.82`, close to a real loose ball bed (about 0.6). Equivalently, specific power
+is `P_2D / (rho * J * A_drum * phi_3D)`.
+
+**Ratios are independent of the depth basis.** At fixed `packing_fraction_2d`, any other depth or mass
+basis changes W/kg and W/ball by a constant factor, so every `x ref` ratio between conditions is the
+same. Impact-derived quantities (SE, impacts per ball, effective power per ball) never use depth at
+all. Compare conditions through ratios and tier-2 values rather than through absolute per-ball
+numbers.
+
 ## Grinding proxy (3D) group
 
 Grinding itself is not simulated. This group reports the quantities that mechanistic grinding models
@@ -151,7 +175,9 @@ numerical settings and the same report window as everything else on the panel.
   slip speed, shear type otherwise; ball-ball and ball-wall are kept apart (four classes). They scale
   differently with drum and ball size.
 - **Per-ball powers** use a one-ball-thick slab (depth = ball diameter): the 2D per-metre-depth power
-  times `d`, divided by the ball count.
+  times `d`, divided by the ball count. This is equivalent to an implied 3D solid fraction
+  `phi_3D = (2/3) * packing_fraction_2d` (see "Units and the 2D-to-3D basis" above); only the
+  wall-power-derived per-ball values depend on it, impact-derived quantities never use depth.
 
 **Rows.** Specific power (W/kg, wall power per ball over the 3D ball mass); wall power per ball (W);
 impacts per ball per second (total and the four classes); mean `SE/(m g d)` for drop and shear
