@@ -613,6 +613,7 @@ fn solve_viscosity_with_balls(
     ball_mass: f32,
     ball_inertia: f32,
     dt: f32,
+    guess: &[Vec2],
     v: &mut [Vec2],
     ball_v: &mut [Vec2],
     ball_w: &mut [f32],
@@ -624,7 +625,14 @@ fn solve_viscosity_with_balls(
 
     // Right-hand side and warm start.
     let mut x: Vec<Vec2> = Vec::with_capacity(len);
-    x.extend_from_slice(v);
+    // Warm start: the incoming velocity plus the previous sub-step's viscous correction (the
+    // right-hand side below still uses the incoming velocity alone), so the solve starts near
+    // the diffused field instead of the undiffused one.
+    if guess.len() == n {
+        x.extend(v.iter().zip(guess).map(|(&vi, &gi)| vi + gi));
+    } else {
+        x.extend_from_slice(v);
+    }
     x.extend_from_slice(ball_v);
     x.extend(ball_w.iter().map(|&w| Vec2::new(w, 0.0)));
     let mut b: Vec<Vec2> = Vec::with_capacity(len);
@@ -977,6 +985,9 @@ pub struct FluidParticles {
     pub x: Vec<Vec2>,
     pub v: Vec<Vec2>,
     pub dye: Vec<f32>,
+    /// Viscous velocity correction (`v_after - v_before` of step 7) from the previous sub-step, the
+    /// warm start of the next sub-step's ball-coupled viscosity solve. Empty until the first solve.
+    pub(crate) viscous_guess: Vec<Vec2>,
     pub particle_mass: f32,
     pub h: f32,
     pub rest_density: f32,
@@ -1066,6 +1077,7 @@ impl FluidParticles {
             x,
             v: vec![Vec2::ZERO; n],
             dye,
+            viscous_guess: Vec::new(),
             particle_mass,
             h,
             rest_density,
@@ -2202,6 +2214,8 @@ impl FluidParticles {
                     })
                     .collect();
                 count!(links_active, links.len());
+                let guess = std::mem::take(&mut self.viscous_guess);
+                let v_in = self.v.clone();
                 viscosity_iterations = solve_viscosity_with_balls(
                     &neighbors,
                     &weights,
@@ -2211,10 +2225,24 @@ impl FluidParticles {
                     balls.mass,
                     balls.inertia,
                     dt,
+                    &guess,
                     &mut self.v,
                     &mut ball_v,
                     &mut ball_w,
                 );
+                self.viscous_guess = self
+                    .v
+                    .iter()
+                    .zip(&v_in)
+                    .map(|(&after, &before)| {
+                        let d = after - before;
+                        if d.is_finite() {
+                            d
+                        } else {
+                            Vec2::ZERO
+                        }
+                    })
+                    .collect();
                 // The ball gets exactly what the wall term took from the fluid.
                 for bi in 0..balls.len() {
                     let dv = ball_v[bi] - ball_v0[bi];
@@ -2454,6 +2482,7 @@ mod tests {
             m,
             0.1,
             dt,
+            &[],
             &mut v,
             &mut ball_v,
             &mut ball_w,
@@ -2577,6 +2606,7 @@ mod tests {
             x,
             v,
             dye,
+            viscous_guess: Vec::new(),
             particle_mass,
             h,
             rest_density,
@@ -2926,6 +2956,7 @@ mod tests {
             x: vec![Vec2::new(ball_radius_m + 0.5 * h, 0.0)],
             v: vec![Vec2::new(1.0, 0.0)],
             dye: vec![0.0],
+            viscous_guess: Vec::new(),
             particle_mass: slurry.density_kg_m3 * dx * dx,
             h,
             rest_density: slurry.density_kg_m3,
@@ -3171,6 +3202,7 @@ mod tests {
             x: baseline.x.clone(),
             v: baseline.v.clone(),
             dye: baseline.dye.clone(),
+            viscous_guess: Vec::new(),
             particle_mass: baseline.particle_mass,
             h: baseline.h,
             rest_density: baseline.rest_density,
@@ -3241,6 +3273,7 @@ mod tests {
                 x: baseline.x.clone(),
                 v: baseline.v.clone(),
                 dye: baseline.dye.clone(),
+                viscous_guess: Vec::new(),
                 particle_mass: baseline.particle_mass,
                 h: baseline.h,
                 rest_density: baseline.rest_density,

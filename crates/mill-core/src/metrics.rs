@@ -931,6 +931,7 @@ mod tests {
             x,
             v: vec![Vec2::ZERO; n],
             dye,
+            viscous_guess: Vec::new(),
             particle_mass: 1.0,
             h: 0.01,
             rest_density: 1000.0,
