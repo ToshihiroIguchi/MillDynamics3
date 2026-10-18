@@ -1466,6 +1466,11 @@ impl FluidParticles {
                 // boundary point (`nearby`, the more frequent of the two) -- see step 3.5's
                 // identical rationale.
                 let mut items: Vec<(usize, Vec2, f32)> = Vec::new();
+                // `slot[j]` = index of fluid particle `j` in `items` for the ball being processed
+                // (`NO_SLOT` otherwise), so merging a repeat contribution is O(1) instead of a
+                // linear search; entries are reset after each ball, touching only `items`.
+                const NO_SLOT: u32 = u32::MAX;
+                let mut slot = vec![NO_SLOT; n];
                 let mut nearby: Vec<u32> = Vec::new();
                 for b in 0..balls.len() {
                     if !balls.x[b].is_finite() {
@@ -1494,14 +1499,18 @@ impl FluidParticles {
                                 continue;
                             }
                             let n_hat = delta / r;
-                            match items.iter_mut().find(|(idx, _, _)| *idx == ju) {
-                                Some(entry) => {
-                                    entry.1 += w * n_hat;
-                                    entry.2 += w;
-                                }
-                                None => items.push((ju, w * n_hat, w)),
+                            if slot[ju] == NO_SLOT {
+                                slot[ju] = items.len() as u32;
+                                items.push((ju, w * n_hat, w));
+                            } else {
+                                let entry = &mut items[slot[ju] as usize];
+                                entry.1 += w * n_hat;
+                                entry.2 += w;
                             }
                         }
+                    }
+                    for &(ju, _, _) in &items {
+                        slot[ju] = NO_SLOT;
                     }
                     if items.is_empty() {
                         continue;
