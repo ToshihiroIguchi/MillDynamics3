@@ -278,6 +278,10 @@ body.params-collapsed .params-panel {
   font-weight: 600;
 }
 
+.hud-recording[hidden] {
+  display: none;
+}
+
 .hud-recording-dot {
   width: 8px;
   height: 8px;
