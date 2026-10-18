@@ -45,19 +45,72 @@ struct Config {
     name: &'static str,
     max_balls: u32,
     resolution: u32,
+    /// `true`: the shipped default mill (63 mm drum, 2 mm balls, coarse-graining Off), which is what
+    /// the web app runs; `false`: the legacy 1 m drum with coarse-grained media.
+    shipped: bool,
+    /// Slurry viscosity (Pa s); `None` keeps the default (water, 0.001).
+    viscosity_pa_s: Option<f32>,
 }
 
-/// Same Params as `perf_probe`'s `ui_fast` / `ui_accuracy`.
-const CONFIGS: [Config; 2] = [
+/// Same Params as `perf_probe`'s configs of the same name.
+const CONFIGS: [Config; 8] = [
     Config {
         name: "ui_fast",
         max_balls: 300,
         resolution: 25,
+        shipped: false,
+        viscosity_pa_s: None,
     },
     Config {
         name: "ui_accuracy",
         max_balls: 600,
         resolution: 50,
+        shipped: false,
+        viscosity_pa_s: None,
+    },
+    Config {
+        name: "ship_fast",
+        max_balls: 300,
+        resolution: 25,
+        shipped: true,
+        viscosity_pa_s: None,
+    },
+    Config {
+        name: "ship_acc",
+        max_balls: 600,
+        resolution: 50,
+        shipped: true,
+        viscosity_pa_s: None,
+    },
+    // Viscosity sweep on the shipped mill (Fast tier): the approximate speedups must hold for a
+    // thin (0.01), a syrup-like (1) and a very viscous (50 Pa s) slurry, not only for water.
+    Config {
+        name: "ship_v0.01",
+        max_balls: 300,
+        resolution: 25,
+        shipped: true,
+        viscosity_pa_s: Some(0.01),
+    },
+    Config {
+        name: "ship_v1",
+        max_balls: 300,
+        resolution: 25,
+        shipped: true,
+        viscosity_pa_s: Some(1.0),
+    },
+    Config {
+        name: "ship_v50",
+        max_balls: 300,
+        resolution: 25,
+        shipped: true,
+        viscosity_pa_s: Some(50.0),
+    },
+    Config {
+        name: "ship_acc_v50",
+        max_balls: 600,
+        resolution: 50,
+        shipped: true,
+        viscosity_pa_s: Some(50.0),
     },
 ];
 
@@ -67,6 +120,8 @@ struct Args {
     measure_revs: f32,
     baseline: Option<String>,
     compare: Option<String>,
+    /// Comma-separated config names to run (default: all).
+    only: Option<Vec<String>>,
 }
 
 impl Args {
@@ -77,6 +132,7 @@ impl Args {
             measure_revs: 3.0,
             baseline: None,
             compare: None,
+            only: None,
         };
         let mut args = env::args().skip(1);
         while let Some(flag) = args.next() {
@@ -87,11 +143,12 @@ impl Args {
                 "--measure-revs" => a.measure_revs = val().parse().expect("number"),
                 "--baseline" => a.baseline = Some(val()),
                 "--compare" => a.compare = Some(val()),
+                "--only" => a.only = Some(val().split(',').map(str::to_string).collect()),
                 "--help" | "-h" => {
                     println!(
                         "Flags: --seeds <u64, default 3> --settle-revs <f32, default 2> \
                          --measure-revs <f32, default 3> --baseline <csv to write> \
-                         --compare <csv to compare against>"
+                         --compare <csv to compare against> --only <comma-separated config names>"
                     );
                     std::process::exit(0);
                 }
@@ -158,11 +215,15 @@ fn mean_or_nan(x: &[f64]) -> f64 {
 
 fn params_for(cfg: &Config, seed: u64) -> Params {
     let mut params = Params {
-        mill: MillParams {
-            diameter_m: 1.0,
-            speed_mode: SpeedMode::PercentCritical,
-            speed_value: 70.0,
-            direction: Direction::CounterClockwise,
+        mill: if cfg.shipped {
+            MillParams::default()
+        } else {
+            MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::PercentCritical,
+                speed_value: 70.0,
+                direction: Direction::CounterClockwise,
+            }
         },
         media: MediaParams::default(),
         lifters: LiftersParams {
@@ -171,11 +232,16 @@ fn params_for(cfg: &Config, seed: u64) -> Params {
         },
         slurry: SlurryParams {
             enabled: true,
+            viscosity_pa_s: cfg
+                .viscosity_pa_s
+                .unwrap_or(SlurryParams::default().viscosity_pa_s),
             ..SlurryParams::default()
         },
         ..Params::default()
     };
-    params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
+    if !cfg.shipped {
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
+    }
     params.simulation.max_balls = cfg.max_balls;
     params.simulation.resolution = cfg.resolution;
     params.simulation.seed = seed;
@@ -282,7 +348,11 @@ type Table = BTreeMap<(String, String), (f64, f64)>;
 
 fn run_all(args: &Args) -> Table {
     let mut table = Table::new();
-    for cfg in &CONFIGS {
+    for cfg in CONFIGS.iter().filter(|c| {
+        args.only
+            .as_ref()
+            .is_none_or(|o| o.iter().any(|n| n == c.name))
+    }) {
         let mut per_metric: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
         for s in 0..args.seeds {
             let t = Instant::now();
@@ -402,6 +472,9 @@ fn main() {
             "config", "metric", "baseline", "new", "delta %"
         );
         for cfg in &CONFIGS {
+            if !table.keys().any(|k| k.0 == cfg.name) {
+                continue; // not run this time (--only)
+            }
             for (name, _) in &METRICS {
                 let key = (cfg.name.to_string(), name.to_string());
                 let (Some(&a), Some(&b)) = (base.get(&key), table.get(&key)) else {

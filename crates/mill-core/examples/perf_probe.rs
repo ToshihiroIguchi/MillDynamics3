@@ -33,15 +33,19 @@ struct Config {
     resolution: u32,
     slurry_enabled: bool,
     lifters_count: u32,
+    /// `true`: the shipped default mill (63 mm drum, 2 mm balls, coarse-graining Off) instead of the
+    /// legacy 1 m drum with coarse-grained media.
+    shipped: bool,
 }
 
-const CONFIGS: [Config; 8] = [
+const CONFIGS: [Config; 11] = [
     Config {
         name: "realtime",
         max_balls: 150,
         resolution: 15,
         slurry_enabled: true,
         lifters_count: 0,
+        shipped: false,
     },
     Config {
         name: "balanced",
@@ -49,6 +53,7 @@ const CONFIGS: [Config; 8] = [
         resolution: 25,
         slurry_enabled: true,
         lifters_count: 0,
+        shipped: false,
     },
     Config {
         name: "accuracy",
@@ -56,6 +61,7 @@ const CONFIGS: [Config; 8] = [
         resolution: 40,
         slurry_enabled: true,
         lifters_count: 0,
+        shipped: false,
     },
     Config {
         name: "dry",
@@ -63,6 +69,7 @@ const CONFIGS: [Config; 8] = [
         resolution: 40,
         slurry_enabled: false,
         lifters_count: 0,
+        shipped: false,
     },
     Config {
         name: "lifters",
@@ -70,6 +77,7 @@ const CONFIGS: [Config; 8] = [
         resolution: 40,
         slurry_enabled: true,
         lifters_count: 4,
+        shipped: false,
     },
     // Current UI quality presets (web/src/params/presets.ts): "Fast (default)" 300/25,
     // "Balanced" 300/30, "Accuracy" 600/50.
@@ -79,6 +87,7 @@ const CONFIGS: [Config; 8] = [
         resolution: 25,
         slurry_enabled: true,
         lifters_count: 0,
+        shipped: false,
     },
     Config {
         name: "ui_balanced",
@@ -86,6 +95,7 @@ const CONFIGS: [Config; 8] = [
         resolution: 30,
         slurry_enabled: true,
         lifters_count: 0,
+        shipped: false,
     },
     Config {
         name: "ui_accuracy",
@@ -93,6 +103,32 @@ const CONFIGS: [Config; 8] = [
         resolution: 50,
         slurry_enabled: true,
         lifters_count: 0,
+        shipped: false,
+    },
+    // The shipped default mill at each UI quality tier (what the web app actually runs).
+    Config {
+        name: "ship_fast",
+        max_balls: 300,
+        resolution: 25,
+        slurry_enabled: true,
+        lifters_count: 0,
+        shipped: true,
+    },
+    Config {
+        name: "ship_bal",
+        max_balls: 300,
+        resolution: 30,
+        slurry_enabled: true,
+        lifters_count: 0,
+        shipped: true,
+    },
+    Config {
+        name: "ship_acc",
+        max_balls: 600,
+        resolution: 50,
+        slurry_enabled: true,
+        lifters_count: 0,
+        shipped: true,
     },
 ];
 
@@ -194,11 +230,15 @@ fn state_hash(sim: &Simulation, extended: bool) -> u64 {
 
 fn run_config(cfg: &Config, args: &Args) {
     let mut params = Params {
-        mill: mill_core::params::MillParams {
-            diameter_m: 1.0,
-            speed_mode: SpeedMode::PercentCritical,
-            speed_value: 70.0,
-            direction: Direction::CounterClockwise,
+        mill: if cfg.shipped {
+            mill_core::params::MillParams::default()
+        } else {
+            mill_core::params::MillParams {
+                diameter_m: 1.0,
+                speed_mode: SpeedMode::PercentCritical,
+                speed_value: 70.0,
+                direction: Direction::CounterClockwise,
+            }
         },
         media: MediaParams::default(),
         lifters: LiftersParams {
@@ -207,13 +247,20 @@ fn run_config(cfg: &Config, args: &Args) {
         },
         slurry: SlurryParams {
             enabled: cfg.slurry_enabled,
+            // PERF_VISCOSITY=<Pa s> overrides the slurry viscosity (default: water).
+            viscosity_pa_s: env::var("PERF_VISCOSITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(SlurryParams::default().viscosity_pa_s),
             ..SlurryParams::default()
         },
         ..Params::default()
     };
     // Coarse-graining is Off by default now; these configs rely on `max_balls` capping the
     // 2 mm-ball population in the 1 m drum, so request it explicitly.
-    params.simulation.coarse_graining_mode = mill_core::params::CoarseGrainingMode::Auto;
+    if !cfg.shipped {
+        params.simulation.coarse_graining_mode = mill_core::params::CoarseGrainingMode::Auto;
+    }
     params.simulation.max_balls = cfg.max_balls;
     params.simulation.resolution = cfg.resolution;
     params.simulation.seed = args.seed;
