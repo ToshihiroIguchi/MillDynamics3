@@ -192,7 +192,7 @@ function cumulativeEffectiveSpecs(): MetricSpec[] {
       id: `proxy_cum_eff_energy_${i}`,
       help: `Cumulative stress energy per ball carried by impacts above this threshold since the simulation started. The time two conditions need to reach the same value is a relative grinding-time proxy.${PROXY_NOTE}`,
       ...PROXY_BASE,
-      label: `Cumulative effective energy, SE > ${THRESHOLDS_REL[i]} m·g·d`,
+      label: `Cum. eff. energy, SE > ${THRESHOLDS_REL[i]} m·g·d`,
       labelFor: thresholdLabel("Cum. eff. energy,", i),
       unit: "J/ball",
       value: proxyAt("cumulative_effective_energy_per_ball_j", i),

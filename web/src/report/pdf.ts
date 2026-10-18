@@ -529,7 +529,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     if (config.slurryEnabled) {
       drawKeyValueRow(doc, cursor, "Slurry", "Enabled");
       drawKeyValueRow(doc, cursor, "Slurry fill fraction", config.slurryFillFraction.toFixed(3));
-      drawKeyValueRow(doc, cursor, "Slurry viscosity", `${config.slurryViscosityPaS.toFixed(2)} Pa*s`);
+      drawKeyValueRow(doc, cursor, "Slurry viscosity", `${config.slurryViscosityPaS.toPrecision(3)} Pa*s`);
     } else {
       drawKeyValueRow(doc, cursor, "Slurry", "Disabled");
     }
@@ -695,8 +695,13 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(12);
   doc.setTextColor(20, 20, 20);
-  doc.text("Impact stress-energy distribution (window-mean rates; line = energy-weighted cumulative fraction)", PAGE_MARGIN_MM, cursor.y);
-  cursor.y += 7;
+  doc.text("Impact stress-energy distribution", PAGE_MARGIN_MM, cursor.y);
+  cursor.y += 5;
+  doc.setFont("helvetica", "italic");
+  doc.setFontSize(8.5);
+  doc.setTextColor(110, 110, 110);
+  doc.text("Window-mean rates; line = energy-weighted cumulative fraction.", PAGE_MARGIN_MM, cursor.y);
+  cursor.y += 5;
 
   const imageDataUrl = renderHistogramImage(impactEnergyHistogram);
   if (imageDataUrl) {

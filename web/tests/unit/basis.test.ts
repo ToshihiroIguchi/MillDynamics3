@@ -48,6 +48,14 @@ describe("toCsv header comments", () => {
     expect(csv.split("\n")).toEqual(["# first", "# multi", "# line", "sim_time_s,A", "0.000,1"]);
     expect(h.toCsv([{ id: "a", label: "A" }]).startsWith("sim_time_s,A")).toBe(true);
   });
+
+  it("quotes header labels that contain commas so the column count matches the body", () => {
+    const h = new MetricsHistory(10, 0);
+    h.push(0, { a: 1 });
+    const [header, row] = h.toCsv([{ id: "a", label: "Effective power, SE > 0.3", unit: "W" }]).split("\n");
+    expect(header).toBe('sim_time_s,"Effective power, SE > 0.3 (W)"');
+    expect(row).toBe("0.000,1");
+  });
 });
 
 describe("batch exports carry the basis", () => {

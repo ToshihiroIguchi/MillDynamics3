@@ -65,7 +65,9 @@ export class MetricsHistory {
    * value renders as an empty cell. `headerComments` are written first as `# ...` lines (one per
    * entry; embedded newlines are split so every physical line stays a comment). */
   toCsv(columns: CsvColumn[], headerComments: string[] = []): string {
-    const header = ["sim_time_s", ...columns.map((c) => (c.unit ? `${c.label} (${c.unit})` : c.label))];
+    // Labels may contain commas ("Effective power, SE > 0.3 m·g·d"), so quote them RFC 4180-style.
+    const quote = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+    const header = ["sim_time_s", ...columns.map((c) => quote(c.unit ? `${c.label} (${c.unit})` : c.label))];
     const lines = headerComments.flatMap((c) => c.split("\n").map((l) => `# ${l}`));
     lines.push(header.join(","));
     for (const sample of this.samples) {
