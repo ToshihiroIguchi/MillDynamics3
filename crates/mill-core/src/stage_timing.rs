@@ -15,6 +15,8 @@ mod imp {
     pub enum Stage {
         PredictGrid,
         Density,
+        PushOverlap,
+        Cohesion,
         PushCohesion,
         WallProj,
         DragBuoy,
@@ -29,13 +31,15 @@ mod imp {
     }
 
     /// Number of [`Stage`] variants.
-    pub const STAGE_COUNT: usize = 13;
+    pub const STAGE_COUNT: usize = 15;
 
     /// Display names, indexed by `Stage as usize`.
     pub const STAGE_NAMES: [&str; STAGE_COUNT] = [
         "PBF predict + grid build",
         "density iterations",
-        "push/cohesion/adhesion (3.5-3.6)",
+        "ball overlap push (3.5)",
+        "fluid cohesion (3.6a)",
+        "ball adhesion (3.6b)",
         "wall projection (4-6)",
         "ball drag + buoyancy (6.5-6.6)",
         "density recompute",

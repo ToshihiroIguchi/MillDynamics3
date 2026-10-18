@@ -488,14 +488,21 @@ const BALL_BC_GAIN: f32 = 0.5;
 /// Ratio of the fully-unyielded to the plastic viscosity in the regularised Bingham model.
 const BINGHAM_PLASTIC_RATIO: f32 = 100.0;
 
-/// One fluid particle / ball-surface ghost point pair of the no-slip boundary.
-struct BoundaryPair {
+/// All ghost-point pairs between one fluid particle and one ball's circumference, merged. Every
+/// pair `k` of the group contributes `dt m c_k (v_i - V - W perp(l_k))` to the system, which is
+/// linear in the pair coefficient, so the group needs only `c = sum c_k`, `l = sum c_k l_k` and
+/// `s = sum c_k |l_k|^2`: a fluid particle within the kernel radius of a ball typically sees
+/// several of the ball's boundary points, and merging them makes every operator application
+/// (the CG inner loop) and the diagonal several times cheaper for the same operator.
+struct BoundaryGroup {
     fluid: u32,
     ball: u32,
-    /// Ghost point position relative to the ball centre.
-    lever: Vec2,
-    /// Morris-style coupling weight (already includes [`BALL_BC_GAIN`]).
+    /// Sum of the Morris-style coupling weights (each already includes [`BALL_BC_GAIN`]).
     c: f32,
+    /// `sum c_k l_k`, `l_k` the ghost point position relative to the ball centre.
+    lever_c: Vec2,
+    /// `sum c_k |l_k|^2`.
+    lever2_c: f32,
 }
 
 /// Sub-grid squeeze-film link between two balls (or a ball and the circular drum wall, `other ==
@@ -600,7 +607,7 @@ fn squeeze_links(balls: &Balls, drum_radius: f32, dx: f32, mu: f32, dt: f32) -> 
 fn solve_viscosity_with_balls(
     neighbors: &NeighborLists,
     weights: &ViscWeights,
-    pairs: &[BoundaryPair],
+    groups: &[BoundaryGroup],
     links: &[SqueezeLink],
     mass: f32,
     ball_mass: f32,
@@ -635,11 +642,11 @@ fn solve_viscosity_with_balls(
         diag[n + bi] = ball_mass;
         diag[n + nb + bi] = ball_inertia;
     }
-    for p in pairs {
-        let d = dt * mass * p.c;
-        diag[p.fluid as usize] += d;
-        diag[n + p.ball as usize] += d;
-        diag[n + nb + p.ball as usize] += d * p.lever.length_squared();
+    for g in groups {
+        let d = dt * mass * g.c;
+        diag[g.fluid as usize] += d;
+        diag[n + g.ball as usize] += d;
+        diag[n + nb + g.ball as usize] += dt * mass * g.lever2_c;
     }
     for l in links {
         let d = dt * l.c;
@@ -660,13 +667,17 @@ fn solve_viscosity_with_balls(
             out[n + bi] = ball_mass * x[n + bi];
             out[n + nb + bi] = Vec2::new(ball_inertia * x[n + nb + bi].x, 0.0);
         }
-        for p in pairs {
-            let (i, bi) = (p.fluid as usize, p.ball as usize);
-            let u = x[n + bi] + x[n + nb + bi].x * perp(p.lever);
-            let d = (dt * mass * p.c) * (x[i] - u);
+        for g in groups {
+            let (i, bi) = (g.fluid as usize, g.ball as usize);
+            let (vb, w) = (x[n + bi], x[n + nb + bi].x);
+            let rel = x[i] - vb;
+            let k = dt * mass;
+            // Sum over the group's ghost points of `dt m c_k (v_i - V - W perp(l_k))` and of its
+            // moment `l_k x (...)`; `l x perp(l) = |l|^2`.
+            let d = k * (g.c * rel - w * perp(g.lever_c));
             out[i] += d;
             out[n + bi] -= d;
-            out[n + nb + bi].x -= cross2(p.lever, d);
+            out[n + nb + bi].x -= k * (cross2(g.lever_c, rel) - w * g.lever2_c);
         }
         for l in links {
             let (i, rel) = (l.ball as usize, x[n + l.ball as usize]);
@@ -1386,6 +1397,7 @@ impl FluidParticles {
             }
         }
 
+        stage_mark!(PushOverlap);
         // --- 3.6 Fluid-fluid cohesion and fluid-boundary adhesion (Akinci, Akinci & Teschner,
         // "Versatile Surface Tension and Adhesion for SPH Fluids", 2013, adapted to 2D and to this
         // solver's impulse-based ball coupling) -- the only attraction anywhere in this solver.
@@ -1432,6 +1444,7 @@ impl FluidParticles {
             }
         }
 
+        stage_mark!(Cohesion);
         // --- 3.6b Fluid-boundary adhesion (`slurry.wettability`). Each ball's circumference is
         // sampled into boundary particles ([`ball_boundary_particles`]); a fluid particle within
         // the adhesion kernel's support of one is pulled toward it. `h_adhesion` caps the kernel's
@@ -2083,37 +2096,71 @@ impl FluidParticles {
             // Ball surface as a no-slip (Dirichlet) boundary: ghost points on each ball's
             // circumference carry its rigid-body surface velocity and enter the Morris Laplacian
             // as extra neighbours; the balls' velocities are solved for together with the fluid.
-            let mut pairs: Vec<BoundaryPair> = Vec::new();
+            let mut groups: Vec<BoundaryGroup> = Vec::new();
             if !balls.is_empty() && balls.radius > 0.0 {
                 let dx = 0.5 * h;
                 let count = boundary_points_per_ball(balls.radius, dx) as usize;
                 let pts = ball_boundary_particles(balls, dx);
                 let grid_now = UniformGrid::build(&self.x, h);
                 let eta2 = VISCOSITY_ETA_FACTOR * h * h;
+                // `|delta . spiky_grad(delta)| = |norm (h - r)^2| r` (the gradient is
+                // `delta / r` times its coefficient), so the pair weight needs one square root and
+                // one division rather than the full vector gradient; the per-fluid factor
+                // `GAIN m 2 mu / (rho rho0)` is evaluated once per particle, not once per pair.
+                let spiky_norm = -30.0 / (std::f32::consts::PI * h.powi(5));
+                let fluid_factor: Vec<f32> = (0..n)
+                    .map(|j| {
+                        BALL_BC_GAIN
+                            * (mass * 2.0 * mu_eff[j] / (density[j].max(1e-6) * rest_density))
+                    })
+                    .collect();
+                // `slot[j]` = index in `groups` of the (fluid `j`, current ball) group, so the
+                // ball's several boundary points near the same fluid particle merge in O(1);
+                // entries are cleared when the loop moves on to the next ball.
+                const NO_SLOT: u32 = u32::MAX;
+                let mut slot = vec![NO_SLOT; n];
+                let mut group_start = 0usize;
+                let mut current_ball = usize::MAX;
                 for (k, &bp) in pts.iter().enumerate() {
                     let bi = k / count;
+                    if bi != current_ball {
+                        for g in &groups[group_start..] {
+                            slot[g.fluid as usize] = NO_SLOT;
+                        }
+                        group_start = groups.len();
+                        current_ball = bi;
+                    }
                     if !balls.x[bi].is_finite() {
                         continue;
                     }
                     grid_now.for_each_near(bp, |j| {
                         let delta = self.x[j as usize] - bp;
-                        let r = delta.length();
-                        if !r.is_finite() || r >= h {
+                        let r2 = delta.length_squared();
+                        let r = r2.sqrt();
+                        if !r.is_finite() || r >= h || r <= 1e-9 {
                             return;
                         }
-                        let grad = spiky_grad(delta, r, h);
-                        let rho_i = density[j as usize].max(1e-6);
-                        let c = BALL_BC_GAIN
-                            * (mass * 2.0 * mu_eff[j as usize] / (rho_i * rest_density))
-                            * delta.dot(grad).abs()
-                            / (delta.length_squared() + eta2);
+                        let dot_abs = (spiky_norm * (h - r) * (h - r) * r).abs();
+                        let c = fluid_factor[j as usize] * dot_abs / (r2 + eta2);
                         if c > 0.0 {
-                            pairs.push(BoundaryPair {
-                                fluid: j,
-                                ball: bi as u32,
-                                lever: bp - balls.x[bi],
-                                c,
-                            });
+                            let lever = bp - balls.x[bi];
+                            let (lever_c, lever2_c) = (c * lever, c * lever.length_squared());
+                            let s = slot[j as usize];
+                            if s == NO_SLOT {
+                                slot[j as usize] = groups.len() as u32;
+                                groups.push(BoundaryGroup {
+                                    fluid: j,
+                                    ball: bi as u32,
+                                    c,
+                                    lever_c,
+                                    lever2_c,
+                                });
+                            } else {
+                                let g = &mut groups[s as usize];
+                                g.c += c;
+                                g.lever_c += lever_c;
+                                g.lever2_c += lever2_c;
+                            }
                         }
                     });
                 }
@@ -2122,11 +2169,11 @@ impl FluidParticles {
             let links = squeeze_links(balls, drum.radius_m, 0.5 * h, mu, dt);
             count!(links_built, links.len());
             stage_mark!(ViscLinks);
-            if pairs.is_empty() && links.is_empty() {
+            if groups.is_empty() && links.is_empty() {
                 viscosity_iterations =
                     solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
             } else {
-                count!(ball_pairs, pairs.iter().map(|p| (p.fluid, p.c)), n);
+                count!(ball_pairs, groups.iter().map(|g| (g.fluid, g.c)), n);
                 // Start from the ball velocities *after* this sub-step's earlier impulses
                 // (overlap push, form drag, buoyancy) so the no-slip solve sees them and does not
                 // double-count the same relative velocity.
@@ -2158,7 +2205,7 @@ impl FluidParticles {
                 viscosity_iterations = solve_viscosity_with_balls(
                     &neighbors,
                     &weights,
-                    &pairs,
+                    &groups,
                     &links,
                     mass,
                     balls.mass,
