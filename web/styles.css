@@ -456,6 +456,19 @@ body.params-collapsed .params-panel {
   display: none;
 }
 
+/* Collapsed-by-default long explanatory note (same look as the "Advanced" sub-section). */
+.note-details {
+  margin: 8px 0 2px;
+  border-top: 1px dashed #3a4048;
+}
+
+.note-details > summary {
+  padding: 6px 0 4px;
+  font-size: 11px;
+  color: #8a93a0;
+  cursor: pointer;
+}
+
 .params-row[hidden] {
   display: none;
 }

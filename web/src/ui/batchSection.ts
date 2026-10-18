@@ -105,7 +105,9 @@ export function createBatchSection(deps: BatchSectionDeps): BatchSection {
   const root = el("section", "batch-section");
   root.appendChild(el("h4", "batch-heading", "Repeat runs (seeds)"));
   const help = el("div", "metrics-note", HELP_TEXT);
-  root.appendChild(help);
+  const helpAbout = el("details", "note-details");
+  helpAbout.append(el("summary", undefined, "About repeat runs"), help);
+  root.appendChild(helpAbout);
 
   const seedsInput = labeledInput(root, "batch-seeds", "Seeds (1..N)", "3", "1", "1");
   const warmupInput = labeledInput(root, "batch-warmup", "Warm-up revolutions", "4", "1", "0");
@@ -117,7 +119,9 @@ export function createBatchSection(deps: BatchSectionDeps): BatchSection {
     "The run uses exactly the settings of the main screen (applied parameters, including slurry if " +
     "enabled, which makes it slow). Pause the main simulation while it runs to free CPU.";
   const hintEl = el("div", "metrics-note");
-  root.append(summaryEl, noteEl, hintEl);
+  const noteAbout = el("details", "note-details");
+  noteAbout.append(el("summary", undefined, "About these settings"), noteEl);
+  root.append(summaryEl, noteAbout, hintEl);
 
   const controls = el("div", "metrics-ref-controls");
   const runBtn = el("button", "metrics-export", "Run seeds");

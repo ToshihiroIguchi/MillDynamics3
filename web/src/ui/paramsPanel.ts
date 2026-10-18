@@ -488,7 +488,12 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
       slurryInfiltrationNote.className = "params-note";
       slurryInfiltrationNote.textContent =
         "Slurry barely seeps into a settled bed in this 2D model -- expected, not a bug (docs/PHYSICS.md §9).";
-      details.appendChild(slurryInfiltrationNote);
+      const slurryAbout = document.createElement("details");
+      slurryAbout.className = "note-details";
+      const slurryAboutSummary = document.createElement("summary");
+      slurryAboutSummary.textContent = "About slurry infiltration";
+      slurryAbout.append(slurryAboutSummary, slurryInfiltrationNote);
+      details.appendChild(slurryAbout);
     }
 
     form.appendChild(details);

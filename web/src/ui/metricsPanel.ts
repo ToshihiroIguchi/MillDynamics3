@@ -312,12 +312,18 @@ export function createMetricsPanel(
 
   const reportNote = document.createElement("div");
   reportNote.className = "metrics-note";
-  reportNote.textContent =
+  const reportNoteText =
     "PDF summary (stats, time series, snapshot, impact spectrum) over the window [warm-up, warm-up + measure] " +
     "in drum revolutions at the current speed. Use >= 4 warm-up revolutions for steady state and measure " +
     "whole revolutions (4-8): the motion repeats per revolution. Samples outside the window are ignored. " +
     "Generating before the end uses [warm-up, now]. Measure = 0 or empty disables the end.";
-  reportSection.appendChild(reportNote);
+  reportNote.textContent = reportNoteText;
+  const reportAbout = document.createElement("details");
+  reportAbout.className = "note-details";
+  const reportAboutSummary = document.createElement("summary");
+  reportAboutSummary.textContent = "About the report";
+  reportAbout.append(reportAboutSummary, reportNote);
+  reportSection.appendChild(reportAbout);
 
   container.appendChild(reportSection);
 
