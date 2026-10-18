@@ -38,7 +38,8 @@ pub fn squeeze_coefficient(k1: f64, k2: f64, h: f64, nu: f64) -> f64 {
 /// The gap-independent part of [`squeeze_coefficient`] for one pair of surface curvatures, so a
 /// caller evaluating many gaps at the same curvatures and viscosity pays for the `powf` of the
 /// reduced radius once. [`SqueezeFilm::coefficient`] evaluates the same expression in the same
-/// order as the one-shot function, so the two agree bit for bit.
+/// order as the one-shot function, except that `h^1.5` is evaluated as `h sqrt(h)` (no
+/// `powf`), which differs from `powf` by at most an f64 rounding error.
 #[derive(Clone, Copy)]
 pub struct SqueezeFilm {
     r: f64,
@@ -65,7 +66,7 @@ impl SqueezeFilm {
     /// Damping coefficient at gap `h`.
     pub fn coefficient(&self, h: f64) -> f64 {
         let eps = h / self.r;
-        self.prefactor / h.powf(1.5) * (1.0 + self.c1 * eps + self.c2 * eps * eps)
+        self.prefactor / (h * h.sqrt()) * (1.0 + self.c1 * eps + self.c2 * eps * eps)
     }
 }
 

@@ -534,18 +534,36 @@ const MIN_FILM_GAP_RATIO: f64 = 0.02;
 /// Builds the squeeze links of all ball pairs and ball-wall contacts closer than the resolved
 /// range. `dx` is the fluid particle spacing; as in the grid track, `1 - resolved_ratio(gap / dx)`
 /// of the film model is added where the discretised fluid cannot carry the film itself.
-fn squeeze_links(balls: &Balls, drum_radius: f32, dx: f32, mu: f32, dt: f32) -> Vec<SqueezeLink> {
+///
+/// `closing`, when given, holds the balls' velocities at the start of the solve: a link whose
+/// partners are not approaching (`n . (v_i - v_j) <= 0`) is not built at all -- the film resists
+/// squeezing only (it cavitates when the gap opens), and the active set is fixed for the solve --
+/// which spares about half of the links their film model. Returns the kept links and the number
+/// of pairs found within the resolved range (before that filter).
+fn squeeze_links(
+    balls: &Balls,
+    drum_radius: f32,
+    dx: f32,
+    mu: f32,
+    dt: f32,
+    closing: Option<&[Vec2]>,
+) -> (Vec<SqueezeLink>, usize) {
     use crate::mac::lubrication as lub;
     let mut out = Vec::new();
+    let mut in_range = 0usize;
     let r = balls.radius;
     if balls.is_empty() || r <= 0.0 || mu <= 0.0 {
-        return out;
+        return (out, 0);
     }
     let (a, b, dxd, mud) = (r as f64, drum_radius as f64, dx as f64, mu as f64);
     let gain = SQUEEZE_GAIN;
     let reach = (lub::H_START * dxd) as f32;
     let c_max = SQUEEZE_STIFFNESS_CAP * balls.mass / dt.max(1e-12);
     let grid = UniformGrid::build(&balls.x, 2.0 * r + reach);
+    // Squared-distance pre-filter (padded so rounding cannot reject a pair the exact test below
+    // keeps): most candidates of the 3x3 cell block are out of range, and this spares them the
+    // square root.
+    let range2 = (2.0 * r + reach) * (2.0 * r + reach) * (1.0 + 1e-4);
     let pair_film = lub::SqueezeFilm::new(1.0 / a, 1.0 / a, mud);
     let wall_film = lub::SqueezeFilm::new(lub::disc_curvature(a), lub::wall_curvature(b), mud);
     for i in 0..balls.len() {
@@ -554,14 +572,24 @@ fn squeeze_links(balls: &Balls, drum_radius: f32, dx: f32, mu: f32, dt: f32) -> 
             continue;
         }
         grid.for_each_near(xi, |j| {
-            if (j as usize) <= i || !balls.x[j as usize].is_finite() {
+            if (j as usize) <= i {
                 return;
             }
             let e = balls.x[j as usize] - xi;
+            if e.length_squared() >= range2 || !e.is_finite() {
+                return;
+            }
             let dist = e.length();
             let gap = dist - 2.0 * r;
             if gap >= reach || dist < 1e-9 {
                 return;
+            }
+            in_range += 1;
+            let n = e / dist;
+            if let Some(vel) = closing {
+                if n.dot(vel[i] - vel[j as usize]) <= 0.0 {
+                    return;
+                }
             }
             let weight = 1.0 - lub::resolved_ratio(gap as f64 / dxd);
             let h = (gap as f64).max(MIN_FILM_GAP_RATIO * a);
@@ -569,25 +597,30 @@ fn squeeze_links(balls: &Balls, drum_radius: f32, dx: f32, mu: f32, dt: f32) -> 
             out.push(SqueezeLink {
                 ball: i as u32,
                 other: j,
-                n: e / dist,
+                n,
                 c: (gain * c as f32).min(c_max),
             });
         });
         let dist = xi.length();
         let gap = drum_radius - r - dist;
         if gap < reach && dist > 1e-9 {
+            in_range += 1;
+            let n = xi / dist;
+            if closing.is_some_and(|vel| n.dot(vel[i]) <= 0.0) {
+                continue;
+            }
             let weight = 1.0 - lub::resolved_ratio(gap as f64 / dxd);
             let h = (gap as f64).max(MIN_FILM_GAP_RATIO * a);
             let c = weight * wall_film.coefficient(h);
             out.push(SqueezeLink {
                 ball: i as u32,
                 other: WALL_PARTNER,
-                n: xi / dist,
+                n,
                 c: (gain * c as f32).min(c_max),
             });
         }
     }
-    out
+    (out, in_range)
 }
 
 /// Solves the fluid viscosity step together with the balls' own velocities, implicitly:
@@ -1498,6 +1531,8 @@ impl FluidParticles {
                 const NO_SLOT: u32 = u32::MAX;
                 let mut slot = vec![NO_SLOT; n];
                 let mut nearby: Vec<u32> = Vec::new();
+                let adhesion_range2 = h_adhesion * h_adhesion * (1.0 + 1e-4);
+                let adhesion_inner2 = 0.25 * h_adhesion * h_adhesion * (1.0 - 1e-4);
                 for b in 0..balls.len() {
                     if !balls.x[b].is_finite() {
                         continue; // see the identical guard rationale in steps 3.5/6.5/6.6
@@ -1516,7 +1551,13 @@ impl FluidParticles {
                         for &j in &nearby {
                             let ju = j as usize;
                             let delta = bp - self.x[ju]; // points from the fluid toward the ball
-                            let r = delta.length();
+                                                         // Squared-distance pre-filter, padded so rounding cannot reject
+                                                         // what the exact radius test below keeps.
+                            let r2 = delta.length_squared();
+                            if r2 >= adhesion_range2 || r2 <= adhesion_inner2 {
+                                continue;
+                            }
+                            let r = r2.sqrt();
                             if !r.is_finite() || r <= 0.5 * h_adhesion || r >= h_adhesion {
                                 continue;
                             }
@@ -2120,6 +2161,8 @@ impl FluidParticles {
                 // one division rather than the full vector gradient; the per-fluid factor
                 // `GAIN m 2 mu / (rho rho0)` is evaluated once per particle, not once per pair.
                 let spiky_norm = -30.0 / (std::f32::consts::PI * h.powi(5));
+                // Squared-distance pre-filter, padded so rounding cannot reject a pair `r < h` keeps.
+                let range2 = h * h * (1.0 + 1e-4);
                 let fluid_factor: Vec<f32> = (0..n)
                     .map(|j| {
                         BALL_BC_GAIN
@@ -2148,6 +2191,9 @@ impl FluidParticles {
                     grid_now.for_each_near(bp, |j| {
                         let delta = self.x[j as usize] - bp;
                         let r2 = delta.length_squared();
+                        if r2 >= range2 {
+                            return;
+                        }
                         let r = r2.sqrt();
                         if !r.is_finite() || r >= h || r <= 1e-9 {
                             return;
@@ -2178,41 +2224,31 @@ impl FluidParticles {
                 }
             }
             stage_mark!(ViscBoundary);
-            let links = squeeze_links(balls, drum.radius_m, 0.5 * h, mu, dt);
-            count!(links_built, links.len());
+            // Ball velocities *after* this sub-step's earlier impulses (overlap push, form drag,
+            // buoyancy), so the no-slip solve sees them and does not double-count the same
+            // relative velocity; they also decide which squeeze links are active.
+            let ball_v0: Vec<Vec2> = (0..balls.len())
+                .map(|bi| balls.v[bi] + coupling.impulses[bi] / balls.mass)
+                .collect();
+            let (links, links_in_range) =
+                squeeze_links(balls, drum.radius_m, 0.5 * h, mu, dt, Some(&ball_v0));
+            count!(links_built, links_in_range);
             stage_mark!(ViscLinks);
-            if groups.is_empty() && links.is_empty() {
+            if groups.is_empty() && links_in_range == 0 {
                 viscosity_iterations =
                     solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
             } else {
                 count!(ball_pairs, groups.iter().map(|g| (g.fluid, g.c)), n);
-                // Start from the ball velocities *after* this sub-step's earlier impulses
-                // (overlap push, form drag, buoyancy) so the no-slip solve sees them and does not
-                // double-count the same relative velocity.
-                let mut ball_v: Vec<Vec2> = (0..balls.len())
-                    .map(|bi| balls.v[bi] + coupling.impulses[bi] / balls.mass)
-                    .collect();
+                let mut ball_v = ball_v0.clone();
                 let mut ball_w: Vec<f32> = (0..balls.len())
                     .map(|bi| balls.omega[bi] + coupling.angular_impulses[bi] / balls.inertia)
                     .collect();
-                let ball_v0 = ball_v.clone();
                 let ball_w0 = ball_w.clone();
                 // The film resists squeezing only: a link whose gap is already opening at the
-                // start of the sub-step is dropped (a film cannot pull -- it cavitates -- and
-                // resisting the contact solver's separation motion keeps a settled charge
-                // jittering). The active set is fixed for the solve, so the system stays linear.
-                let links: Vec<SqueezeLink> = links
-                    .into_iter()
-                    .filter(|l| {
-                        let vi = ball_v0[l.ball as usize];
-                        let vj = if l.other == WALL_PARTNER {
-                            Vec2::ZERO
-                        } else {
-                            ball_v0[l.other as usize]
-                        };
-                        l.n.dot(vi - vj) > 0.0
-                    })
-                    .collect();
+                // start of the sub-step was dropped by `squeeze_links` (a film cannot pull -- it
+                // cavitates -- and resisting the contact solver's separation motion keeps a
+                // settled charge jittering). The active set is fixed for the solve, so the
+                // system stays linear.
                 count!(links_active, links.len());
                 let guess = std::mem::take(&mut self.viscous_guess);
                 let v_in = self.v.clone();
@@ -2432,10 +2468,26 @@ mod tests {
     #[test]
     fn squeeze_links_exist_only_for_gaps_below_the_resolved_range() {
         let dx = 0.0125;
-        let close = squeeze_links(&two_balls(0.04, 0.04, 0.4 * dx, 1.0), 0.5, dx, 100.0, 1e-3);
+        let close = squeeze_links(
+            &two_balls(0.04, 0.04, 0.4 * dx, 1.0),
+            0.5,
+            dx,
+            100.0,
+            1e-3,
+            None,
+        )
+        .0;
         assert_eq!(close.len(), 1, "a gap of 0.4 dx must be lubricated");
         assert!(close[0].c > 0.0 && (close[0].n - Vec2::X).length() < 1e-6);
-        let far = squeeze_links(&two_balls(0.04, 0.04, 9.0 * dx, 1.0), 0.5, dx, 100.0, 1e-3);
+        let far = squeeze_links(
+            &two_balls(0.04, 0.04, 9.0 * dx, 1.0),
+            0.5,
+            dx,
+            100.0,
+            1e-3,
+            None,
+        )
+        .0;
         assert!(far.is_empty(), "a gap of 9 dx is resolved by the fluid");
 
         // A ball hugging the wall gets a wall link with the outward normal.
@@ -2444,7 +2496,7 @@ mod tests {
         wall.v.truncate(1);
         wall.theta.truncate(1);
         wall.omega.truncate(1);
-        let links = squeeze_links(&wall, 0.5, dx, 100.0, 1e-3);
+        let links = squeeze_links(&wall, 0.5, dx, 100.0, 1e-3, None).0;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].other, WALL_PARTNER);
         assert!((links[0].n - Vec2::new(0.0, -1.0)).length() < 1e-5);
