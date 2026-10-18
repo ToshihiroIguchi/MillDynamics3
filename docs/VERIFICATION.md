@@ -1668,3 +1668,44 @@ not known. (2) The charge **centroid height** is preserved within 1 % (k = 2) an
 and the **toe angle** within 4-5 deg, the shoulder angle within 5-15 deg. (3) Kinetic energy and every
 per-impact statistic change strongly and not monotonically in k (e.g. D/d 150 KE 4.0 / 1.2 / 1.8 / 2.5 J/m for
 k = 1 / 2 / 3 / 5). Stress intensity at k = 2 (0.264) is far from k = 1 (0.368).
+
+## 2026-10-18: approximate-speedup tolerance gate (tolerance_probe)
+
+`examples/tolerance_probe.rs` is the physical-metric A/B gate for solver changes that are not bit-exact. Seeds
+1..N (default 3; 8 were used for the decisions below), 2 settle + 3 measured revolutions. Configs: `ui_fast` /
+`ui_accuracy` (legacy 1 m drum, coarse-graining Auto), `ship_fast` / `ship_acc` (shipped mill), and a viscosity
+sweep `ship_v0.01` / `ship_v1` / `ship_v50` / `ship_acc_v50` (Fast tier unless acc). `--baseline FILE` writes a
+CSV, `--compare FILE` gates, `--only a,b` selects configs.
+
+| Metric | Gate |
+|---|---|
+| power, torque, specific power, impacts | `|delta| <= max(2 sqrt(se_a^2 + se_b^2), 2 %)` |
+| toe / shoulder angle | same, with a 2 degree floor |
+| unattributed / shaft energy fraction | `|new| <= |baseline| x 1.10 + 0.005` |
+| compression mean and worst-5 % | `new <= baseline x 1.10 + 1e-4` |
+| shear rate, ms/frame | informational |
+
+The energy rule is relative because the reference solver is already off by 0.17 / -0.04 / -0.09 / +0.38 depending
+on config, so an absolute limit would always fail.
+
+**Result for the M7 changes** (BoundaryGroup + simplified pair weight, then CG warm start), 8 seeds vs the
+previous solver: 0 gated failures on ship_fast, ship_acc (3 seeds), ship_v1, ship_v50, ship_v0.01 and
+ship_acc_v50 (3 seeds vs d7ced07).
+
+| Config | Power delta |
+|---|---|
+| ship_fast | -0.02 % |
+| ship_v1 | -0.05 % |
+| ship_v50 | -0.17 % |
+| ship_acc (3 seeds; within 2 x SE = 2.4 %) | +2.0 % |
+| ship_v0.01 | -0.15 % |
+| ship_acc_v50 | +0.19 % |
+
+**Methodology lessons.**
+
+- A 3-seed standard error underestimates the noise: a bit-different but mathematically equivalent solver showed
+  +1.3..+2.4 % power shifts in water at 3 seeds that vanished at 8 seeds. Use >= 8 seeds for decisions near the
+  2 % floor and compare the same seeds.
+- The reference solver is deterministic: a `--compare` against its own baseline gives delta 0.
+- The Accuracy tier at the 63 mm drum has mean compression 0.18 / worst-5 % 0.62 even at the reference
+  (pre-existing).

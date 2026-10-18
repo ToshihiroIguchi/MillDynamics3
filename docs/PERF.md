@@ -356,3 +356,67 @@ res 30 / 300 balls 72.2, res 50 / 600 balls 201.9; the former Realtime (res 15, 
 and every "achieved speed" figure above predates the water default, the central-force viscosity, the squeeze
 films and the higher sub-step counts, so treat them as stale. Power error against the converged reference
 (docs/VERIFICATION.md): +4.6 % at res 25, +2.5 % at 30, -1.0 % at 50.
+
+## 2026-10-18: M7 solver pass -- ball-coupling cost, warm-started viscosity CG
+
+**Tooling.** `examples/perf_probe.rs` now has shipped-default configs `ship_fast` / `ship_bal` / `ship_acc` (63 mm
+drum, 2 mm balls, coarse-graining Off; the older configs use a 1 m drum with coarse-graining Auto), a
+`PERF_VISCOSITY=<Pa s>` env override, a hash that also covers ball theta and fluid dye (`hash_old` is kept), and
+`PERF_STAGES=1` for a per-stage table plus counters (needs `--features stage-timing`; compiled out by default,
+and a counting allocator is active in that mode). `examples/tolerance_probe.rs` is the physical-metric A/B gate
+(see docs/VERIFICATION.md).
+
+**Where the time went before** (shipped Fast tier, 300-ball cap / resolution 25, 244 balls, 794 fluid particles):
+
+| Viscosity | ms/frame | Dominant stages (share of frame) |
+|---|---|---|
+| water (0.001 Pa s) | 60 | density iterations 20 %, ball adhesion 18 % (push 3 %, cohesion 3 %), ball-boundary pair build 21 %, squeeze links 12 %, CG 6 % (mean 1.9 iterations) |
+| 1 Pa s | 80 | CG 31 % (23.7 iterations) |
+| 50 Pa s | 169 | CG 63 % (102.7 iterations) |
+
+The Accuracy tier (600 / 50) at 50 Pa s costs ~520 ms/frame (173 CG iterations, always at the 9-pass density cap).
+
+**Changes kept** (commits 0568a56, b6d47a0, f4f77dd; earlier d7ced07 and 78f986b):
+
+1. Boundary pairs are merged per (fluid, ball) into a `BoundaryGroup` (sum c, sum c*l, sum c*|l|^2): ~20.7k pairs
+   become ~6.5k groups per solve with the same linear operator, so the CG apply and diagonal are ~3x cheaper.
+   The pair weight is computed from `|delta . spiky_grad| = |norm (h-r)^2| r` with a per-fluid factor (pair build -37 %).
+2. The CG is warm-started from the previous sub-step's viscous correction: at 50 Pa s mean iterations 102.5 -> 81.4.
+   A warm-start scale of 0.7 gave 85.7 and 1.3 gave 90.7, so 1.0 is kept.
+3. Bit-exact changes: squared-distance prefilters in adhesion / pair build / link build (adhesion stage 12.0 -> 6.5 ms);
+   squeeze links built only when approaching (filter moved before the film model); `SqueezeFilm` hoists
+   curvature-only factors and uses `h*sqrt(h)` instead of `powf`; O(1) adhesion merge; boundary-point trig hoisted.
+
+**Same-session interleaved A/B** (before = commit 9e04644 solver, after = HEAD f4f77dd; min of 2 rounds, 1 round
+for ship_acc at 50 Pa s), ms/frame:
+
+| Config | Viscosity | Before | After | Change |
+|---|---|---|---|---|
+| ship_fast | water | 65.09 | 49.39 | -24.1 % |
+| ship_fast | 1 Pa s | 82.09 | 53.97 | -34.3 % |
+| ship_fast | 50 Pa s | 175.57 | 94.92 | -45.9 % |
+| ship_acc | water | 180.27 | 153.53 | -14.8 % |
+| ship_acc | 1 Pa s | 226.28 | 175.38 | -22.5 % |
+| ship_acc | 50 Pa s | 498.60 | 291.66 | -41.5 % |
+
+**Tried and rejected.**
+
+- Hoisting kernel constants: LLVM already does it; no change.
+- Squeeze-link range cutoff at 4 cells: frame -5 % / 0 %, but power +1.5..2.4 %; the impacts gate FAILs.
+- Finer-cell (h/2) grids with disc-pruned queries and a fresh adhesion grid: adhesion 10.9 -> 20.4 ms (per-cell
+  overhead dominates). The max particle displacement since the step-2 grid build is 0.33 h in Fast and up to 1.4 h
+  in Accuracy, so cell-geometry pruning of that stale grid is unsafe.
+- Loosening `VISCOSITY_CG_TOLERANCE` to 3e-3 / 1e-2: CG iterations 103 -> 90 / 73 at 50 Pa s, but the tolerance is
+  relative to |b|, which is dominated by rigid rotation, so it would stop resolving the viscous correction.
+- Lowering `ADAPTIVE_MAX_EXTRA_ITERATIONS` 6 -> 3 (cap 6 total): compression_mean +6 % Fast / +2 % Accuracy for only
+  -4..6 % time; 1 gives +18 % and 0 gives +24 %, which break the +10 % compression guard.
+
+**Measured but left alone.** Density iterations are 25 % of the water frame and ship_acc always runs the 9-pass
+cap. `mean_shear_rate` is a 2 % per-sub-step diagnostic; lazy evaluation would need a new field on every
+`FluidParticles` literal, not worth 2 %. The largest remaining lever: the 16 auto-raised sub-steps are required by
+the DEM stability criterion, but ~90 % of the frame is fluid work, so sub-cycling the fluid solve (every 2nd
+sub-step) could pay off. That is a physics change needing its own validation and was not attempted.
+
+**Caveat.** Absolute ms vary ~10 % run to run and by up to 10x between sessions on this machine; only same-session
+interleaved A/B numbers are meaningful. The `presets.ts` note strings quote older legacy-config timings and were
+not updated.
