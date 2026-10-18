@@ -14,6 +14,8 @@
 //! - [`metrics`]: toe/shoulder angles, slurry level, mixing index, power draw (M3+).
 //! - [`rng`]: small deterministic PRNG for reproducible particle-lattice jitter.
 
+#[macro_use]
+pub mod stage_timing;
 pub mod batch;
 pub mod coupling;
 pub mod dem;

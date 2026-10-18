@@ -191,11 +191,18 @@ fn ball_boundary_particles(balls: &Balls, dx: f32) -> Vec<Vec2> {
         return Vec::new();
     }
     let count_per_ball = boundary_points_per_ball(balls.radius, dx);
+    // The per-point offsets depend only on `k`, not on the ball: evaluate the trigonometry once
+    // per circumference point instead of once per ball and point (same expressions, so the same
+    // bits).
+    let offsets: Vec<Vec2> = (0..count_per_ball)
+        .map(|k| {
+            let angle = std::f32::consts::TAU * (k as f32) / (count_per_ball as f32);
+            Vec2::new(angle.cos(), angle.sin()) * balls.radius
+        })
+        .collect();
     let mut position = Vec::with_capacity(balls.len() * count_per_ball as usize);
     for b in 0..balls.len() {
-        for k in 0..count_per_ball {
-            let angle = std::f32::consts::TAU * (k as f32) / (count_per_ball as f32);
-            let offset = Vec2::new(angle.cos(), angle.sin()) * balls.radius;
+        for &offset in &offsets {
             position.push(balls.x[b] + offset);
         }
     }
@@ -532,41 +539,39 @@ fn squeeze_links(balls: &Balls, drum_radius: f32, dx: f32, mu: f32, dt: f32) -> 
     let reach = (lub::H_START * dxd) as f32;
     let c_max = SQUEEZE_STIFFNESS_CAP * balls.mass / dt.max(1e-12);
     let grid = UniformGrid::build(&balls.x, 2.0 * r + reach);
-    let mut near: Vec<u32> = Vec::new();
+    let pair_film = lub::SqueezeFilm::new(1.0 / a, 1.0 / a, mud);
+    let wall_film = lub::SqueezeFilm::new(lub::disc_curvature(a), lub::wall_curvature(b), mud);
     for i in 0..balls.len() {
         let xi = balls.x[i];
         if !xi.is_finite() {
             continue;
         }
-        near.clear();
-        grid.for_each_near(xi, |j| near.push(j));
-        for &j in &near {
+        grid.for_each_near(xi, |j| {
             if (j as usize) <= i || !balls.x[j as usize].is_finite() {
-                continue;
+                return;
             }
             let e = balls.x[j as usize] - xi;
             let dist = e.length();
             let gap = dist - 2.0 * r;
             if gap >= reach || dist < 1e-9 {
-                continue;
+                return;
             }
             let weight = 1.0 - lub::resolved_ratio(gap as f64 / dxd);
             let h = (gap as f64).max(MIN_FILM_GAP_RATIO * a);
-            let c = weight * lub::squeeze_coefficient(1.0 / a, 1.0 / a, h, mud);
+            let c = weight * pair_film.coefficient(h);
             out.push(SqueezeLink {
                 ball: i as u32,
                 other: j,
                 n: e / dist,
                 c: (gain * c as f32).min(c_max),
             });
-        }
+        });
         let dist = xi.length();
         let gap = drum_radius - r - dist;
         if gap < reach && dist > 1e-9 {
             let weight = 1.0 - lub::resolved_ratio(gap as f64 / dxd);
             let h = (gap as f64).max(MIN_FILM_GAP_RATIO * a);
-            let c = weight
-                * lub::squeeze_coefficient(lub::disc_curvature(a), lub::wall_curvature(b), h, mud);
+            let c = weight * wall_film.coefficient(h);
             out.push(SqueezeLink {
                 ball: i as u32,
                 other: WALL_PARTNER,
@@ -1124,6 +1129,7 @@ impl FluidParticles {
             return (coupling, FluidStepStats::default());
         }
 
+        stage_reset!();
         // --- 0. Sanitize state carried in from the previous sub-step ------------------------
         // Given finite input this solver provably produces finite output (position only ever
         // advances via `x += v * dt` in step 1; every later correction is individually bounded
@@ -1175,6 +1181,7 @@ impl FluidParticles {
         let grid = UniformGrid::build(&self.x, h);
         let neighbors = build_neighbor_lists(&self.x, &grid, h);
 
+        stage_mark!(PredictGrid);
         // --- 3. Density-constraint solve (Jacobi-style: compute all deltas, then apply) -----
         // `iterations` is a floor here, not a fixed count -- see [`ADAPTIVE_MAX_EXTRA_ITERATIONS`].
         //
@@ -1269,6 +1276,7 @@ impl FluidParticles {
             }
         }
 
+        stage_mark!(Density);
         // --- 3.5 Ball overlap projection (docs/PLAN.md ss3.4 step 1): push fluid particles out
         // of any ball they've penetrated, accumulating the Newton's-third-law reaction on that
         // ball. `balls` is a fixed boundary for this call (see this method's doc comment).
@@ -1545,6 +1553,7 @@ impl FluidParticles {
             }
         }
 
+        stage_mark!(PushCohesion);
         // --- 4. Boundary projection (position only; velocity is reconciled below) ----------
         let mut touched_wall = vec![false; n];
         let mut acct_wall_impulse = [0.0f64; 2];
@@ -1613,6 +1622,7 @@ impl FluidParticles {
         let mut acct_ke_mark = kinetic_energy_f64(&self.v, mass);
         let acct_ke_delta_noslip = acct_ke_mark - acct_ke_before_noslip;
 
+        stage_mark!(WallProj);
         // --- 6.5 Ball drag, Stokes + form (docs/PLAN.md ss3.4 step 2, docs/PHYSICS.md ss6.2):
         // each ball relaxes toward its locally-entrained fluid mass via a relaxation time that
         // combines two regimes in series (`1/tau_eff = 1/tau_stokes + 1/tau_form`):
@@ -2032,6 +2042,7 @@ impl FluidParticles {
         let acct_ke_delta_buoyancy = acct_ke_after_buoyancy - acct_ke_mark;
         acct_ke_mark = acct_ke_after_buoyancy;
 
+        stage_mark!(DragBuoy);
         // --- 7. Implicit Newtonian viscosity (see module doc comment) -----------------------
         let mu = slurry.viscosity_pa_s.max(0.0);
         let mut viscosity_iterations = 0u32;
@@ -2048,6 +2059,7 @@ impl FluidParticles {
             }
             density[i] = rho;
         }
+        stage_mark!(DensityRecompute);
         if mu > 0.0 {
             let mu_eff: Vec<f32> =
                 if slurry.rheology == Rheology::Bingham && slurry.yield_stress_pa > 0.0 {
@@ -2057,6 +2069,7 @@ impl FluidParticles {
                     vec![mu; n]
                 };
             let weights = morris_weights(&self.x, &neighbors, &density, mass, &mu_eff, h);
+            stage_mark!(ViscWeights);
             // Ball surface as a no-slip (Dirichlet) boundary: ghost points on each ball's
             // circumference carry its rigid-body surface velocity and enter the Morris Laplacian
             // as extra neighbours; the balls' velocities are solved for together with the fluid.
@@ -2067,19 +2080,16 @@ impl FluidParticles {
                 let pts = ball_boundary_particles(balls, dx);
                 let grid_now = UniformGrid::build(&self.x, h);
                 let eta2 = VISCOSITY_ETA_FACTOR * h * h;
-                let mut nearby: Vec<u32> = Vec::new();
                 for (k, &bp) in pts.iter().enumerate() {
                     let bi = k / count;
                     if !balls.x[bi].is_finite() {
                         continue;
                     }
-                    nearby.clear();
-                    grid_now.for_each_near(bp, |j| nearby.push(j));
-                    for &j in &nearby {
+                    grid_now.for_each_near(bp, |j| {
                         let delta = self.x[j as usize] - bp;
                         let r = delta.length();
                         if !r.is_finite() || r >= h {
-                            continue;
+                            return;
                         }
                         let grad = spiky_grad(delta, r, h);
                         let rho_i = density[j as usize].max(1e-6);
@@ -2095,10 +2105,12 @@ impl FluidParticles {
                                 c,
                             });
                         }
-                    }
+                    });
                 }
             }
+            stage_mark!(ViscBoundary);
             let links = squeeze_links(balls, drum.radius_m, 0.5 * h, mu, dt);
+            stage_mark!(ViscLinks);
             if pairs.is_empty() && links.is_empty() {
                 viscosity_iterations =
                     solve_implicit_viscosity(&neighbors, &weights, &mut self.v, dt);
@@ -2155,9 +2167,11 @@ impl FluidParticles {
                 }
             }
         }
+        stage_mark!(ViscosityCg);
         let mean_shear_rate_per_s =
             mean_shear_rate(&self.x, &self.v, &neighbors, &density, mass, h);
 
+        stage_mark!(ShearRate);
         let acct_ke_after_viscosity = kinetic_energy_f64(&self.v, mass);
         let acct_ke_delta_viscosity = acct_ke_after_viscosity - acct_ke_mark;
 
@@ -2197,6 +2211,7 @@ impl FluidParticles {
                 *angular = angular.clamp(-angular_clamp, angular_clamp);
             }
         }
+        stage_mark!(FluidOther);
         let coupling_clamp_hits = coupling.clamp_hits;
         (
             coupling,

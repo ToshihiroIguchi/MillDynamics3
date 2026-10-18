@@ -91,6 +91,7 @@ pub fn step_recorded(
         Some(&impulses),
         impacts,
     );
+    stage_mark!(Dem);
     (fluid_stats, dem_stats)
 }
 

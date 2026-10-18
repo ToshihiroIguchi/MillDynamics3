@@ -32,12 +32,41 @@ pub fn wall_curvature(b: f64) -> f64 {
 /// Squeeze-film damping coefficient: force per unit approach speed at gap `h` between surfaces of
 /// signed curvatures `k1` and `k2` (sum positive).
 pub fn squeeze_coefficient(k1: f64, k2: f64, h: f64, nu: f64) -> f64 {
-    let r = 1.0 / (k1 + k2);
-    let eps = h / r;
-    let q = r.powi(3) * (k1.powi(3) + k2.powi(3));
-    let c1 = 0.788 + 0.265 * q;
-    let c2 = (0.006 + 0.057 * (q - 0.25)).max(0.0);
-    3.0 * 2f64.sqrt() * PI * nu * r.powf(1.5) / h.powf(1.5) * (1.0 + c1 * eps + c2 * eps * eps)
+    SqueezeFilm::new(k1, k2, nu).coefficient(h)
+}
+
+/// The gap-independent part of [`squeeze_coefficient`] for one pair of surface curvatures, so a
+/// caller evaluating many gaps at the same curvatures and viscosity pays for the `powf` of the
+/// reduced radius once. [`SqueezeFilm::coefficient`] evaluates the same expression in the same
+/// order as the one-shot function, so the two agree bit for bit.
+#[derive(Clone, Copy)]
+pub struct SqueezeFilm {
+    r: f64,
+    c1: f64,
+    c2: f64,
+    /// `3 sqrt(2) pi nu r^1.5`, the leading factors of the product.
+    prefactor: f64,
+}
+
+impl SqueezeFilm {
+    pub fn new(k1: f64, k2: f64, nu: f64) -> Self {
+        let r = 1.0 / (k1 + k2);
+        let q = r.powi(3) * (k1.powi(3) + k2.powi(3));
+        let c1 = 0.788 + 0.265 * q;
+        let c2 = (0.006 + 0.057 * (q - 0.25)).max(0.0);
+        Self {
+            r,
+            c1,
+            c2,
+            prefactor: 3.0 * 2f64.sqrt() * PI * nu * r.powf(1.5),
+        }
+    }
+
+    /// Damping coefficient at gap `h`.
+    pub fn coefficient(&self, h: f64) -> f64 {
+        let eps = h / self.r;
+        self.prefactor / h.powf(1.5) * (1.0 + self.c1 * eps + self.c2 * eps * eps)
+    }
 }
 
 /// Tangential film scale `K = 2 pi nu sqrt(2 r / h)` with `r = 1 / (k1 + k2)`: the leading term of

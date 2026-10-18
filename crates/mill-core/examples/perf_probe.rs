@@ -35,7 +35,7 @@ struct Config {
     lifters_count: u32,
 }
 
-const CONFIGS: [Config; 5] = [
+const CONFIGS: [Config; 8] = [
     Config {
         name: "realtime",
         max_balls: 150,
@@ -70,6 +70,29 @@ const CONFIGS: [Config; 5] = [
         resolution: 40,
         slurry_enabled: true,
         lifters_count: 4,
+    },
+    // Current UI quality presets (web/src/params/presets.ts): "Fast (default)" 300/25,
+    // "Balanced" 300/30, "Accuracy" 600/50.
+    Config {
+        name: "ui_fast",
+        max_balls: 300,
+        resolution: 25,
+        slurry_enabled: true,
+        lifters_count: 0,
+    },
+    Config {
+        name: "ui_balanced",
+        max_balls: 300,
+        resolution: 30,
+        slurry_enabled: true,
+        lifters_count: 0,
+    },
+    Config {
+        name: "ui_accuracy",
+        max_balls: 600,
+        resolution: 50,
+        slurry_enabled: true,
+        lifters_count: 0,
     },
 ];
 
@@ -115,7 +138,7 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "Flags: --config <realtime|balanced|accuracy|dry|lifters|all> \
+                        "Flags: --config <realtime|balanced|accuracy|dry|lifters|ui_fast|ui_balanced|ui_accuracy|all> \
                          --settle-s <f32> --frames <u32> --seed <u64>"
                     );
                     std::process::exit(0);
@@ -128,11 +151,14 @@ impl Args {
 }
 
 /// FNV-1a over the raw bits of every ball/fluid state component, in the same fixed field/index
-/// order every run -- deterministic run-to-run for byte-identical solver behaviour (this crate's
+/// order every run. With `extended = false` this is the original (pre-2026-10) hash over ball
+/// `x`/`v`/`omega` and fluid `x`/`v`; with `extended = true` it additionally mixes ball `theta`
+/// (after `omega`) and fluid `dye` (after `v`). Both are printed so the original oracle stays
+/// comparable with older docs/PERF.md entries -- deterministic run-to-run for byte-identical solver behaviour (this crate's
 /// own "reproducible from Params + seed" convention, see `grid.rs`'s module doc comment), and
 /// sensitive to any change in floating-point summation order, not just to a change in final
 /// physical outcome.
-fn state_hash(sim: &Simulation) -> u64 {
+fn state_hash(sim: &Simulation, extended: bool) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
     let mut h = FNV_OFFSET;
@@ -149,6 +175,9 @@ fn state_hash(sim: &Simulation) -> u64 {
         mix(balls.v[i].x);
         mix(balls.v[i].y);
         mix(balls.omega[i]);
+        if extended {
+            mix(balls.theta[i]);
+        }
     }
     let fluid = sim.fluid();
     for i in 0..fluid.x.len() {
@@ -156,6 +185,9 @@ fn state_hash(sim: &Simulation) -> u64 {
         mix(fluid.x[i].y);
         mix(fluid.v[i].x);
         mix(fluid.v[i].y);
+        if extended {
+            mix(fluid.dye[i]);
+        }
     }
     h
 }
@@ -179,6 +211,9 @@ fn run_config(cfg: &Config, args: &Args) {
         },
         ..Params::default()
     };
+    // Coarse-graining is Off by default now; these configs rely on `max_balls` capping the
+    // 2 mm-ball population in the 1 m drum, so request it explicitly.
+    params.simulation.coarse_graining_mode = mill_core::params::CoarseGrainingMode::Auto;
     params.simulation.max_balls = cfg.max_balls;
     params.simulation.resolution = cfg.resolution;
     params.simulation.seed = args.seed;
@@ -191,6 +226,9 @@ fn run_config(cfg: &Config, args: &Args) {
         sim.step(1.0 / 60.0);
     }
 
+    let stages = env::var("PERF_STAGES").is_ok_and(|v| v == "1");
+    #[cfg(feature = "stage-timing")]
+    mill_core::stage_timing::clear_totals();
     let mut viscosity_iters_sum = 0u64;
     let mut shear_rate_sum = 0.0f64;
     let start = Instant::now();
@@ -204,19 +242,51 @@ fn run_config(cfg: &Config, args: &Args) {
     let mean_viscosity_iters = viscosity_iters_sum as f64 / args.frames as f64;
     let mean_shear_rate = shear_rate_sum / args.frames as f64;
 
-    let hash = state_hash(&sim);
+    let hash_old = state_hash(&sim, false);
+    let hash_new = state_hash(&sim, true);
 
     println!(
         "config={:<9} balls={:<4} fluid={:<5} ms/frame={:8.4} mean_cg_iters={:6.2} \
-         mean_shear_rate={:9.3} hash=0x{:016x}",
+         mean_shear_rate={:9.3} hash_old=0x{:016x} hash_new=0x{:016x}",
         cfg.name,
         sim.balls().len(),
         sim.fluid().len(),
         ms_per_frame,
         mean_viscosity_iters,
         mean_shear_rate,
-        hash,
+        hash_old,
+        hash_new,
     );
+
+    if stages {
+        print_stage_table(ms_per_frame, args.frames);
+    }
+}
+
+#[cfg(feature = "stage-timing")]
+fn print_stage_table(ms_per_frame: f64, frames: u32) {
+    use mill_core::stage_timing::{totals_ns, STAGE_NAMES};
+    let totals = totals_ns();
+    let total_ms: f64 = totals.iter().map(|&t| t as f64 / 1e6).sum::<f64>() / frames as f64;
+    println!("  {:<36} {:>10} {:>8}", "stage", "ms/frame", "share");
+    for (name, &t) in STAGE_NAMES.iter().zip(totals.iter()) {
+        let ms = t as f64 / 1e6 / frames as f64;
+        println!(
+            "  {:<36} {:>10.4} {:>7.1}%",
+            name,
+            ms,
+            100.0 * ms / total_ms
+        );
+    }
+    println!(
+        "  {:<36} {:>10.4}  (frame wall-clock {:.4}; with timers on)",
+        "sum of stages", total_ms, ms_per_frame
+    );
+}
+
+#[cfg(not(feature = "stage-timing"))]
+fn print_stage_table(_ms_per_frame: f64, _frames: u32) {
+    println!("  PERF_STAGES=1 needs `--features stage-timing`; no breakdown available.");
 }
 
 fn main() {
