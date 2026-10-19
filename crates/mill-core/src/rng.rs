@@ -1,10 +1,11 @@
 //! A tiny, deterministic pseudo-random number generator.
 //!
 //! We intentionally avoid pulling in the `rand` crate: the simulation must be bit-reproducible
-//! across platforms/builds given the same `seed`, and a small xorshift64* generator is more than
+//! across platforms/builds given the same `seed`, and a small xorshift generator is more than
 //! enough for particle-lattice jitter and other non-critical randomness.
 
-/// xorshift64* PRNG. Not cryptographically secure; deterministic given the same seed.
+/// xorshift64 steps (13, 7, 17) followed by the xorshift64* multiplier. Not cryptographically
+/// secure; deterministic given the same seed.
 #[derive(Debug, Clone)]
 pub struct Rng {
     state: u64,

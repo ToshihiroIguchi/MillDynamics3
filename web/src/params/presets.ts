@@ -7,7 +7,7 @@
 // `lifters.count = 0`, steady cascading after ~10 s of sim time; see docs/PERF.md for the full
 // methodology and raw readings, including the exact "fluid spacing / ball diameter" readout this
 // same panel shows live -- `dx / effective_ball_diameter`, equivalently `h / (2 * diameter)`).
-// "Achieved speed" is real, not a target -- Realtime is the only tier that reaches >= 1.0x. All
+// "Achieved speed" is real, not a target -- see each tier's own ms/frame note below. All
 // three tiers stay under the panel's own "a fluid particle is wider than a ball" warning (that
 // ratio is < 1 for each), but all three are still coarse relative to what a visually smooth *thin*
 // wetting film specifically needs -- that is a different, stricter bar the warning threshold does

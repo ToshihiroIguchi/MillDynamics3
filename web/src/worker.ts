@@ -168,7 +168,7 @@ function syncCachedParams(params: ParamsJson): void {
  * original, best-fidelity values since native tests/benches (docs/PERF.md) compare against it
  * directly, but it achieves well under 1x real time (see docs/PERF.md, presets.ts's own doc
  * comment) -- a poor first impression for a fresh page load with nothing else to compare against.
- * "accuracy" here would reproduce that Default's own values; "realtime" is deliberately not that.
+ * "accuracy" (resolution 50) is close to that Default (resolution 40) but not identical; "realtime" is not.
  */
 const INITIAL_PRESET_ID = "realtime";
 

@@ -166,7 +166,7 @@ impl Simulation {
     }
 }
 
-/// Returns mill-core's default parameters, JSON-encoded, so the UI can seed the parameters modal
+/// Returns mill-core's default parameters, JSON-encoded, so the UI can seed the parameters panel
 /// (e.g. "Reset to defaults") without duplicating default values in TypeScript.
 #[wasm_bindgen(js_name = defaultParamsJson)]
 pub fn default_params_json() -> Result<String, JsValue> {

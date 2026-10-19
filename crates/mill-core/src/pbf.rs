@@ -632,8 +632,8 @@ fn squeeze_links(
 /// I_b W_b - dt m sum_(i,k in b) c_ik l_k x (v_i - u_k) = I_b W*_b,   u_k = V_b + W_b perp(l_k)
 /// ```
 ///
-/// The system is symmetric positive definite and conserves linear and angular momentum between the
-/// fluid and each ball exactly (the ball gets what the wall term takes from the fluid). Treating
+/// The system is symmetric positive definite; it conserves total linear momentum and each ball's
+/// torque exactly, total angular momentum only up to the ghost-point offset. Treating
 /// the ball explicitly instead is unstable once the slurry acts as a rigid lump (>= ~10 Pa*s).
 /// Unknowns are packed as `[v (n), V (nb), (W, 0) (nb)]`; Jacobi-preconditioned CG. Returns the
 /// iteration count; `v`, `ball_v`, `ball_w` hold the solution on return.
@@ -1710,8 +1710,8 @@ impl FluidParticles {
         // **Current state (2026-10-19).** `tau_stokes` is disabled (`inv_tau_stokes = 0` below:
         // the viscous drag comes from the ball-surface no-slip boundary in step 7), and the form
         // term carries the textbook `1/2`: `1/tau_form = 1/2 * rest_density * C_D * (2r) *
-        // |v_rel| / m` (it was missing before, i.e. the closure acted as `C_D = 2`). The block
-        // below documents the original two-term design.
+        // |v_rel| / m` (the `tau_form` formula above omits it, i.e. acted as `C_D = 2`), so
+        // `tau_eff = tau_form` today. The text below documents the original two-term design.
         //
         // `r`/`balls.mass` in both formulas above (and in `a_lin`/`a_rot`'s own ball-side inertia
         // term below) are the *true* uncoarsened particle's own radius/mass/inertia

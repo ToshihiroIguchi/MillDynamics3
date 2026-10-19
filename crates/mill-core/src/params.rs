@@ -277,8 +277,8 @@ impl MediaParams {
     }
 }
 
-/// Slurry rheology model. Only `Newtonian` is implemented through M6; `Bingham` is reserved for
-/// the M7 fidelity extension (see docs/PLAN.md).
+/// Slurry rheology model. Both are implemented (`Bingham` via `pbf.rs` `bingham_viscosity`), but
+/// the web UI does not expose `Bingham`; it defaults to `Newtonian` (see docs/PLAN.md).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rheology {
@@ -465,8 +465,8 @@ pub struct SimulationParams {
     /// Maximum wall-clock milliseconds the worker may spend simulating per animation frame.
     pub frame_budget_ms: f32,
     /// Target upper bound on the number of DEM ball particles actually simulated. If the true
-    /// media population (derived from `mill`/`media`) would exceed this, the solver transparently
-    /// substitutes a coarser (larger, lighter) effective ball population that preserves total
+    /// media population (derived from `mill`/`media`) would exceed this and the coarse-graining
+    /// mode is `Auto`, the solver substitutes a coarser (larger, lighter) effective ball population that preserves total
     /// charge mass and cross-sectional fill area — see [`Params::effective_media`] and
     /// docs/PLAN.md ss3.2 ("Coarse-graining"). The default keeps real-time playback achievable per
     /// the M6 performance targets even at small media diameters.
@@ -566,7 +566,7 @@ impl Params {
     /// Derives the media population actually simulated, applying coarse-graining (particle
     /// scaling) per `simulation.coarse_graining_mode` (see [`CoarseGrainingMode`]).
     ///
-    /// The true disc count is [`Params::true_ball_count`]. In the default `Auto` mode, if
+    /// The true disc count is [`Params::true_ball_count`]. In `Auto` mode (not the default; `Off`), if
     /// `N_true > max_balls` we substitute `N_sim` larger discs with scale factor
     /// `k = sqrt(N_true / max_balls)`: `diameter_m = true_diameter_m * k`, so
     /// `N_sim = N_true / k^2 ~= max_balls`. `Off` forces `k = 1` regardless of `max_balls`; `Manual`
@@ -679,10 +679,10 @@ impl Params {
     /// `TARGET_RATIO = 0.5` (half the `< 1` criterion, matching this project's existing "well under
     /// 1, not merely under 1" standard, docs/METRICS.md) was chosen so `Params::default()` and every
     /// `web/src/params/presets.ts` quality preset at the default 0.30 fill fraction are unchanged
-    /// (this method's own unit tests below assert exactly that); `max_balls = 1500` at the Realtime
-    /// preset's resolution raises `substeps` from 8 to 12.
+    /// by their own settings; `Params::default()` itself is raised from 8 to 16 here (63 mm drum,
+    /// 2 mm balls), and `max_balls = 1500` at the Realtime preset's resolution raises 8 to 12.
     ///
-    /// Clamped at `simulation.substeps`'s own validated maximum (16) for the same reason
+    /// The auto-raise is capped at 16 (below the validated maximum of 64) for the same reason
     /// `effective_fluid_resolution` clamps at 200: a pathological combination (`max_balls` far above
     /// `N_true` with a very small `media.ball_diameter_m`) must not make a frame's DEM/PBF cost
     /// unboundedly large. In that residual regime the ratio may still approach or exceed 1; this is
