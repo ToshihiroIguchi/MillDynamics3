@@ -1780,3 +1780,18 @@ displaces fluid only through this inelastic momentum exchange, which acts as a d
 pressure; drag is then set by the exchange rule, not by C_D. At Re 1e3 adhesion adds 0.39 N/m (38 %).
 Open: replace the exchange by a boundary density/pressure for the ball (the DFSPH track's solid kernel integrals
 are the existing design), or test a weaker exchange against this probe; neither is done.
+
+**Ablation of the step 3.5 exchange (temporary multiplier on the exchanged impulse, since removed; log
+`drag/push_scale.log`; res 25, 8 sub-steps).** R = F_meas / F_ref:
+
+| exchange strength | Re 1e3 | Re 3e3 | Re 1e4 |
+|---|---|---|---|
+| 0 (ball feels no exchange) | 2.0 +- 0.8 | 0.32 | 0.17 |
+| 0.25 | 1.8 | 1.7 | 0.42 |
+| 0.5 | 11 | 2.6 | 0.66 |
+| 1 (shipped) | 18 | 5.2 | 0.99 |
+
+The drag is set by the exchange: the interpretation above is confirmed. No single strength fits all Re: the measured
+force grows much more slowly with speed than U^2 (U 0.1 to 1 m/s: force x5, reference x90), so the shipped strength
+matches only at Re 1e4, by coincidence. A scalar re-tuning is therefore not a fix; the drag needs a different
+mechanism (a pressure on the ball from a boundary density, cf. the DFSPH solid kernel integrals). Not done.
