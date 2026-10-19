@@ -786,13 +786,15 @@ mod tests {
 
     #[test]
     fn cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_50_pa_s() {
-        // This project's default slurry viscosity. Measured ~5.5% empirically (down from ~6.4%
-        // pre-fix: step 3.5's overlap push is now itself momentum-bounded -- see that step's doc
-        // comment -- so essentially all remaining clamp hits are step 6.5's drag correction,
-        // which is legitimately larger (though still `a <= 1` bounded, see that step's doc
-        // comment) once the ball<->fluid relaxation factor `beta` approaches saturation at this
-        // viscosity). Bounded at 10%, comfortably above the measured rate but tight enough to
-        // catch a real regression.
+        // A thick slurry (the project's former default viscosity). Measured ~5.5% in the Stokes
+        // era (step 3.5's overlap push is momentum-bounded, so the remaining clamp hits came from
+        // step 6.5's then-saturated drag relaxation, since removed: viscous drag now arrives via
+        // the step-7 joint solve). The 10% bound is kept as a measured bound, not re-derived for
+        // the current closure (docs/PHYSICS.md ss6.4); it is tight enough to catch a regression.
+        // (Rate = clamped ball-sub-steps over all ball-sub-steps of a settled cascading charge;
+        // see `cascading_charge_clamp_rate`.)
+        //
+        // Note: the numbers above date from the viscosity named in this test's title.
         let clamp_rate = cascading_charge_clamp_rate(50.0);
         assert!(
             clamp_rate < 0.10,
@@ -802,12 +804,10 @@ mod tests {
 
     #[test]
     fn cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_200_pa_s() {
-        // The UI's upper bound on slurry viscosity (`web/src/params/schema.ts`). `beta` is
-        // already essentially saturated at 50 Pa*s for this project's ball sizes (`tau << dt`),
-        // so the clamp rate here should be close to the 50 Pa*s case, not worse -- confirming
-        // step 6.5's fix actually saturates rather than continuing to blow up with `mu`, unlike
-        // the pre-fix per-particle blend (which reached ~50% at 200 Pa*s). Measured ~6.5%
-        // empirically; see the 50 Pa*s sibling test for the same bound rationale.
+        // The UI's upper bound on slurry viscosity (`web/src/params/schema.ts`). In the Stokes era
+        // the relaxation was already saturated at 50 Pa*s, so the clamp rate here was close to the
+        // 50 Pa*s case (~6.5% measured; the pre-fix per-particle blend reached ~50%). The bound is
+        // kept as a measured bound; see the 50 Pa*s sibling test for the rationale.
         let clamp_rate = cascading_charge_clamp_rate(200.0);
         assert!(
             clamp_rate < 0.10,

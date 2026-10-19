@@ -26,9 +26,9 @@ const GRAVITY: f32 = -9.81;
 /// a resting one -- because the depenetration solve (step 3) can otherwise leave a pair with
 /// spurious separation velocity from a large position correction; only the choice of *target*
 /// (`e * v_approach` vs. exactly zero) depends on this threshold. See docs/PLAN.md ss3.2 step 6.
-/// Used by the restitution pass in every build (the `dead_code` allow below is vestigial);
+/// Used by the restitution pass in every build (an earlier `allow(dead_code)` attribute on this
+/// constant was vestigial and has been removed);
 /// impact counting (docs/PLAN.md ss3.5) uses a scale-relative threshold instead.
-#[cfg_attr(not(test), allow(dead_code))]
 const RESTITUTION_VELOCITY_THRESHOLD: f32 = 0.02;
 
 /// The threshold above, expressed relative to the ball size: `c * sqrt(g * d)`, with `c` chosen so

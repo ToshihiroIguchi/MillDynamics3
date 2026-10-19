@@ -936,24 +936,24 @@ fn kinetic_energy_f64(v: &[Vec2], mass: f32) -> f64 {
 /// forces (overlap push, viscous drag, buoyancy, docs/PLAN.md ss3.4) are dimensionally consistent
 /// and no longer need an artificially tight ceiling.
 ///
-/// `60x` (raised from an intermediate `20x`) accounts for a real difference in how the two
-/// coupling mechanisms this clamp bounds scale. Step 3.5's overlap-push impulse is now itself
-/// momentum-bounded (see that step's doc comment: it exchanges only the momentum needed to
-/// arrest a particle's actual approach velocity, not `mass * push / dt` for the *position*
-/// correction's full, dt-scaled magnitude as an earlier version did) and so rarely approaches
-/// this clamp at all any more. Step 6.5's drag correction (see that step's own doc comment) is a
-/// *velocity*-matching relaxation, `impulse = mass * a * (v_bar - v_b)` with `a <= 1` bounded but
-/// otherwise `dt`-independent once the relaxation factor `beta` saturates (`dt >= tau`, i.e.
-/// `viscosity_pa_s` above roughly 10 Pa*s at this project's ball sizes) -- physically correct
-/// (achieving no-slip within one sub-step is what "highly viscous" means, and can legitimately
-/// need a large single-sub-step velocity change when a small ball is embedded in a much larger
-/// entrained fluid mass moving fast relative to it), so this clamp still needs to stay generous
-/// enough for that mechanism specifically, not just for step 3.5's (now much smaller) needs.
-/// `60x` keeps clamping rare (single-digit percent of ball-substeps, see
-/// `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled`) at
-/// `viscosity_pa_s` up to 200 while still catching genuine numerical blow-ups; persistent
-/// clamping after the charge has settled still indicates a real problem, not an expected
-/// steady state.
+/// `60x` (raised from an intermediate `20x`) was chosen in the Stokes era, when step 6.5's
+/// relaxation `impulse = mass * a * (v_bar - v_b)` (`a <= 1`) saturated above roughly 10 Pa*s and
+/// legitimately needed a large single-sub-step velocity change for a small ball embedded in a much
+/// larger entrained fluid mass. That closure is gone (`inv_tau_stokes = 0` in step 6.5; the viscous
+/// exchange now arrives through the step-7 joint solve, and step 6.5 keeps only the inertial form
+/// drag), and step 3.5's overlap-push impulse is momentum-bounded and rarely reaches this clamp.
+/// The value `60` and the clamp-rate bounds of
+/// `coupling::tests::cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*` were
+/// NOT re-derived for the current closure (docs/PHYSICS.md ss6.4); they still hold as measured
+/// bounds. Persistent clamping after the charge has settled still indicates a real problem, not an
+/// expected steady state.
+///
+/// History of the value: `3x` (tuned only to survive an early 3D-sphere-versus-2D-disc mass
+/// mismatch), then `20x` once balls and fluid particles were both unit-depth discs, then `60x`.
+/// A clamp event is a deliberate, counted (`coupling_clamp_hits`) conservation violation: the
+/// fluid-side reaction has already been applied unclamped (docs/PHYSICS.md ss6.4).
+///
+/// The same factor bounds the angular impulse (times the ball radius), summed over all mechanisms.
 const F_CLAMP_G_MULTIPLE: f32 = 60.0;
 
 fn impulse_clamp(ball_mass: f32, dt: f32) -> f32 {
