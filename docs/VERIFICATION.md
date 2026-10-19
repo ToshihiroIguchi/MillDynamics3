@@ -1795,3 +1795,25 @@ The drag is set by the exchange: the interpretation above is confirmed. No singl
 force grows much more slowly with speed than U^2 (U 0.1 to 1 m/s: force x5, reference x90), so the shipped strength
 matches only at Re 1e4, by coincidence. A scalar re-tuning is therefore not a fix; the drag needs a different
 mechanism (a pressure on the ball from a boundary density, cf. the DFSPH solid kernel integrals). Not done.
+
+**Prototype: balls as smooth solids in the PBF density constraint (not adopted; code removed, patch kept in
+`docs/measurements/2026-10-19/drag/prototype_ball_density_patch.py`, log `bd_proto1.log`).** Each fluid particle got
+`rho0 * Gamma(r)` added to its density, `Gamma` the Poly6 kernel integral over the ball disc (tabulated, 256 points),
+`grad Gamma` in the constraint gradient, the boundary displacement `lambda_i grad Gamma` reacting on the ball as an
+impulse `-m dx / dt`, and step 3.5 exchanging no momentum (position push only). Res 25, 8 sub-steps, adhesion and
+cohesion off, R = F_meas / F_ref:
+
+| variant | Re 1e3 | Re 3e3 | Re 1e4 |
+|---|---|---|---|
+| shipped | 14.5 | 4.8 | 0.98 |
+| ball density, one-sided constraint | 10.8 | 3.0 | 1.9 |
+| ball density, two-sided constraint (`C` unclamped, valid only for a full pool) | 6.7 | 2.4 | 1.6 |
+| same, 10 iterations | 4.3 | 2.5 | |
+| same, 30 iterations | unstable (error bars > signal) | | |
+
+Almost all of the remaining force is the new density term itself (pressure from the position projection), so the
+projection, not the contact exchange, is now the source. Reading: the one-sided constraint cannot pull fluid in behind
+the ball (cavitation), which explains part of it (two-sided halves the drag), but the Jacobi projection stays too
+dissipative and the two-sided form is unstable with more iterations. Conclusion: a ball boundary term does not make
+position-based fluid drag quantitative at d/dx 2-4; a pressure-based solver (DFSPH, whose own gates are not met either)
+or a much larger d/dx would be needed. Shipped behaviour is unchanged.
