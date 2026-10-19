@@ -1761,3 +1761,22 @@ excess is not identified (candidates: overlap push, density-constraint noise; no
 `0.5 * rho0 * C_D * (2 r_t) * |v_rel| / m_t`, `C_D = 1`. Same-session A/B, 8 seeds, ship_fast / ui_fast / ship_v0.01:
 0 of 27 gated metrics fail (power +0.1 / -1.6 / +0.5 %, toe/shoulder within 2.4 deg, impacts within 2.4 %);
 `cargo test --workspace` green (187 unit tests, 5 verification tests), fmt and clippy clean.
+
+**Where the excess drag comes from (same day, temporary per-mechanism recorder, since removed;
+log `docs/measurements/2026-10-19/drag/split_res25_s8.log`).** x-impulse on the ball per mechanism, res 25,
+8 sub-steps, N/m (reference 0.055 / 0.47 / 5.1):
+
+| Re | total | overlap push (step 3.5) | adhesion | form-drag closure | buoyancy | implicit no-slip solve |
+|---|---|---|---|---|---|---|
+| 1e3 | 1.01 | 0.62 | 0.39 | 0.004 | 0 | ~0 |
+| 3e3 | 2.45 | 1.97 | 0.46 | 0.014 | 0 | 0 |
+| 1e4 | 5.06 | 4.58 | -0.23 | 0.71 | 0 | 0 |
+
+The overlap push, which arrests the normal velocity of every fluid particle that enters the ball's contact
+radius relative to the ball surface (`pbf.rs` step 3.5), carries 60-95 % of the drag; the form-drag closure is
+negligible below Re 1e4, and the viscous no-slip solve is negligible in water. Interpretation (not tested by
+disabling the mechanism): the density constraint does not know the ball, so a ball moving through a full pool
+displaces fluid only through this inelastic momentum exchange, which acts as a dissipative collision rather than a
+pressure; drag is then set by the exchange rule, not by C_D. At Re 1e3 adhesion adds 0.39 N/m (38 %).
+Open: replace the exchange by a boundary density/pressure for the ball (the DFSPH track's solid kernel integrals
+are the existing design), or test a weaker exchange against this probe; neither is done.
