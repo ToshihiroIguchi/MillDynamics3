@@ -9,9 +9,13 @@ broken physics; each misread is called out explicitly below with the corrected r
 reviewer doesn't repeat the same diagnosis. See `docs/PHYSICS.md` for the underlying algorithms and
 exact formulas this document summarises in plain terms.
 
-All readings below were measured in-browser at default `Params` (drum 1 m, 30 rpm / 71% Nc, no
-lifters unless noted, media fill 0.30, slurry fill 0.15 / viscosity 50 Pa·s / wettability 0.6),
-after the initial settling transient (roughly `t > 15` s of simulated time).
+The current shipped defaults are a 63 mm drum at 100 rpm (~59% Nc), 2 mm balls, no lifters, media
+fill 0.30, slurry fill 0.35 / viscosity 0.001 Pa·s (water) / wettability 0.6. Most "measured at
+defaults" figures below were taken earlier, in the **legacy configuration** (drum 1 m, 30 rpm / 71% Nc,
+no lifters unless noted, media fill 0.30, slurry fill 0.15 / viscosity 50 Pa·s / wettability 0.6), after
+the initial settling transient (roughly `t > 15` s of simulated time). Figures dated 2026-09-30 or
+later that name the 63 mm drum were measured in the current configuration. Read the legacy numbers as
+order-of-magnitude guidance, not as targets for the current defaults.
 
 ---
 
@@ -81,7 +85,7 @@ and the regression tests
 
 **With slurry enabled, expect `Dissipated power < Power draw`** — this metric is purely DEM-side and
 does not include the fluid's own viscous dissipation of the balls' kinetic energy (a real,
-separate energy sink; see `docs/PHYSICS.md` §9). Measured at defaults: Power draw ~3300-3700 W/m,
+separate energy sink; see `docs/PHYSICS.md` §9). Measured in the legacy 1 m / 50 Pa·s configuration: Power draw ~3300-3700 W/m,
 Dissipated power ~4000-4100 W/m (slurry coupling impulses are folded into the DEM predict step, so
 this particular reading can occasionally exceed Power draw too — both are within the same order of
 magnitude, which is the property that matters).
@@ -96,8 +100,8 @@ Largest ball-ball penetration depth as a fraction of the ball **radius**, not di
 `(2r - dist) / r`. Two ball centres exactly coincident would read `200%`; a half-diameter overlap
 reads `100%`, not `50%`. This is XPBD (zero-compliance position-based), not a spring-dashpot DEM —
 overlap here is a converged-solver-quality/contact-accuracy indicator, not a stability indicator
-(the solver is unconditionally stable at any overlap; see `docs/PHYSICS.md` §4). **Measured at
-defaults: roughly 20-45%** (of radius) at `dem_iterations = 2`, the current default — a packed,
+(the solver is unconditionally stable at any overlap; see `docs/PHYSICS.md` §4). **Measured in
+the legacy 1 m / 50 Pa·s configuration: roughly 20-45%** (of radius) at `dem_iterations = 2`, the current default — a packed,
 actively-cascading charge does not fully converge its contact network in only 2 Gauss-Seidel
 passes per sub-step. This is a real, known trade-off (`dem_iterations` was halved, from 4 to 2,
 when `substeps` was doubled, to keep DEM cost roughly flat while improving the tunnelling-risk
@@ -311,7 +315,7 @@ compat and because it is a real "how ragged is the density field" signal, includ
 solver deliberately does not correct. **Structurally large on a completely healthy run**: every
 free-surface and near-wall particle has fewer SPH neighbours than an interior particle by simple
 geometry, in *any* SPH-family method, so its measured density reads low — and the one-sided
-constraint above leaves that alone by design. **Measured at defaults: max ~72%, mean ~15-19%.**
+constraint above leaves that alone by design. **Measured in the legacy 1 m / 50 Pa·s configuration: max ~72%, mean ~15-19%.**
 
 **This is exactly the pair of numbers an external review read as "the incompressibility constraint
 has failed" (72.4% max, 16-26% mean, matching the measured range here almost exactly).** It hadn't
@@ -330,7 +334,7 @@ sub-step, a tunnelling-risk diagnostic (`docs/PHYSICS.md` §9). **The reviewer's
 this "must be < 0.05-0.1" is the criterion for an explicit spring-dashpot DEM contact model,
 which this project does not use.** This solver is XPBD (zero-compliance position-based, no
 tangible collision "speed" to overshoot) — the documented criterion here is `< 1`, not `< 0.1`;
-values well under 1 are healthy, not merely tolerable. **Measured at defaults: ~0.16-0.21 with no
+values well under 1 are healthy, not merely tolerable. **Measured in the legacy 1 m / 50 Pa·s configuration: ~0.16-0.21 with no
 lifters, ~0.30 with `lifters.count = 8`** (cataracting off a lifter reaches higher peak ball
 speeds) — both comfortably under 1. A reviewer's `0.402` reading (with lifters enabled) is
 consistent with this pattern, not a regression.
@@ -403,9 +407,11 @@ rather than staying deferred:
   not solely "M6 not done yet": the worker recomputed
   `fluidSurface()`/`metricsJson()` unconditionally every rendered frame regardless of render rate
   (now throttled to ~15 Hz, `web/src/worker.ts`), and the default ball/fluid particle counts were
-  tuned for fidelity, not speed. The default "Realtime" quality preset now reaches ~1.0-1.1x; see
-  `docs/PARAMETERS.md`'s quality-preset table and `docs/PERF.md` for the full measured breakdown and
-  the two coarser-grained alternatives (Balanced, Accuracy) that trade that speed back for fidelity.
+  tuned for fidelity, not speed. At the time, the then-default "Realtime" quality preset reached
+  ~1.0-1.1x in the legacy 1 m configuration (historical: with the current 63 mm / 2 mm-ball / water
+  defaults the app-load "Fast (default)" preset is about 67 ms per frame natively, not real time); see
+  `docs/PARAMETERS.md`'s quality-preset table and `docs/PERF.md` for the measured breakdown and
+  the other presets (Balanced, Accuracy, Impact statistics) that trade speed back for fidelity.
   The HUD (`web/src/ui/hud.ts`) now reports achieved speed unmissably ("SLOW MOTION") whenever it
   falls behind, rather than a number easy to read as a setting.
 - **Parameter changes reset the simulation** — the "by design" framing in an earlier version of this

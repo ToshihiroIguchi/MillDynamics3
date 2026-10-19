@@ -1,18 +1,25 @@
 # MillDynamics3 — Ball Mill Media/Slurry Simulator (Rust → WASM, real-time 2D)
 
+> **Historical design note (banner added 2026-10-20).** This is the original design and milestone plan,
+> only lightly updated since. The current references are `docs/PHYSICS.md` and `docs/TECHNOLOGY.md`
+> (plus `docs/PARAMETERS.md` for the parameter tables). Where this text disagrees with the source code,
+> the source wins. Known drifts, corrected inline below as "(Update 2026-10-20: ...)": the parameters UI
+> is a persistent left panel (not a modal), the sub-step is `1/(60*effective_substeps)` (not a fixed
+> 1/240 s), and the shipped defaults are a 63 mm drum, 2 mm balls, 100 rpm, water-like slurry.
+
 ## Context
 
 Goal: an interactive browser app that simulates a tumbling ball mill cross-section — grinding media (balls) and a
 viscous slurry — and animates it in near real time. The two things the user must be able to see are
 (1) where the balls are and (2) where the slurry free surface is. Mixing of the slurry should also be visible.
 Optional lifters (wall protrusions) must be supported, but the default drum wall is perfectly smooth.
-Parameters are edited in a modal window. Everything runs client-side in WebAssembly.
+Parameters are edited in a persistent left-hand panel (originally planned as a modal window). Everything runs client-side in WebAssembly.
 
 Decisions already made with the user:
 - **2D cross-section** (plane perpendicular to the mill axis), not 3D.
 - **Rust → WASM** core (Rust is not installed yet; Node 24 / npm 11 / git / MinGW gcc / VS present).
 - **Custom solver core** (no rapier/salva): DEM for balls + Position Based Fluids (PBF) for slurry.
-- **Vite + TypeScript, no framework**; Canvas 2D rendering; native `<dialog>` modal.
+- **Vite + TypeScript, no framework**; Canvas 2D rendering; parameters in a persistent left panel (originally a native `<dialog>` modal).
 - Conversation with the user in Japanese; *all* code, comments, docs, UI text, commits in English.
 - Fable/Opus only for planning and hard parts; Sonnet/Haiku subagents for the rest (recorded in CLAUDE.md).
 
@@ -22,7 +29,7 @@ Decisions already made with the user:
 |---|---|
 | Coarse-grained DEM "liquid" particles with damping/cohesion | Single solver, but no incompressibility → slurry compacts/sinks, viscosity is uncontrolled, free surface is ill-defined. Rejected. |
 | WCSPH (weakly compressible SPH) | Physically faithful viscosity, but dt ≈ 1e-4 s → ~170 substeps per 60 Hz frame → ~10× too slow for real time in single-thread WASM at useful resolution. Kept as a possible high-fidelity mode later. |
-| **PBF (Position Based Fluids)** | Unconditionally stable at dt = 1/240 s, 3–4 iterations; ~10–20× cheaper than WCSPH; clean free surface; well-proven for real-time (NVIDIA Flex). Viscosity is an implicit (conjugate-gradient) Newtonian solve, see ss3.3. **Chosen.** |
+| **PBF (Position Based Fluids)** | Unconditionally stable at dt = 1/240 s (original plan; the shipped sub-step is `1/(60*effective_substeps)`, 1/960 s at the defaults), 3–4 iterations; ~10–20× cheaper than WCSPH; clean free surface; well-proven for real-time (NVIDIA Flex). Viscosity is an implicit (conjugate-gradient) Newtonian solve, see ss3.3. **Chosen.** |
 | LBM free-surface | Grid-based, free-surface tracking and moving lifters are complex. Rejected. |
 | MPM | Great for non-Newtonian, but grid+particles transfer cost is too high for real time here. Rejected. |
 
@@ -42,10 +49,10 @@ WCSPH for the fluid above, so the same fix applies:
 | Method for grinding media | Verdict |
 |---|---|
 | Explicit soft-sphere DEM (linear spring–dashpot, Cundall–Strack) | Physically standard, but stable `dt` is set by contact stiffness/impact speed and lands in the microsecond range at real mill wall speeds — tens of thousands of sub-steps/frame, independent of coarse-graining. Rejected. |
-| **Position-based rigid discs (XPBD-style)** | Non-penetration solved as a rigid (zero-compliance) geometric constraint, projected iteratively — unconditionally stable at any sub-step size, including the same 1/240 s / `substeps`-per-frame rate already used for PBF. Friction, restitution, and rolling resistance are added as position/velocity corrections on top of the converged contact solve. **Chosen.** |
+| **Position-based rigid discs (XPBD-style)** | Non-penetration solved as a rigid (zero-compliance) geometric constraint, projected iteratively — unconditionally stable at any sub-step size, including the same sub-step rate already used for PBF (originally 1/240 s; now `1/(60*effective_substeps)`). Friction, restitution, and rolling resistance are added as position/velocity corrections on top of the converged contact solve. **Chosen.** |
 
-Balls are therefore solved with the **same fixed sub-step as the fluid** (`crate::FIXED_DT` =
-1/240 s, `simulation.substeps` per rendered frame), removing the separate DEM time-step/stiffness
+Balls are therefore solved with the **same fixed sub-step as the fluid** (originally `crate::FIXED_DT` =
+1/240 s; now `dt = 1/(60*effective_substeps)` via `Simulation::fixed_sub_dt()`, 1/960 s at the defaults), removing the separate DEM time-step/stiffness
 concept entirely and simplifying the M4 coupling loop (ss3.4) to a single shared sub-step for both
 solvers. Ball charge behaviour (cascading/cataracting/centrifuging, toe/shoulder) is still the
 primary output and this method reproduces it: it is the same class of solver used for real-time
@@ -91,8 +98,8 @@ MillDynamics3/
       worker.ts                 # owns the wasm Simulation; fixed-step accumulator; posts frames
       protocol.ts               # typed messages main↔worker (Init, SetParams, Pause, Frame, Stats)
       params/schema.ts          # parameter definitions (id, label, unit, min/max/step, default, group, hot)
-      params/presets.ts         # named presets (Lab mill 0.3 m, Pilot 0.6 m, Lifters ×8, High viscosity…)
-      ui/paramsModal.ts         # builds <dialog> form from schema; validate; Apply/Reset/Cancel
+      params/presets.ts         # quality presets (Fast (default), Balanced, Accuracy, Impact statistics)
+      ui/paramsPanel.ts         # builds the persistent left-panel form from schema; validate; Apply/Revert
       ui/hud.ts                 # sim time, rpm, %Nc, fps, ms/step, achieved time scale, metrics
       ui/toolbar.ts             # Play/Pause/Step/Reset/Parameters/Presets/Screenshot buttons
       render/canvas.ts          # Canvas 2D renderer (drum, lifters, surface, fluid, balls, dye)
@@ -100,7 +107,7 @@ MillDynamics3/
       state.ts                  # app state (params, running, latest frame)
     tests/
       unit/*.test.ts            # vitest: schema validation, protocol, surface polygon helpers
-      e2e/*.spec.ts             # playwright: modal opens, edit rpm, apply, canvas updates, lifters
+      e2e/*.spec.ts             # playwright: params panel, edit rpm, apply, canvas updates, lifters
   scripts/
     build-wasm.ps1 / build-wasm.sh   # wasm-pack build --target web --release → web/src/wasm/
 ```
@@ -136,7 +143,7 @@ fails twice or the problem is numerical/physical.
 
 ## Project summary
 2D cross-section tumbling ball mill simulator: DEM balls + PBF slurry, Rust → WASM, Vite + TS
-frontend, Canvas 2D, native <dialog> modal for parameters. Default drum wall has **no lifters**.
+frontend, Canvas 2D, a persistent left-side parameters panel (`ui/paramsPanel.ts`; originally planned as a native <dialog> modal). Default drum wall has **no lifters**.
 See docs/PLAN.md, docs/PHYSICS.md, docs/PARAMETERS.md.
 
 ## Repository
@@ -182,10 +189,11 @@ The true (uncoarsened) media population is `N_true = J·k_p·(π R²) / (π r_tr
 and `k_p` is `media.packing_fraction_2d` (2D areal packing fraction of the settled disc charge,
 default 0.82, range `[0.5, 0.907]`, the hexagonal upper bound `π/(2√3) ≈ 0.907`) — this refines an
 earlier `N_real = J·(π R²)/(π r_true²)` formula that implicitly assumed a 100 %-solid footprint. At
-the current defaults (D = 1 m, d = 63 mm, J = 0.30, `k_p` = 0.82), `N_true ≈ 62`, comfortably under
-every `web/src/params/presets.ts` quality tier's `max_balls` (150/300/600) — `media.ball_diameter_m`
-was deliberately raised from an earlier 10 mm lab/bench default to this standard 63 mm media size so
-the shipped configuration needs no coarse-graining out of the box (`scale_factor == 1.0`). At a
+the current defaults (**Update 2026-10-20**: D = 63 mm drum, d = 2 mm balls, J = 0.30, `k_p` = 0.82), `N_true ≈ 244`,
+under every `web/src/params/presets.ts` quality tier's `max_balls` (tiers 300/300/600, plus the Impact
+statistics preset at 600) — the drum/ball sizes were chosen so
+the shipped configuration needs no coarse-graining out of the box (`scale_factor == 1.0`; the mode defaults to Off,
+with Auto/Manual selectable). (The original text used D = 1 m, d = 63 mm, `N_true ≈ 62`, tiers 150/300/600.) At a
 smaller ball diameter (e.g. the former 10 mm default, `N_true ≈ 2460`, or d = 2 mm, tens of
 thousands) `N_true` climbs well above `simulation.max_balls` (default 600, chosen to keep the
 fixed-sub-step tunnelling-risk ratio `max_substep_displacement_over_diameter` in the solver's stable
@@ -206,13 +214,13 @@ factor `k = sqrt(N_true / max_balls)`:
 This is the standard coarse-grained DEM approximation (see e.g. Sakai & Koshizuka 2009; Bierwisch
 et al. 2009): it reproduces bulk charge behaviour (cascading/cataracting/centrifuging, toe/shoulder
 angles) but not the true interstitial void structure or single-collision statistics at the real
-particle size. `d_eff`/`N_sim`/`k` are always shown in the parameters modal's derived-values panel
+particle size. `d_eff`/`N_sim`/`k` are always shown in the parameters panel's derived-values section
 (ss4.3) so the approximation is never silent; `k = 1.0` (no coarse-graining) whenever `N_true <=
 max_balls`. Mass/radius/inertia below are the *effective* (post coarse-graining) values.
 
 **Solver.** No contact stiffness or DEM-specific time step exists in this design (see the rationale
-above): balls advance on the same fixed sub-step as the fluid (`FIXED_DT` = 1/240 s,
-`simulation.substeps` per rendered frame, `simulation.dem_iterations` constraint-solver iterations
+above): balls advance on the same fixed sub-step as the fluid (originally `FIXED_DT` = 1/240 s; now
+`dt = 1/(60*effective_substeps)`, with `effective_substeps >= simulation.substeps` per rendered frame, `simulation.dem_iterations` constraint-solver iterations
 per sub-step, analogous to PBF's `pbf_iterations`). Per sub-step `dt`:
 
 1. **Predict**: `v += g·dt`; `x += v·dt`; `θ += ω·dt` (save `x0`, `θ0` for the velocity
@@ -222,13 +230,13 @@ per sub-step, analogous to PBF's `pbf_iterations`). Per sub-step `dt`:
    `effective_media` (size distributions are future work).
 2. **Broad-phase**: `grid.rs` uniform grid over predicted `x`, cell size `2·r_eff·1.05` (a small
    margin on the *cell size* only); gather candidate ball–ball pairs once (reused across
-   iterations). **Known limitation, surfaced but not fixed**: this broad-phase is purely discrete
+   iterations). **(Update 2026-10-20: the original "no swept/continuous test" limitation below has
+   since been addressed -- the broad-phase margin is widened with ball speed, and swept wall CCD exists
+   (`Drum::toi_swept`); a ball-ball tunnelling risk is still tracked by the diagnostic.)** Original text: this broad-phase was purely discrete
    per sub-step, with no displacement margin or swept/continuous collision test — a ball moving
    more than roughly its own diameter within one sub-step can in principle tunnel through another
    ball or the wall undetected. `DemStepStats::max_substep_displacement_over_diameter` (below)
-   surfaces this risk live (e.g. in the frontend's Solver panel) as a diagnostic ratio, but nothing
-   in the solver currently corrects for it; this remains open work, not solved by the diagnostic's
-   presence.
+   surfaces this risk live (e.g. in the frontend's Solver panel) as a diagnostic ratio.
 3. **Solve non-penetration** (`dem_iterations` Gauss–Seidel passes, zero compliance = rigid):
    - Ball–ball: `C = |x_i − x_j| − (r_i + r_j)`; if `C < 0`, `Δλ = −C / (w_i + w_j)` (`w = 1/m`),
      apply `Δx_i = w_i·Δλ·n̂`, `Δx_j = −w_j·Δλ·n̂`, accumulate `λ_n` for this contact this sub-step.
@@ -242,7 +250,9 @@ per sub-step, analogous to PBF's `pbf_iterations`). Per sub-step `dt`:
    position (linear) and orientation (`∝ r·w_rot`), then velocities are reconstructed again from
    the (now friction-corrected) positions. This is a simplified, non-anchored Coulomb model (no
    cross-substep stiction memory); acceptable for the bulk charge-motion behaviour this project
-   targets, revisited if validation shows drift.
+   targets, revisited if validation shows drift. **(Update 2026-10-20: the friction coefficient is no
+   longer a single kinetic `μ`; it blends a static and a kinetic coefficient by relative sliding speed
+   (`effective_friction` in `dem.rs`, `media.friction_*_static` and `friction_velocity_scale_m_s`).)**
 6. **Restitution** (one pass): for contacts with `λ_n > 0` whose *pre-solve* normal velocity was
    approaching faster than a small threshold (avoids resting-contact buzz), add back an extra
    normal impulse so the *post-solve* separating velocity matches `e · v_n,pre` (per-contact `e`:
@@ -265,12 +275,12 @@ engines (XPBD / "small steps" style, e.g. Macklin, Müller & Chentanez 2016; Mü
 applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and fixed sub-step.
 
 ### 3.3 Slurry — PBF (`pbf.rs`)
-- Particle spacing `dx` from `resolution` param (`dx = R / res`, default res = 40 → 80 particles across the drum);
+- Particle spacing `dx` from `resolution` param (`dx = R / res`, default res = 40 → 80 particles across the drum; the app loads with the Fast preset's 25);
   kernel radius `h = 2·dx`; rest density `ρ0 = ρ_slurry`; particle mass `m_f = ρ0·dx²` (2D, unit depth).
 - Fill: slurry volume given as **fraction of drum area** `U_s` (or "% of charge voids" as an alternative input) → initial
   particles on a hexagonal lattice in the bottom of the drum (interstitial with balls; balls initialised first, fluid particles overlapping a ball are removed).
 - Kernels: 2D Poly6 (`4/(π h⁸)`) for density, 2D Spiky gradient (`−30/(π h⁵)`) for ∇W.
-- Substep (dt = 1/240 s, `substeps` param): predict `x* = x + dt·(v + dt·g)` → neighbour grid (cell = h) → `iters` (default 3,
+- Substep (dt = 1/240 s in the original plan; now `1/(60*effective_substeps)`, `substeps` param): predict `x* = x + dt·(v + dt·g)` → neighbour grid (cell = h) → `iters` (default 3,
   Jacobi-style: all λ/Δp computed from the current positions, then applied together) of density constraint
   `C_i = ρ_i/ρ0 − 1`, `λ_i = −C_i/(Σ|∇C|² + ε)` (ε = 200; plan default), `Δp_i = 1/ρ0·Σ(λ_i+λ_j+s_corr)∇W` → boundary
   projection → update `v = (x*−x)/dt` → no-slip blending → viscosity → `x = x*`.
@@ -282,8 +292,10 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
   visual clustering artifacts appear in practice.
 - Boundaries: SDF projection against drum/lifters with wall velocity blending
   `v ← (1−β)·v + β·v_wall` for particles that were projected (touching the wall) this substep (β = no-slip factor,
-  default 1 → no-slip).
-- **Viscosity (implemented)**: implicit (backward-Euler) Newtonian viscosity on the Morris (1997) SPH Laplacian.
+  default 1 → no-slip). Sub-grid squeeze-film links (thin fluid films between close ball surfaces, narrower
+  than the lattice can resolve) also exist in the solver; see `docs/PHYSICS.md`.
+- **Viscosity (implemented)**: implicit (backward-Euler) Newtonian viscosity on the Morris (1997) SPH Laplacian
+  (**Update 2026-10-20**: the implemented pairwise operator is a central-force form, see `docs/PHYSICS.md`; the formula below is the original design).
   Weights `c_ij = m_j(μ_i+μ_j)/(ρ_i ρ_j) · |x_ij·∇W_ij| / (|x_ij|² + 0.01h²)` give `(Lv)_i = Σ_j c_ij (v_i − v_j)`;
   the system `(I + Δt·L) v_new = v` is solved matrix-free by conjugate gradient (relative residual `1e-3`, ≤ 50
   iterations, warm-started from `v`), unconditionally stable for any `μ ≥ 0` at this project's fixed sub-step. This
@@ -294,12 +306,11 @@ applied here to 2D discs sharing the fluid's uniform grid ([`crate::grid`]) and 
   density at each particle. See `pbf.rs`'s `morris_weights`/`solve_implicit_viscosity` doc comments for the full
   derivation, and `mean_shear_rate` for the `γ̇ = sqrt(2 D:D)` readout (`pbf.rs`'s `FluidStepStats`, surfaced on
   `Simulation`) used by `crates/mill-core/src/metrics.rs` and a future Bingham/Herschel–Bulkley extension via
-  Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇` (not yet implemented).
+  Papanastasiou-regularised effective viscosity `μ_eff = K·γ̇^(n−1) + τ_y(1−e^{−m γ̇})/γ̇` (**Update 2026-10-20: Bingham is now implemented**, `bingham_viscosity` in `pbf.rs`, but not exposed in the UI; Herschel–Bulkley is not).
 - Dye: each fluid particle carries `dye ∈ [0,1]` (initial: left half 0 / right half 1, or top/bottom). Pure Lagrangian tracer (no diffusion) → mixing index computed in `metrics.rs`.
 
 ### 3.4 Coupling (`coupling.rs`) — one shared sub-step for both solvers, implemented
-Balls (ss3.2) and fluid (ss3.3) run on the *same* fixed sub-step (`FIXED_DT`, `simulation.substeps`
-per frame) rather than a separate DEM/fluid time-step ratio; `coupling::step` orchestrates the
+Balls (ss3.2) and fluid (ss3.3) run on the *same* fixed sub-step (originally `FIXED_DT`, now `1/(60*effective_substeps)`, `simulation.substeps` requested per frame) rather than a separate DEM/fluid time-step ratio; `coupling::step` orchestrates the
 staggered exchange each sub-step (fluid solves first, using last sub-step's ball positions/
 velocities as a fixed boundary; balls then advance using the resulting impulses, so their new state
 becomes the fluid's boundary for the *next* sub-step). The exchange is expressed as **impulses**,
@@ -315,7 +326,7 @@ how the rest of the solver already applies position/velocity corrections directl
    `Δv = push/dt` (ss3.3 step 5's reconstruction), the fluid's own momentum change (impulse) is
    `m_f · push / dt`; the ball's Newton's-third-law reaction impulse is the exact opposite,
    `-(m_f · push) / dt`.
-2. **Viscous no-slip drag** (`step_coupled`'s step "6.5"): each ball relaxes toward its locally
+2. **Viscous no-slip drag** (`step_coupled`'s step "6.5"; **Update 2026-10-20: the Stokes drag term described here is disabled** -- viscous drag on balls now comes from the ball no-slip boundary inside the implicit viscosity solve, and only the form-drag term remains in coupling; see `docs/PHYSICS.md`): each ball relaxes toward its locally
    entrained fluid mass via a centre-of-mass relaxation (docs/PHYSICS.md ss6.2), not a per-particle
    blend — `a_lin = β·m_ent/(m_b+m_ent) ≤ 1` for every `μ`/`dt`, with `β = ball_no_slip·(1 −
    e^(−dt/τ))`, `τ = ρ_ball·r²/(4·μ)` (`ρ_ball = m_b/(π r²)`; `μ` is the slurry's physical Pa·s
@@ -388,7 +399,7 @@ how the rest of the solver already applies position/velocity corrections directl
 
 ### 4.1 Runtime architecture
 - `worker.ts` instantiates the wasm module and `Simulation`. Loop: on each `requestFrame` message (sent by main
-  thread rAF) the worker runs fixed 1/240 s substeps until `sim_time` catches up with wall time × `time_scale`, but
+  thread rAF) the worker runs fixed substeps (`fixedSubDt()` = `1/(60*effective_substeps)`; 1/240 s in the original plan) until `sim_time` catches up with wall time × `time_scale`, but
   never more than `budget_ms` (default 12 ms) per frame. It then posts `Frame { ballsXYRT: Float32Array, fluidXYD: Float32Array,
   surface: Float32Array, drumAngle, simTime, stats }` with **transferable** buffers (double-buffered). Achieved
   time scale is reported so the HUD shows e.g. "0.6× real time" instead of freezing → "near real time" by construction.
@@ -397,7 +408,7 @@ how the rest of the solver already applies position/velocity corrections directl
   no-slip factors, display options. Everything else (geometry, fill, ball sizes, resolution, seed, lifters) triggers `reset`.
 - **v1 implementation status**: the fixed-sub-step, frame-budget-capped accumulator loop described
   above is now implemented. `mill-core` exposes `Simulation::fixed_sub_dt()` (the constant
-  `1 / (60 * substeps)` sub-step size, independent of wall-clock frame rate and of `time_scale`),
+  `1 / (60 * effective_substeps)` sub-step size, independent of wall-clock frame rate and of `time_scale`),
   `Simulation::step_fixed()` (advances by exactly one fixed sub-step) and
   `Simulation::reset_frame_stats()` (resets the per-frame diagnostics `step_fixed()` itself doesn't
   reset), with matching `mill-wasm`/`mill_wasm.d.ts` bindings `fixedSubDt()`/`stepFixed()`/
@@ -446,18 +457,21 @@ open, and an error banner explains why — without touching the running simulati
 Rarely-touched fields (`advanced: true` in `schema.ts`) sit in a collapsed per-group **Advanced**
 sub-section, and fields with no effect under the current settings are hidden rather than greyed out
 (see `docs/PARAMETERS.md`); neither changes `Params`.
-Derived read-only values shown in the modal: critical speed, %Nc, true vs. simulated ball count,
+Derived read-only values shown in the panel: critical speed, %Nc, true vs. simulated ball count,
 coarse-graining factor `k` and effective media diameter (see ss3.2; `k = 1.0`/"no coarse-graining"
 when the true count is already <= `simulation.max_balls`), fluid particle count, shared sub-step
-rate (`FIXED_DT` x `substeps`), estimated cost.
+rate (`60 x effective_substeps`), estimated cost.
+
+**Update 2026-10-20: the defaults below are the current shipped ones** (`docs/PARAMETERS.md` is the authoritative table);
+the original plan's values were D = 1 m, 30 rpm, 63 mm balls, slurry fill 0.15, 1800 kg/m³, 50 Pa·s.
 
 | Group | Parameters (defaults) |
 |---|---|
-| Mill | diameter D = 1.0 m; speed mode = rpm (or %Nc); speed = 30 rpm (~70 %Nc for D = 1 m); rotation direction CCW |
-| Media | ball diameter 63 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, packing 0.6 in 2D); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
-| Slurry | enabled = true; fill U_s = 0.15 of drum area; density 1800 kg/m³; viscosity 50 Pa·s; rheology = Newtonian (Bingham in M7); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
+| Mill | diameter D = 63 mm; speed mode = rpm (or %Nc); speed = 100 rpm (~59 %Nc for D = 63 mm); rotation direction CCW |
+| Media | ball diameter 2 mm (+ optional distribution rows); ball fill J = 0.30 (fraction of drum area incl. voids, 2D packing fraction 0.82); density 6000 (ZrO2/YSZ ceramic); restitution 0.7 (ball–ball) / 0.5 (ball–wall); friction μ 0.25 / 0.35; rolling μ_r 0.01 |
+| Slurry | enabled = true; fill U_s = 0.35 of drum area; density 1000 kg/m³; viscosity 0.001 Pa·s (water); wettability 0.6; surface tension 0.072 N/m; rheology = Newtonian (Bingham implemented, not exposed in the UI); wall no-slip β = 1.0; ball no-slip β_b = 1.0; dye pattern = left/right |
 | Lifters | count = **0** (default, smooth wall); height 20 mm; base width 30 mm; top width 20 mm; phase 0° |
-| Simulation | resolution 40 (particles across R); substeps 8; PBF iterations 3; DEM (XPBD) iterations 2; max balls 600; time scale 1.0; frame budget 12 ms; seed 1 |
+| Simulation | resolution 40 in `Params::default` (25 at app load via the Fast preset); substeps 8 (requested; raised to 16 by `effective_substeps` at these defaults); PBF iterations 3; DEM (XPBD) iterations 2; max balls 600 (300 at app load); coarse-graining Off; time scale 1.0; frame budget 12 ms; seed 1 |
 | Display | show fluid particles / surface polygon / dye / toe-shoulder / free-surface line / spin marker / velocity vectors; ball colour by speed |
 
 ### 4.4 Metrics right panel (`ui/metricsPanel.ts`) — persistent `<aside>`, symmetric with the params panel
@@ -472,7 +486,7 @@ order — see docs/METRICS.md's "Panel layout" section for which seven metrics a
 docs/PHYSICS.md §8 for the underlying formulas.
 
 ### 4.5 Toolbar & HUD
-Play/Pause (Space), Step (one frame), Reset, Parameters (opens modal), Presets menu, Screenshot (PNG via `canvas.toBlob`).
+Play/Pause (Space), Step (one frame), Reset, Parameters (originally a modal; now the always-visible left panel), Presets menu, Screenshot (PNG via `canvas.toBlob`).
 HUD: sim time, rpm and %Nc, balls/fluid counts, fps, sim ms/frame, achieved time scale, toe/shoulder, slurry pool angles, mixing index.
 
 ---
@@ -497,12 +511,12 @@ Model assignment per CLAUDE.md: **[F]** = Fable (main session), **[S]** = sonnet
 2. [S] Unit tests: single ball drop restitution (bounce height ratio ≈ e²), two-ball head-on momentum/energy, ball resting on wall
    (overlap < 1 % r, no drift), rotating drum centrifuging test (at 120 % Nc all balls stay within 1.5 r of wall after 5 s),
    at 70 % Nc a cascading charge with toe ~ 200–230° and shoulder ~ 40–60° (measured from the vertical, loose tolerance).
-3. [S] Renderer for balls; params modal v1 (Mill + Media + Simulation groups, schema-driven); HUD basics; Play/Pause/Reset.
+3. [S] Renderer for balls; params form v1 (originally a modal; Mill + Media + Simulation groups, schema-driven); HUD basics; Play/Pause/Reset.
 4. [S] criterion bench: 500/1000/2000 balls step cost; record in docs.
    Verify: visually cascading at 70 %, cataracting at 85–90 %, centrifuging > 100 %.
 
 ### M2 — Lifters (½ day) [S, F review of SDF]
-1. Lifter quads in `geometry.rs` (drum frame), numeric gradient, restricted evaluation region; `Lifters` modal tab; render.
+1. Lifter quads in `geometry.rs` (drum frame), numeric gradient, restricted evaluation region; `Lifters` group in the params form (originally a modal tab); render.
 2. Tests: SDF sign/gradient sanity at sampled points; ball resting on a lifter face is stable; default `count = 0` produces the
    identical trajectory to M1 (regression: hash of positions after 2 s equals circle-only run).
 
@@ -524,8 +538,8 @@ Model assignment per CLAUDE.md: **[F]** = Fable (main session), **[S]** = sonnet
 
 ### M5 — UI completion (1 day) [S/H]
 Presets, full validation UX, derived values panel, Step button, Screenshot, mixing-index sparkline, keyboard shortcuts,
-responsive layout (canvas fits viewport, modal scrolls on small screens), `docs/PARAMETERS.md` generated from `schema.ts` [H].
-Playwright e2e: open modal → change rpm → Apply → HUD rpm updates without reset; change lifter count → Apply → reset confirm
+responsive layout (canvas fits viewport, params panel scrolls on small screens; originally a modal), `docs/PARAMETERS.md` generated from `schema.ts` [H].
+Playwright e2e: params panel → change rpm → Apply → HUD rpm updates without reset; change lifter count → Apply → reset confirm
 → lifters visible; invalid input blocks Apply.
 
 ### M6 — Performance (1–2 days) [F profiling/SIMD, S tooling]
@@ -548,21 +562,21 @@ Implicit viscosity + Bingham/Herschel–Bulkley; Akinci boundary particles on ba
 - `scripts/build-wasm` → `web/src/wasm/` produced; `npm run build` succeeds; `npm run test` (vitest) and `npm run e2e` (playwright, Chromium)
   pass.
 - Manual/visual acceptance (use the `run` skill / Playwright screenshots):
-  1. Default params (no lifters, 70 % Nc, 50 Pa·s): cascading charge, slurry pool at toe, free-surface polygon drawn, ≥ 0.8× real time.
+  1. Default params (original plan: no lifters, 70 % Nc, 50 Pa·s; **now** 63 mm drum, 100 rpm ≈ 59 % Nc, water-like 0.001 Pa·s): cascading charge, slurry pool at toe, free-surface polygon drawn; the original "≥ 0.8× real time" is not met at the current defaults (Fast preset ≈ 67 ms/frame native, `docs/PERF.md`).
   2. Set lifters = 8: balls lifted higher, visible cataracting.
   3. Viscosity 200 Pa·s vs 5 Pa·s: free surface tilts more with higher viscosity; dye mixes slower.
   4. Speed 110 % Nc: centrifuging; slurry film on wall.
-  5. Modal: every field validated; hot params apply without reset; others prompt for reset.
+  5. Params panel (originally a modal): every field validated; hot params apply without reset; others prompt for reset.
 - Determinism: same params + seed → identical position hash after 5 s (test in `mill-core`).
 
 ## 7. Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| PBF viscosity only qualitative | **Resolved, implemented** (ss3.3): implicit Morris/conjugate-gradient Newtonian viscosity, `μ` a real Pa·s value; Bingham/Herschel–Bulkley remains future work |
+| PBF viscosity only qualitative | **Resolved, implemented** (ss3.3): implicit Morris/conjugate-gradient Newtonian viscosity, `μ` a real Pa·s value; Bingham is now also implemented (`bingham_viscosity`, not exposed in the UI); Herschel–Bulkley remains future work |
 | Coupling instability (light fluid pushing heavy balls is fine, but many overlapping corrections) | Impulse clamp, shared fixed sub-step for both solvers (ss3.2/3.4, no separate DEM/fluid time-step ratio to get wrong), symmetric momentum test, per-substep overlap resolution |
 | WASM single-thread too slow at high resolution | Frame budget + achieved-time-scale HUD, auto resolution, SIMD; targets defined in M6 |
 | 2D slice vs real 3D mill quantitatively different | State clearly in README/HUD ("2D cross-section, qualitative") |
 | Rust toolchain on Windows (MSVC linker) | Check in M0; fall back to GNU toolchain with rtools gcc; wasm target needs no linker |
 | Lifter SDF gradient numeric noise at corners | Round corners with small radius in SDF; test resting stability |
-| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | **Resolved, implemented** (`Params::effective_media`, ss3.2): coarse-graining is applied automatically whenever the true ball count exceeds `simulation.max_balls` (default 600), substituting fewer, larger, lighter balls that preserve total media mass and fill fraction. The effective diameter, coarse-graining factor, and simulated vs. true ball count are always shown explicitly in the parameters modal's derived-values panel (ss4.3) — never applied silently. |
+| Default media (2 mm) at default mill diameter (1 m) with J = 0.30 implies ~75,000 balls in 2D — far above the M6 real-time budget (500–2000 balls) | **Implemented, but no longer the default path** (`Params::effective_media`, ss3.2): coarse-graining is available (Auto/Manual) and substitutes fewer, larger, lighter balls that preserve total media mass and fill fraction. **Update 2026-10-20**: the shipped default sidesteps the issue (63 mm drum, 2 mm balls, `N_true ≈ 244`) and coarse-graining is **Off by default**, because it changes the physics (`docs/VERIFICATION.md`). When active, the effective diameter, coarse-graining factor, and simulated vs. true ball count are shown in the parameters panel's derived-values section (ss4.3) — never applied silently. |

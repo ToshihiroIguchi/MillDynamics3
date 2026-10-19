@@ -1,5 +1,13 @@
 # Performance baseline
 
+**Current state (2026-10-20):** the defaults are now `simulation.substeps = 8` (requested), auto-raised
+by `Params::effective_substeps` to 16 at the shipped 63 mm / 2 mm-ball / 100 rpm configuration, so the
+sub-step is `dt = 1 / (60 * effective_substeps) = 1/960 s`. The M6 solver pass (2026-09-27) and the M7
+speed-up (2026-10-18) have both landed. Every section below this paragraph is a dated historical
+record, measured with the defaults and sub-step size of its day (for example `FIXED_DT = 1/240 s`,
+`substeps = 4`, a 1 m drum); do not compare those absolute numbers with a fresh run, and read the
+header text of the first sections ("has not yet had the M6 pass") as true only of their date.
+
 Recorded from `cargo bench -p mill-core` (release, single-threaded, native — not WASM) before the
 physics-fixes pass described in this plan (unit-depth disc masses, buoyancy/drag coupling closure,
 implicit viscosity, tunnelling guard, grinding instrumentation). Re-run and update this table after
