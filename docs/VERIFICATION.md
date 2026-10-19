@@ -1817,3 +1817,16 @@ the ball (cavitation), which explains part of it (two-sided halves the drag), bu
 dissipative and the two-sided form is unstable with more iterations. Conclusion: a ball boundary term does not make
 position-based fluid drag quantitative at d/dx 2-4; a pressure-based solver (DFSPH, whose own gates are not met either)
 or a much larger d/dx would be needed. Shipped behaviour is unchanged.
+
+**Experiment: quadratic exchange rule (rejected; code removed, patch and logs in
+`docs/measurements/2026-10-19/drag/experiment_exchange_u0_patch.py`, `exchange_u0.log`, `exchange_u0_ab.log`).**
+The step 3.5 impulse was changed from `mu_red * arrest` to `mu_red * arrest * min(1, arrest / u0)` so that the force
+grows like speed squared at small relative speed (`u0 = 0` is the shipped rule). Drag R = F_meas / F_ref (res 25, 8
+sub-steps): u0 = 1 m/s gave 4.7 / 3.0 / 0.76 (Re 1e3 / 3e3 / 1e4), u0 = 3 gave 2.8 / 0.86 / 0.50 (shipped: 18 / 5.2 / 0.99).
+At 16 sub-steps and res 25 / 50 with u0 = 3, R at Re 3e3 was 2.4 / 2.0 and at 1e4 1.1 / 0.86; the Re 1e3 signal
+(F ~ 0.05-0.1 N/m) is below the probe noise, and the sub-step dependence (about 2x between 8 and 16) remains.
+Side effects with u0 = 3 as default (`tolerance_probe`, 8 seeds, ship_fast / ui_fast / ship_v0.01): the 21 related unit tests
+including the energy invariants pass, but 19 of 27 gated metrics fail: compression error +27..+70 %, power -2.6..-4.4 %,
+shoulder angle -4.5..-5.2 deg, energy-closure fraction 0.065 to 0.61 (ship_v0.01). The rule is not adopted: it improves the drag
+of an isolated ball in water but degrades the incompressibility and the energy balance of the whole mill. The shipped
+exchange rule is unchanged.
