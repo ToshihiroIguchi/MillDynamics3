@@ -1252,6 +1252,16 @@ state after calling `compute`:
   the project's 2D cross-section scope (see the entry above), not a parameter-tuning bug; the params
   panel surfaces `U` directly (docs/PARAMETERS.md) so its magnitude is visible rather than hidden
   inside the fill-fraction number.
+- **Ball drag in water is overestimated (known limit, measured 2026-10-19).** At the shipped resolution
+  (fluid spacing 1/2 to 1/4 of the ball diameter) a ball moving through water meets 5-17 times the cylinder drag
+  at Re 1e3-3e3, and about 0.9-1.9 times at Re 1e4, with a factor-2 dependence on the sub-step count there. About
+  60-95 % of it is the step 3.5 momentum exchange that stands in for a pressure on the ball; the form-drag closure
+  and the viscous solve are negligible. Scaling the exchange, adding the balls to the density constraint, and a
+  quadratic exchange rule were tried and not adopted: each either leaves the excess or degrades compression and
+  the energy balance of the whole mill (docs/VERIFICATION.md, 2026-10-19). Consequence: motion of balls through
+  fast water (settling, impact into a pool, a ball thrown into the slurry) is damped too strongly; bulk
+  quantities (power, toe/shoulder angles) are not affected beyond the other documented errors. A real fix needs a
+  pressure-based solver, which is 2-6x slower than the PBF solver here.
 - **Coarse-graining distorts per-impact statistics.** `Collision rate` and the impact-energy
   histogram (ss4.2, ss8) are derived from *simulated* impacts, whose count scales as `1/k^2` and
   whose energy scales as `k^2` relative to the true (uncoarsened) population (ss3's mass-preserving
