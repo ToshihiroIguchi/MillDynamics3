@@ -1709,3 +1709,55 @@ ship_acc_v50 (3 seeds vs d7ced07).
 - The reference solver is deterministic: a `--compare` against its own baseline gives delta 0.
 - The Accuracy tier at the 63 mm drum has mean compression 0.18 / worst-5 % 0.62 even at the reference
   (pre-existing).
+
+
+## 2026-10-19: strict gates re-measured, ball drag measured (`examples/drag_probe`)
+
+Raw logs: `docs/measurements/2026-10-19/`. Commit f8c2d16 code, then the form-drag factor change below.
+
+**Strict gates (shipped PBF, release, 22 tests run; DFSPH rotating drum / energy not re-run).** 6 pass, 16 fail.
+Harness inputs: hydrostatic and rotating drum pinned 1800 kg/m3 / 50 Pa s; spin-up and Taylor-Couette use
+`Params::default()` (density 1000); energy closure is the full water default at res 25.
+
+| gate | limit | 2026-10-01 | 2026-10-19 |
+|---|---|---|---|
+| hydrostatic worst-5 % / mean compression, res 25 | 0.02 / 0.001 | 0.270 / 0.047 | 0.266 / 0.047 |
+| hydrostatic worst-5 % / mean compression, res 50 | 0.02 / 0.001 | 0.914 / 0.138 | 0.919 / 0.138 |
+| wall-pressure L2, res 25 / 50 | 0.05 | 0.229 / 0.197 | 0.224 / 0.200 |
+| spin-up L error at t/tau .02/.05/.1/.2, res 25 | 0.03 | .52/.63/.44/.20 | .514/.607/.419/.174 |
+| spin-up wall torque vs dL/dt | 0.03 | 0.468 / 0.451 | **pass** / **pass** |
+| Taylor-Couette ball torque rel. error, res 25 / 50 | 0.03 | 0.999 / 1.000 | 0.093 / 0.158 |
+| Taylor-Couette wall torque rel. error, res 25 / 50 | 0.03 | 0.966 / 0.895 | 0.571 / 0.929 |
+| energy closure, unattributed / shaft work | 0.02 | 0.174 | 0.092 |
+| rotating drum 25 to 50, power change (1800 / 50) | 0.03 | 0.181 | 0.055 |
+| hydrostatic KE, dry sub-step | | pass | pass |
+
+After the factor change below, the same tests gave Taylor-Couette ball torque 0.106 / 0.153, wall torque 0.606 / 0.943,
+energy closure 0.0915, rotating drum 0.0553: within noise of the table.
+
+**Ball drag.** One 10 mm ball (d/dx 2 at res 25, 4 at res 50) is moved through a quiescent full water pool at
+speed +U and -U; drag = -(impulse(+U) - impulse(-U)) / (2 dt) per metre depth. Reference
+`F = 1/2 rho U^2 d C_D`, with $C_D = 1+10 Re^{-2/3}$ (White; the form could not be confirmed in a literature search,
+the subcritical plateau ~1.0-1.2 was), so the reference is uncertain by about 20 %.
+
+| Re | res / sub-steps | R = F_meas/F_ref, closure rate x0 / x0.5 / x1 |
+|---|---|---|
+| 1e3 | 25 / 8 | 16.1 / 18.4 / 16.3 |
+| 1e3 | 25 / 16 | 13.0 / 14.7 / 15.3 |
+| 1e3 | 50 / 16 | 17.1 / 16.9 / 16.1 |
+| 3e3 | 25 / 8 | 4.7 / 5.2 / 5.0 |
+| 3e3 | 50 / 16 | 4.6 / 3.9 / 3.0 |
+| 1e4 | 25 / 8 | 0.90 / 0.99 / 1.12 |
+| 1e4 | 25 / 16 | 1.57 / 1.77 / 1.89 |
+| 1e4 | 50 / 16 | 1.25 / 1.30 / 1.27 |
+
+Standard errors are 5-10 % of R (1e4) and up to 10 % (1e3). With adhesion and cohesion off (res 25 / 8): R = 12.3 (1e3),
+4.6 (3e3), 0.95-1.20 (1e4). Result: the total drag in water is 5-17 times the cylinder value for Re 1e3-3e3 whatever the
+closure does, and depends on sub-steps at Re 1e4. The closure is therefore not the lever. The pre-registered rule
+(case 3: no closure strength satisfies 0.75 <= R <= 1.33 at Re 1e3-1e4) applies: no tuning. The cause of the
+excess is not identified (candidates: overlap push, density-constraint noise; not isolated).
+
+**Change made.** The form-drag rate carried no factor 1/2 (it acted as $C_D = 2$); it now reads
+`0.5 * rho0 * C_D * (2 r_t) * |v_rel| / m_t`, `C_D = 1`. Same-session A/B, 8 seeds, ship_fast / ui_fast / ship_v0.01:
+0 of 27 gated metrics fail (power +0.1 / -1.6 / +0.5 %, toe/shoulder within 2.4 deg, impacts within 2.4 %);
+`cargo test --workspace` green (187 unit tests, 5 verification tests), fmt and clippy clean.

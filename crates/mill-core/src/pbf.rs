@@ -105,13 +105,14 @@ const VISCOSITY_CG_MAX_ITERS: u32 = 50;
 /// viscosity).
 const VISCOSITY_ETA_FACTOR: f32 = 0.01;
 
-/// Drag coefficient for a 2D cylinder (a ball's cross-section) in the form-drag term folded into
-/// step 6.5's ball relaxation time -- see that step's doc comment. `1.0` is the standard
-/// high-Reynolds-number (`Re ~ 10^3-10^5`, past the drag crisis) value for a circular cylinder in
-/// crossflow; this project's ball speeds (up to a few m/s) sit in that regime once the fluid is
-/// low-viscosity enough for form drag to matter at all (at this project's default 50 Pa*s,
-/// `Re ~ 1` and the Stokes term already dominates, so this constant's exact value has negligible
-/// effect there).
+/// Drag coefficient `C_D` of a 2D cylinder (a ball's cross-section) in the form-drag term folded
+/// into step 6.5's ball relaxation time, in the usual `F = 1/2 rho C_D d |v| v` convention (the
+/// `1/2` is applied where the rate is built; before 2026-10-19 it was missing, so the closure
+/// acted as `C_D = 2`, see docs/VERIFICATION.md "Ball drag measurement"). `1.0` is the
+/// high-Reynolds-number value for a circular cylinder in crossflow (the subcritical plateau is
+/// about 1.0-1.2 for `Re ~ 10^3-2*10^5`); this project's ball speeds (up to a few m/s) sit in that
+/// regime once the fluid is low-viscosity enough for form drag to matter at all. The viscous part
+/// of the drag comes from the ball-surface no-slip boundary in step 7, not from this constant.
 const BALL_FORM_DRAG_COEFFICIENT: f32 = 1.0;
 
 /// 2D Poly6 kernel (docs/PLAN.md ss3.3: `4/(pi h^8)`), evaluated from squared distance.
@@ -1706,6 +1707,12 @@ impl FluidParticles {
         //   tau_stokes = rho_ball * r^2 / (4 * mu)                          linear (viscous) drag
         //   tau_form   = balls.mass / (rest_density * C_D * (2r) * |v_rel|) quadratic (form) drag
         //
+        // **Current state (2026-10-19).** `tau_stokes` is disabled (`inv_tau_stokes = 0` below:
+        // the viscous drag comes from the ball-surface no-slip boundary in step 7), and the form
+        // term carries the textbook `1/2`: `1/tau_form = 1/2 * rest_density * C_D * (2r) *
+        // |v_rel| / m` (it was missing before, i.e. the closure acted as `C_D = 2`). The block
+        // below documents the original two-term design.
+        //
         // `r`/`balls.mass` in both formulas above (and in `a_lin`/`a_rot`'s own ball-side inertia
         // term below) are the *true* uncoarsened particle's own radius/mass/inertia
         // (`balls.true_radius` and `mass_true`/`i_true` derived from it just below), **not** the
@@ -1863,7 +1870,7 @@ impl FluidParticles {
                     // Stokes/form drag is currently faster dominates the combined relaxation.
                     let speed_rel = v_rel.length();
                     let inv_tau_form = if speed_rel > 1e-6 && rest_density > 0.0 {
-                        rest_density
+                        0.5 * rest_density
                             * BALL_FORM_DRAG_COEFFICIENT
                             * (2.0 * balls.true_radius)
                             * speed_rel

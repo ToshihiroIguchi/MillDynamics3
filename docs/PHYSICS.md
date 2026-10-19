@@ -785,7 +785,7 @@ field means this specific ratio is already scale-invariant under coarse-graining
 and `balls.mass` grow by the same `scale_factor^2` together) gives the intended result: **0.8177,
 0.8177, 0.8178 at `scale_factor` 1x/2x/4x respectively**, matching the true-particle baseline
 (0.8179) to within measurement noise. Regression test:
-`pbf::tests::ball_drag_relaxation_fraction_is_independent_of_coarse_graining`.
+`pbf::tests::ball_drag_relaxation_fraction_is_independent_of_coarse_graining` (removed 2026-10-05 together with the Stokes closure; see docs/VERIFICATION.md "Ball drag measurement").
 
 One existing regression tightened its bound against the *old*, physically-weaker drag and needed
 updating, not the fix reverting: `metrics::tests::compression_error_stays_bounded_under_violent_

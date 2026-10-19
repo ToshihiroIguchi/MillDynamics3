@@ -303,8 +303,8 @@ pub struct Balls {
     /// fraction was 0.82 at the true 10mm diameter, 0.80 at `max_balls=1500`'s coarse 12.8mm, but
     /// only 0.26 at the 150-ball preset's coarse 40.5mm -- i.e. the *default* configuration was
     /// under-predicting true-particle drag by roughly 3x, not the high-`max_balls` configuration
-    /// over-predicting it. See [`crate::pbf::tests::
-    /// ball_drag_relaxation_fraction_is_independent_of_coarse_graining`] for the regression test.
+    /// over-predicting it. The test that guarded this (`ball_drag_relaxation_fraction_is_independent_of_coarse_graining`)
+    /// was removed with the Stokes closure (docs/VERIFICATION.md, 2026-10-05).
     pub true_radius: f32,
 }
 
