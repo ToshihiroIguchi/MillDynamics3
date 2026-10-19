@@ -2243,15 +2243,11 @@ decided.
    states this ("each ball's torque exactly, total angular momentum only up to the ghost-point
    offset"); this document says the same. Whether that offset error matters at the shipped
    resolutions was not measured here.
-3. **Stale code comments about the removed Stokes term.** The comment on `F_CLAMP_G_MULTIPLE`
-   (`pbf.rs:939`-`pbf.rs:956`) and the doc comments of
-   `cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*` (`coupling.rs:788`-`coupling.rs:816`)
-   still attribute the clamp's headroom to step 6.5's relaxation factor `beta` saturating above ~10
-   Pa·s, which describes the Stokes-era closure; with `inv_tau_stokes = 0` (`pbf.rs:1807`) the
-   viscous exchange arrives through the step-7 joint solve. The value 60 and the 10 % clamp-rate
-   bounds were not re-derived for the current closure (ss6.4).
-4. **`RESTITUTION_VELOCITY_THRESHOLD` carries a vestigial `allow(dead_code)`** (`dem.rs:31`) although
-   it is used by the solver in every build (`dem.rs:919`, `dem.rs:981`).
+3. **Stale code comments about the removed Stokes term (resolved 2026-10-20, comments only).** The comment on
+   `F_CLAMP_G_MULTIPLE` (`pbf.rs`) and the comments of `cascading_charge_keeps_coupling_clamp_hits_rare_once_settled_at_*`
+   (`coupling.rs`) now say that the value `60` and the 10 % bounds date from the Stokes-era closure and were not re-derived;
+   they are kept as measured bounds. Still open (decision: keep): re-deriving `60` for the current closure.
+4. **`RESTITUTION_VELOCITY_THRESHOLD`'s vestigial `allow(dead_code)` (resolved 2026-10-20)** was removed (`dem.rs`).
 5. **`Params::default()` versus the UI default.** `Params::default()` has `simulation.resolution =
    40`, while the web's default quality preset ("Fast (default)") sets `resolution = 25` and
    `max_balls = 300` (`web/src/params/presets.ts`). Numbers in this document that depend on the
