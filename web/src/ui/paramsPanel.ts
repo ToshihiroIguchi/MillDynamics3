@@ -750,7 +750,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         "Effective slurry resolution",
         `${effectiveResolution}`,
         effectiveResolution > resolution,
-        "Slurry resolution actually used. The solver raises it above your setting when coarse-graining would otherwise leave the fluid lattice wider than a ball.",
+        "Slurry resolution actually used. The solver raises it above your setting when the fluid lattice would otherwise be wider than a ball.",
       ],
       [
         "Est. fluid particles",
@@ -762,7 +762,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         "Effective sub-steps",
         `${effectiveSubstepCount}`,
         effectiveSubstepCount > substeps,
-        "Sub-steps per frame actually used. The solver raises it above your setting when a coarse-grained charge would otherwise move too far per sub-step.",
+        "Sub-steps per frame actually used. The solver raises it above your setting (up to 16) when the balls are small enough that they would otherwise move too far per sub-step; this includes the default 2 mm balls (8 to 16).",
       ],
       [
         "Sub-step displacement / diameter",
