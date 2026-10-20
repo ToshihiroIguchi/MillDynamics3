@@ -140,21 +140,13 @@ const paramsPanel = createParamsPanel(paramsPanelEl, (params) => {
 const PANEL_STORAGE_KEY = "milldynamics.panel";
 const PARAMS_PANEL_STORAGE_KEY = "milldynamics.paramsPanel";
 
-function readPanelVisiblePref(): boolean {
-  try {
-    const raw = localStorage.getItem(PANEL_STORAGE_KEY);
-    if (raw === null) return true;
-    return JSON.parse(raw) === true;
-  } catch {
-    return true;
-  }
-}
-
+// Both side panels always start collapsed on page load; the stored value is intentionally
+// ignored at startup (it is still written on toggle for other consumers).
 function setPanelCollapsed(collapsed: boolean): void {
   document.body.classList.toggle("panel-collapsed", collapsed);
 }
 
-const initialPanelVisible = readPanelVisiblePref();
+const initialPanelVisible = false;
 setPanelCollapsed(!initialPanelVisible);
 
 function togglePanel(): boolean {
@@ -169,21 +161,11 @@ function togglePanel(): boolean {
   return nowVisible;
 }
 
-function readParamsPanelVisiblePref(): boolean {
-  try {
-    const raw = localStorage.getItem(PARAMS_PANEL_STORAGE_KEY);
-    if (raw === null) return true;
-    return JSON.parse(raw) === true;
-  } catch {
-    return true;
-  }
-}
-
 function setParamsPanelCollapsed(collapsed: boolean): void {
   document.body.classList.toggle("params-collapsed", collapsed);
 }
 
-const initialParamsVisible = readParamsPanelVisiblePref();
+const initialParamsVisible = false;
 setParamsPanelCollapsed(!initialParamsVisible);
 
 function toggleParamsPanel(): boolean {

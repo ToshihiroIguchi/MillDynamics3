@@ -483,11 +483,11 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
     if (group === "Slurry") {
       // Static, always-visible one-line reminder (not a threshold-triggered alert like `mediaWarn`
       // above, so `params-note` rather than `params-warn`). The longer explanation lives in the
-      // "Slurry resolution" field's help text (schema.ts) and docs/PHYSICS.md section 9.
+      // "Slurry resolution" field's help text (schema.ts).
       const slurryInfiltrationNote = document.createElement("p");
       slurryInfiltrationNote.className = "params-note";
       slurryInfiltrationNote.textContent =
-        "Slurry barely seeps into a settled bed in this 2D model -- expected, not a bug (docs/PHYSICS.md §9).";
+        "Slurry barely seeps into a settled bed in this 2D model -- expected, not a bug (the fluid grid is about as coarse as the gaps between balls, and 2D packing leaves less connected void space than 3D).";
       const slurryAbout = document.createElement("details");
       slurryAbout.className = "note-details";
       const slurryAboutSummary = document.createElement("summary");

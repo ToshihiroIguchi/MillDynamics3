@@ -201,15 +201,16 @@ impl Default for MediaParams {
     // Defaults model yttria-stabilized zirconia (ZrO2) grinding media, a common ceramic ball-mill
     // charge: density ~6.0 g/cm^3, harder and more elastic (higher restitution, lower friction)
     // than the steel media this used to default to. The 2 mm ball in a 63 mm drum is a lab-scale
-    // (bench mill) configuration: `Params::true_ball_count` is ~244 at this struct's own
+    // (bench mill) configuration: `Params::true_ball_count` is ~407 at this struct's own
     // `fill_fraction`/`packing_fraction_2d` defaults, which stays under every shipped
-    // `simulation.max_balls` tier (web/src/params/presets.ts's smallest is 300), so the shipped
+    // `simulation.max_balls` tier of 600 (the 300 tiers in web/src/params/presets.ts sit below it, but
+    // coarse-graining is Off by default so they only matter under Auto), so the shipped
     // configuration needs no coarse-graining (`Params::effective_media`'s `scale_factor == 1.0`)
     // out of the box and the grinding-diagnostics group reads genuine per-impact statistics.
     fn default() -> Self {
         Self {
             ball_diameter_m: 0.002,
-            fill_fraction: 0.30,
+            fill_fraction: 0.50,
             packing_fraction_2d: 0.82,
             density_kg_m3: 6000.0,
             restitution_ball_ball: 0.7,
@@ -351,9 +352,10 @@ impl Default for SlurryParams {
     fn default() -> Self {
         Self {
             enabled: true,
-            // Above `MediaParams::fill_fraction`'s default (0.30) so the liquid's free surface
-            // clears the top of the settled ball heap at rest, instead of leaving media exposed
-            // above the slurry pool (see docs/PARAMETERS.md's Slurry table).
+            // Slurry area as a fraction of drum area. With the default J = 0.50 and 2D packing 0.82
+            // the ball bed's void area is only ~0.09 of the drum, so 0.35 floods the voids many times
+            // over (interstitial filling U ~= 3.9) and the free surface clears the top of the settled
+            // heap (see docs/PARAMETERS.md's Slurry table).
             fill_fraction: 0.35,
             density_kg_m3: 1000.0,
             viscosity_pa_s: 0.001,
@@ -678,7 +680,7 @@ impl Params {
     /// `dt = 1 / (60 * substeps)` gives `substeps >= v_ref / (60 * TARGET_RATIO * d_eff)`.
     /// `TARGET_RATIO = 0.5` (half the `< 1` criterion, matching this project's existing "well under
     /// 1, not merely under 1" standard, docs/METRICS.md) was chosen so `Params::default()` and every
-    /// `web/src/params/presets.ts` quality preset at the default 0.30 fill fraction are unchanged
+    /// `web/src/params/presets.ts` quality preset at the default 0.50 fill fraction are unchanged
     /// by their own settings; `Params::default()` itself is raised from 8 to 16 here (63 mm drum,
     /// 2 mm balls), and `max_balls = 1500` at the Realtime preset's resolution raises 8 to 12.
     ///
@@ -955,14 +957,11 @@ mod tests {
 
     #[test]
     fn shipped_defaults_need_no_coarse_graining() {
-        // The point of the 2 mm ball / 63 mm drum default: at J = 0.30 / packing 0.82,
-        // N_true ~= 244, under every shipped
-        // web/src/params/presets.ts quality tier's `max_balls` (300/300/600), including the
-        // browser's actual boot default (Realtime, 300) which `crate::coupling::tests::
-        // coupled_charge_never_gains_more_energy_than_the_wall_supplies`'s own comment notes this
-        // crate's `Params::default()` (max_balls = 600) does not itself match. So this asserts
-        // across every tier, not just `Params::default()`'s own 600.
-        for max_balls in [300u32, 600] {
+        // The point of the 2 mm ball / 63 mm drum default: at J = 0.50 / packing 0.82,
+        // N_true ~= 407, under `Params::default()`'s own max_balls (600) and the Accuracy tier.
+        // It exceeds the 300 tiers of web/src/params/presets.ts, which only matters if the user
+        // switches coarse-graining to Auto (the default is Off, so N_sim = N_true regardless).
+        for max_balls in [600u32] {
             let mut params = Params::default();
             params.simulation.max_balls = max_balls;
             params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;

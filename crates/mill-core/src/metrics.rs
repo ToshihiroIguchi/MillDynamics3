@@ -496,12 +496,13 @@ pub fn slurry_pool_depth_at_bottom(fluid: &FluidParticles, drum: &Drum) -> Optio
 ///   not uniform (exact Lacey assumes a fixed sample size per cell).
 ///
 /// The result is clamped to `[0, 1]` (the raw formula can slightly over/undershoot from sampling
-/// noise). If `S0^2 - Sr^2` is ~0 (e.g. uniform dye with no possible segregation, or on average
-/// one particle per occupied cell so `S0^2 == Sr^2`), the index is degenerate and `1.0` (trivially
-/// "mixed": no segregation is measurable) is returned instead of dividing by ~zero.
+/// noise). If `S0^2 - Sr^2` is ~0 (on average one particle per occupied cell so
+/// `S0^2 == Sr^2`), the index is degenerate and `1.0` (trivially "mixed": no segregation is
+/// measurable) is returned instead of dividing by ~zero.
 ///
-/// `None` if the fluid population is empty, or fewer than 2 cells are occupied (too little
-/// spatial spread to assess mixing).
+/// `None` if the fluid population is empty, there is no dye variance (`S0^2 ~ 0`, e.g. no dye
+/// pattern or uniform dye), or fewer than 2 cells are occupied (too little spatial spread to
+/// assess mixing).
 pub fn mixing_index(fluid: &FluidParticles, drum: &Drum) -> Option<f32> {
     let n = fluid.len();
     if n == 0 || drum.radius_m <= 0.0 {
@@ -561,6 +562,11 @@ pub fn mixing_index(fluid: &FluidParticles, drum: &Drum) -> Option<f32> {
         / weight_sum;
     let sr_sq = s0_sq / weighted_avg_per_cell.max(1.0);
 
+    // No dye variance at all (e.g. no dye pattern, or uniform dye): there is nothing to mix, so
+    // the index is undefined rather than "perfectly mixed".
+    if s0_sq < 1e-9 {
+        return None;
+    }
     let denom = s0_sq - sr_sq;
     if denom.abs() < 1e-9 {
         return Some(1.0);
@@ -569,14 +575,17 @@ pub fn mixing_index(fluid: &FluidParticles, drum: &Drum) -> Option<f32> {
     Some(m.clamp(0.0, 1.0))
 }
 
-/// Total kinetic energy of the ball population (J): `sum(0.5 * m * |v|^2)`. All balls share one
-/// mass ([`Balls`]'s doc comment), reused directly rather than re-deriving it from density.
+/// Total kinetic energy of the ball population (J): translational plus rotational,
+/// `sum(0.5 * m * |v|^2 + 0.5 * I * omega^2)`. All balls share one mass and inertia
+/// ([`Balls`]'s doc comment), reused directly rather than re-deriving them from density.
 pub fn total_kinetic_energy_j(balls: &Balls) -> f32 {
     let mass = balls.mass;
+    let inertia = balls.inertia;
     balls
         .v
         .iter()
-        .map(|v| 0.5 * mass * v.length_squared())
+        .zip(&balls.omega)
+        .map(|(v, &w)| 0.5 * mass * v.length_squared() + 0.5 * inertia * w * w)
         .sum()
 }
 

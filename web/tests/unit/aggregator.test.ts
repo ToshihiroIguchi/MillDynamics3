@@ -161,3 +161,34 @@ describe("ReportAggregator window-mean histogram", () => {
     expect(agg.windowHistogram()!.counts_per_s).toEqual([5]);
   });
 });
+
+describe("ReportAggregator report semantics", () => {
+  it("tracks first/last so a cumulative metric's window increase is last - first", () => {
+    const agg = new ReportAggregator();
+    [10, 12, 15, 21].forEach((v, i) => agg.add(i, { proxy_cum_specific_energy: v }));
+    const s = agg.statsFor("proxy_cum_specific_energy")!;
+    expect(s.last - s.first).toBe(11);
+    expect(s.count).toBe(4);
+  });
+
+  it("uses circular statistics for toe/shoulder angles straddling 0/360", () => {
+    const agg = new ReportAggregator();
+    [350, 10, 355, 5].forEach((v, i) => agg.add(i, { toe_angle_deg: v, other: v }));
+    const toe = agg.statsFor("toe_angle_deg")!;
+    expect(Math.min(toe.mean, 360 - toe.mean)).toBeLessThan(1e-9);
+    expect(toe.mean).toBeGreaterThanOrEqual(0);
+    expect(toe.mean).toBeLessThan(360);
+    expect(toe.std).toBeGreaterThan(0);
+    expect(toe.std).toBeLessThan(10);
+    // Non-angle ids keep the linear mean.
+    expect(agg.statsFor("other")!.mean).toBeCloseTo(180, 9);
+  });
+
+  it("returns a circular mean in [0, 360) for a wrapped-negative result", () => {
+    const agg = new ReportAggregator();
+    [-20, 340, 350].forEach((v, i) => agg.add(i, { shoulder_angle_deg: v }));
+    const m = agg.statsFor("shoulder_angle_deg")!.mean;
+    expect(m).toBeGreaterThan(330);
+    expect(m).toBeLessThan(360);
+  });
+});

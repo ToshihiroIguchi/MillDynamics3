@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { openField } from "../helpers/paramsPanel";
+import { openMetricsPanel, openParamsPanel } from "../helpers/panels";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
@@ -14,6 +15,8 @@ test("collision rate and impact histogram are hidden with an explanatory banner 
   page,
 }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
   // The Grinding group (banner, Collision rate row, histogram) is collapsed by default -- the
@@ -24,7 +27,7 @@ test("collision rate and impact histogram are hidden with an explanatory banner 
   const collisionRateRow = page.locator(".metric-row", { has: page.locator(".metric-label", { hasText: "Collision rate" }) });
   const histogramWrap = page.locator(".impact-histogram-wrap");
 
-  // Default load: 1 m drum / 63 mm balls / J = 0.30 gives N_true ~= 62, comfortably under every
+  // Default load: 63 mm drum / 2 mm balls / J = 0.50 gives N_true ~= 407, comfortably under every
   // shipped quality preset's max_balls (including the app's actual boot preset, Realtime's 150 --
   // worker.ts's INITIAL_PRESET_ID, not mill-core's own SimulationParams::default() of 600), so
   // k = 1 (no coarse-graining) out of the box -- see crates/mill-core/src/params.rs's

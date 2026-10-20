@@ -100,7 +100,7 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     label: "Balanced",
     maxBalls: 300,
     resolution: 30,
-    note: "Native 72 ms/frame (1143 fluid particles). Mill power within about +-3 % of a converged reference at the 2 mm / 63 mm default with water (docs/VERIFICATION.md); a thin film is still coarse. Coarse-graining is Off; if chosen explicitly it is not within +-3 % (about +10-20 % power at k = 2).",
+    note: "Native 72 ms/frame (1143 fluid particles). Mill power within about +-3 % of a converged reference at the 2 mm / 63 mm default with water (checked against a finer-resolution reference run); a thin film is still coarse. Coarse-graining is Off; if chosen explicitly it is not within +-3 % (about +10-20 % power at k = 2).",
   },
   {
     id: "accuracy",

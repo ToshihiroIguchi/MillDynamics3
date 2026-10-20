@@ -247,6 +247,8 @@ describe("unavailable / hideWhenUnavailable specs", () => {
     expect(spec?.unavailable?.(null, { ...baseCtx, slurryEnabled: false })).toBe("Slurry off");
     expect(spec?.unavailable?.(0.62, { ...baseCtx, slurryEnabled: false })).toBe("Slurry off");
     expect(spec?.unavailable?.(0.62, { ...baseCtx, slurryEnabled: true })).toBeNull();
+    // Slurry on but no dye variance (no dye pattern): the core reports null, the row is hidden.
+    expect(spec?.unavailable?.(null, { ...baseCtx, slurryEnabled: true })).toBe("No dye pattern");
     // Before the first params message arrives, slurryEnabled is null -- don't hide the row over
     // an unknown state, only over a confirmed "off".
     expect(spec?.unavailable?.(null, { ...baseCtx, slurryEnabled: null })).toBeNull();
@@ -304,5 +306,21 @@ describe("Grinding proxy (3D) specs", () => {
     const ctx: MetricContext = { ...baseCtx, metrics: { ...fakeMetrics, stress: short } };
     const spec = METRIC_SPECS.find((s) => s.id === "proxy_eff_power_3");
     expect(spec?.unavailable?.(null, ctx)).toBe("No data");
+  });
+});
+
+describe("report aggregation tags", () => {
+  it("marks cumulative, angle and wall-clock metrics for the report", async () => {
+    const { METRIC_SPECS } = await import("../../src/metrics/specs");
+    const { DEFAULT_ANGLE_IDS } = await import("../../src/report/aggregator");
+    const ids = (k: string) => METRIC_SPECS.filter((s) => s.report === k).map((s) => s.id);
+    const cum = ids("cumulative");
+    expect(cum).toContain("proxy_cum_specific_energy");
+    expect(cum.filter((i) => i.startsWith("proxy_cum_eff_energy_")).length).toBeGreaterThan(0);
+    expect(METRIC_SPECS.filter((s) => s.id.includes("cum")).every((s) => s.report === "cumulative")).toBe(true);
+    expect(ids("angle").sort()).toEqual([...DEFAULT_ANGLE_IDS].sort());
+    for (const id of ["sim_time", "fps", "achieved_speed", "substeps_achieved_per_s", "substeps_required_per_s"]) {
+      expect(ids("wallclock")).toContain(id);
+    }
   });
 });

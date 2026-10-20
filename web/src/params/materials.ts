@@ -19,7 +19,7 @@ export const MEDIA_MATERIALS: MediaMaterial[] = [
     id: "ysz",
     label: "Yttria-stabilized zirconia (YSZ)",
     densityKgM3: 6000,
-    note: "Matches this project's default media density (models ZrO2 ceramic); see docs/PARAMETERS.md.",
+    note: "Matches this project's default media density (models ZrO2 ceramic).",
   },
   {
     id: "stainless_steel",

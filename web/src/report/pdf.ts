@@ -556,10 +556,13 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   const coarse = config
     ? effectiveMedia(config.mill.diameter_m, config.media, config.maxBalls, config.coarseGrainingMode, config.coarseGrainingK).scaleFactor > 1
     : false;
+  // The mixing index is null when there is no dye variance (no dye pattern), so it has no
+  // samples in the window; leave it out rather than print "No data".
+  const hasMixingData = aggregator.statsFor("mixing_index") !== null;
   const headlineIds: string[] = [
     ...HEADLINE_METRIC_IDS.filter((id) => !(coarse && id === "collision_rate")),
     ...(coarse ? [] : HEADLINE_TIER2_IDS),
-    ...(config?.slurryEnabled ? ["mixing_index"] : []),
+    ...(config?.slurryEnabled && hasMixingData ? ["mixing_index"] : []),
   ];
   const headlineSpecs = headlineIds
     .map((id) => METRIC_SPECS.find((s) => s.id === id))
@@ -599,7 +602,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   doc.setFontSize(12);
   doc.setTextColor(20, 20, 20);
   ensureSpace(doc, cursor, 10);
-  doc.text("All tracked metrics (mean / std / min / max over the aggregation window)", PAGE_MARGIN_MM, cursor.y);
+  doc.text("All tracked metrics (mean / std / min / max over the aggregation window; n = samples)", PAGE_MARGIN_MM, cursor.y);
   cursor.y += 7;
 
   const colMetricX = PAGE_MARGIN_MM;
@@ -620,6 +623,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     doc.text("Std", colStdX, cursor.y, { align: "right" });
     doc.text("Min", colMinX, cursor.y, { align: "right" });
     doc.text("Max", colMaxX, cursor.y, { align: "right" });
+    doc.text("n", CONTENT_RIGHT_MM, cursor.y, { align: "right" });
     cursor.y += 4.5;
     doc.setDrawColor(180, 180, 180);
     doc.setLineWidth(0.2);
@@ -629,7 +633,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   drawParagraph(doc, cursor, BASIS_LEGEND, 8, [110, 110, 110]);
   drawTableHeader();
   for (const group of METRIC_GROUPS) {
-    const specsInGroup = METRIC_SPECS.filter((s) => s.group === group);
+    const specsInGroup = METRIC_SPECS.filter((s) => s.group === group && s.report !== "wallclock");
     if (specsInGroup.length === 0) continue;
 
     ensureSpace(doc, cursor, 6);
@@ -645,13 +649,21 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     for (const spec of specsInGroup) {
       ensureSpace(doc, cursor, 4.5);
       const stats = aggregator.statsFor(spec.id);
-      const label = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
+      const cumulative = spec.report === "cumulative";
+      const baseLabel = spec.unit ? `${spec.label} (${spec.unit})` : spec.label;
+      const label = cumulative ? `${baseLabel} [increase]` : baseLabel;
       doc.text(label.length > 56 ? `${label.slice(0, 55)}...` : label, colMetricX, cursor.y);
       if (spec.basis) doc.text(BASIS_SHORT[spec.basis], colBasisX, cursor.y);
-      doc.text(fmt(spec, stats?.mean ?? null), colMeanX, cursor.y, { align: "right" });
-      doc.text(fmt(spec, stats?.std ?? null), colStdX, cursor.y, { align: "right" });
-      doc.text(fmt(spec, stats?.min ?? null), colMinX, cursor.y, { align: "right" });
-      doc.text(fmt(spec, stats?.max ?? null), colMaxX, cursor.y, { align: "right" });
+      if (cumulative) {
+        // Window increase of a monotone cumulative quantity; mean/std/min/max are meaningless.
+        doc.text(fmt(spec, stats ? stats.last - stats.first : null), colMeanX, cursor.y, { align: "right" });
+      } else {
+        doc.text(fmt(spec, stats?.mean ?? null), colMeanX, cursor.y, { align: "right" });
+        doc.text(fmt(spec, stats?.std ?? null), colStdX, cursor.y, { align: "right" });
+        doc.text(fmt(spec, stats?.min ?? null), colMinX, cursor.y, { align: "right" });
+        doc.text(fmt(spec, stats?.max ?? null), colMaxX, cursor.y, { align: "right" });
+      }
+      doc.text(stats ? String(stats.count) : "-", CONTENT_RIGHT_MM, cursor.y, { align: "right" });
       cursor.y += 4.5;
     }
     cursor.y += 2;
@@ -664,7 +676,7 @@ export function buildReportPdf(input: ReportInput): jsPDF {
     "total_kinetic_energy",
     "dissipated_power",
     ...(coarse ? [] : ["collision_rate"]),
-    ...(config?.slurryEnabled ? ["mixing_index"] : []),
+    ...(config?.slurryEnabled && hasMixingData ? ["mixing_index"] : []),
   ];
   const seriesPanels = seriesIds.flatMap((id) => {
     const spec = METRIC_SPECS.find((s) => s.id === id);
@@ -700,6 +712,15 @@ export function buildReportPdf(input: ReportInput): jsPDF {
   doc.setFont("helvetica", "italic");
   doc.setFontSize(8.5);
   doc.setTextColor(110, 110, 110);
+  if (coarse) {
+    doc.text(
+      "Not shown: with coarse-graining active the impact energies are not physical (per-impact energies scale as k^2).",
+      PAGE_MARGIN_MM,
+      cursor.y,
+    );
+    cursor.y += 6;
+    return doc;
+  }
   doc.text("Window-mean rates; line = energy-weighted cumulative fraction.", PAGE_MARGIN_MM, cursor.y);
   cursor.y += 5;
 

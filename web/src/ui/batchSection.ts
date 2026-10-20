@@ -40,7 +40,7 @@ export interface BatchSectionDeps {
 }
 
 export interface BatchSection {
-  element: HTMLElement;
+  element: HTMLDetailsElement;
   /** Called from the metrics panel's periodic repaint. */
   update(): void;
 }
@@ -102,15 +102,15 @@ export function createBatchSection(deps: BatchSectionDeps): BatchSection {
   let finished: FinishedRun | null = null;
   let renderedRef: ProxyReference | null | undefined;
 
-  const root = el("section", "batch-section");
-  root.appendChild(el("h4", "batch-heading", "Repeat runs (seeds)"));
+  const root = el("details", "metrics-group batch-section");
+  root.appendChild(el("summary", "batch-heading", "Repeat runs (seeds)"));
   const help = el("div", "metrics-note", HELP_TEXT);
   const helpAbout = el("details", "note-details");
   helpAbout.append(el("summary", undefined, "About repeat runs"), help);
   root.appendChild(helpAbout);
 
   const seedsInput = labeledInput(root, "batch-seeds", "Seeds (1..N)", "3", "1", "1");
-  const warmupInput = labeledInput(root, "batch-warmup", "Warm-up revolutions", "4", "1", "0");
+  const warmupInput = labeledInput(root, "batch-warmup", "Warm-up revolutions", "8", "1", "0");
   const measureInput = labeledInput(root, "batch-measure", "Measured revolutions", "4", "1", "1");
 
   const summaryEl = el("div", "batch-summary");

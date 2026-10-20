@@ -117,7 +117,7 @@ export function effectiveFluidResolution(
  * coarse-graining math, exactly like `effectiveFluidResolution` above. See `effective_substeps`'s
  * doc comment in params.rs for the full derivation (`v_ref = sqrt(2 * g * D)` as a generous upper
  * bound on cataracting impact speed, `TARGET_RATIO = 0.5`); at `Params::default()` and every
- * `web/src/params/presets.ts` quality preset at the default 0.30 fill fraction this returns the
+ * `web/src/params/presets.ts` quality preset at the default 0.50 fill fraction this returns the
  * requested `substeps` unchanged, and raises 8 -> 12 at `max_balls = 1500` with the Realtime
  * preset's `resolution = 15` (docs/PHYSICS.md §9's 2026-09-27 follow-up).
  */

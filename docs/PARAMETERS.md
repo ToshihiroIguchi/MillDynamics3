@@ -19,8 +19,8 @@ In the parameters panel, rarely-touched fields (`advanced: true` in `schema.ts`)
 
 | Path | Label | Unit (UI) | Default (SI) | Min–Max (UI) | Step (UI) | Notes |
 |------|-------|-----------|--------------|--------------|-----------|-------|
-| `media.ball_diameter_m` | Ball diameter | mm | 0.002 (2 mm) | 0.5–200 | 0.1 | Diameter of grinding balls. Defaults model yttria-stabilized zirconia (ZrO₂) ceramic media in a lab-scale 63 mm drum; `True ball count` (~244) stays under every quality preset's `Max balls` (no coarse-graining out of the box, `k = 1.0`) at the default mill / fill / packing fraction. Validation range (0.0005, 1.0) m SI. |
-| `media.fill_fraction` | Fill fraction (J) | — | 0.30 | 0–0.9 | 0.01 | Fraction of drum cross-sectional area filled with media including voids (conventional "J" ball-loading fraction). |
+| `media.ball_diameter_m` | Ball diameter | mm | 0.002 (2 mm) | 0.5–200 | 0.1 | Diameter of grinding balls. Defaults model yttria-stabilized zirconia (ZrO₂) ceramic media in a lab-scale 63 mm drum; `True ball count` (~407) stays under every quality preset's `Max balls` (no coarse-graining out of the box, `k = 1.0`) at the default mill / fill / packing fraction. Validation range (0.0005, 1.0) m SI. |
+| `media.fill_fraction` | Fill fraction (J) | — | 0.50 | 0–0.9 | 0.01 | Fraction of drum cross-sectional area filled with media including voids (conventional "J" ball-loading fraction). |
 | `media.packing_fraction_2d` | 2D packing fraction | — | 0.82 | 0.5–0.907 | 0.001 | Areal packing fraction of settled disc charge (solid area / footprint area). Random close packing ≈ 0.82; hexagonal upper bound ≈ 0.907. |
 | `media.density_kg_m3` | Media density | kg/m³ | 6000.0 | 100–20000 | 100 | Ball material density. Default (6000 kg/m³) models ZrO₂ ceramic. Balls modelled as unit-depth discs. A "Media material" dropdown in the UI (`web/src/params/materials.ts`) offers representative densities for common grinding media as a shortcut into this field: YSZ (6000, the default), stainless steel (7700), alumina (3600), mullite (3000); an explicit "(custom)" option keeps the raw number editable. |
 | `media.restitution_ball_ball` | Restitution (ball-ball) | — | 0.7 | 0–1 | 0.01 | Coefficient of restitution for ball–ball collisions. Higher (≈0.7–1) for ceramic; lower (≈0.3–0.5) for steel. |
@@ -92,8 +92,8 @@ The fourth preset, "Impact statistics (slow)", additionally sets 32 sub-steps, 1
 **Stale `Achieved speed` column.** These figures were measured before `media.ball_diameter_m`'s
 default changed to a 2 mm ball in a 63 mm drum (chosen so the shipped config needs no ball coarse-graining
 -- see the Media table above). At the old default, each tier coarse-grained a
-different simulated ball count; at the new default `N_true` (~244) sits under all three tiers'
-`max_balls` (300/300/600), so every tier now simulates the *same* ~244 real 2 mm balls -- only `resolution` (fluid particle count) still differs between tiers. `Fluid
+different simulated ball count; at the new default `N_true` (~407) sits under the Accuracy tier's
+`max_balls` (600) but above the two 300 tiers (coarse-graining is Off by default, so every tier still simulates the *same* ~407 real 2 mm balls; the 300 only matters under Auto) -- only `resolution` (fluid particle count) still differs between tiers. `Fluid
 spacing / ball diameter` below is recomputed for the new default (`dx / d_eff` with `d_eff` fixed
 at 2 mm across all three tiers; the solver auto-raises the fluid resolution when this exceeds the
 warning threshold, `Params::effective_fluid_resolution`); `Achieved speed` has not been re-measured against the new,

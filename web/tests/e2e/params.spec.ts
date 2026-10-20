@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { openField } from "../helpers/paramsPanel";
+import { openMetricsPanel, openParamsPanel } from "../helpers/panels";
 
 test.beforeEach(async ({ page }) => {
   // Guarantee a clean, default panel/group state regardless of what a prior run/session left in
@@ -13,6 +14,8 @@ test.beforeEach(async ({ page }) => {
 
 test("derived N_sim readout in the parameters panel never exceeds the max-balls input", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
 
   // The panel reads `state.params`, which only arrives once the worker's "ready" message lands --
   // reading it before that leaves every derived-value row blank (see ui/paramsPanel.ts's
@@ -51,6 +54,8 @@ test("derived N_sim readout in the parameters panel never exceeds the max-balls 
 
 test("applying an off-step value round-trips through the WASM core", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
 
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
@@ -81,6 +86,8 @@ test("applying a hot-appliable (resetRequired: false) field shows Applied, not a
   page,
 }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
 
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
@@ -104,6 +111,8 @@ test("applying a hot-appliable (resetRequired: false) field shows Applied, not a
 
 test("the Slurry group shows a static infiltration-limitation note", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
 
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
@@ -121,6 +130,8 @@ test("the Slurry group shows a static infiltration-limitation note", async ({ pa
 
 test("an out-of-range value shows a visible error without freezing the simulation", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
 
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
@@ -150,6 +161,8 @@ test("an out-of-range value shows a visible error without freezing the simulatio
 
 test("lifter height is hidden at count 0 and shown once lifters are added", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
   const countInput = await openField(page, "Lifter count");
@@ -164,6 +177,8 @@ test("lifter height is hidden at count 0 and shown once lifters are added", asyn
 
 test("Max balls is hidden with coarse-graining Off and shown in Auto", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
   const modeRow = page.locator(".params-row", { has: page.locator("span", { hasText: "Coarse-graining" }) });
@@ -180,6 +195,8 @@ test("Max balls is hidden with coarse-graining Off and shown in Auto", async ({ 
 
 test("an out-of-range Advanced field opens its group and Advanced section on Apply", async ({ page }) => {
   await page.goto("/");
+  await openParamsPanel(page);
+  await openMetricsPanel(page);
   await page.locator(".hud", { hasText: /rpm/ }).waitFor();
 
   // Restitution is in Media > Advanced; collapse both levels after editing so Apply must reopen them.

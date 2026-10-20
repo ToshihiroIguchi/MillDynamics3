@@ -1,10 +1,14 @@
 import { expect, test } from "@playwright/test";
+import { openMetricsPanel } from "../helpers/panels";
 
 test("metrics panel shows live values and toggling it resizes the canvas", async ({ page }) => {
-  // Guarantee a clean, default-visible panel state regardless of what a prior run/session left in
+  // Guarantee a clean panel state regardless of what a prior run/session left in
   // localStorage.
   await page.addInitScript(() => localStorage.removeItem("milldynamics.panel"));
   await page.goto("/");
+  await expect(page.locator(".metrics-panel")).toBeHidden(); // collapsed on load
+  await openMetricsPanel(page);
+  await expect(page.locator(".metrics-panel")).toBeVisible();
 
   await expect(page).toHaveTitle("MillDynamics3");
   await expect(page.locator("#scene")).toBeVisible();

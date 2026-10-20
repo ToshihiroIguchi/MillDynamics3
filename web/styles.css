@@ -30,7 +30,7 @@ body {
 }
 
 .metrics-panel {
-  width: 340px;
+  width: 440px;
   flex: none;
   overflow-y: auto;
   border-left: 1px solid #3a4048;
@@ -44,7 +44,7 @@ body.panel-collapsed .metrics-panel {
 }
 
 .params-panel {
-  width: 320px;
+  width: 520px;
   flex: none;
   overflow-y: auto;
   border-right: 1px solid #3a4048;
@@ -506,6 +506,7 @@ body.params-collapsed .params-panel {
 
 .params-label {
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 /* Small "?" tooltip affordance after a label (ui/helpIcon.ts), shared by the params and
@@ -550,7 +551,8 @@ body.params-collapsed .params-panel {
   border: 1px solid #3a4048;
   border-radius: 4px;
   padding: 3px 6px;
-  width: 140px;
+  width: 150px;
+  flex: none;
 }
 
 .params-row.is-invalid input,
@@ -781,6 +783,10 @@ body.params-collapsed .params-panel {
    the header's Export CSV button. Same section/heading shape as the rest of the panel
    (.metrics-panel section/h3, above), its own row layout mirrors .params-row's label+input
    pattern for visual consistency with the left panel's fields. */
+.metrics-group.metrics-report {
+  margin: 0 0 12px;
+}
+
 .metrics-report-row {
   display: flex;
   justify-content: space-between;
@@ -843,16 +849,21 @@ body.params-collapsed .params-panel {
 }
 
 /* Repeat runs (seeds) section inside the Grinding proxy group (ui/batchSection.ts). */
+/* A collapsible <details class="metrics-group"> nested in the Grinding proxy group. */
 .batch-section {
   margin-top: 10px;
-  border-top: 1px solid #3a4048;
-  padding-top: 8px;
 }
 
-.batch-heading {
-  margin: 0 0 4px;
-  font-size: 12px;
-  color: #b7bfcc;
+/* Explanatory "About ..." toggles inside a metrics group keep their quiet look rather than the
+   uppercase group-summary style. */
+.metrics-group .note-details > summary {
+  display: block;
+  padding: 6px 0 4px;
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #8a93a0;
 }
 
 .batch-summary {

@@ -231,12 +231,12 @@ rotate a world-space point into that frame by `-drum_angle` before querying it.
 ### 3.1 Current defaults
 
 `Params::default()` is the 2 mm ball in a 63 mm drum, a bench-scale configuration whose
-`N_true ~ 244` needs no coarse-graining (values from the `Default` impls, `params.rs`):
+`N_true ~ 407` needs no coarse-graining (values from the `Default` impls, `params.rs`):
 
 | Group | Value (source) |
 |---|---|
 | Drum | `mill.diameter_m = 0.063`, 100 rpm (~59 % of `Nc = 42.3/sqrt(D) = 168.5 rpm`), counter-clockwise (`params.rs:62-72`) |
-| Media | `ball_diameter_m = 0.002`, `fill_fraction` (J) `0.30`, `packing_fraction_2d = 0.82`, `density_kg_m3 = 6000` (YSZ-like), restitution ball–ball / ball–wall `0.7 / 0.5`, friction ball–ball / ball–wall `0.25 / 0.35` (static = kinetic), `friction_velocity_scale_m_s = 0.02`, `rolling_friction = 0.01` (`params.rs:200-226`) |
+| Media | `ball_diameter_m = 0.002`, `fill_fraction` (J) `0.50`, `packing_fraction_2d = 0.82`, `density_kg_m3 = 6000` (YSZ-like), restitution ball–ball / ball–wall `0.7 / 0.5`, friction ball–ball / ball–wall `0.25 / 0.35` (static = kinetic), `friction_velocity_scale_m_s = 0.02`, `rolling_friction = 0.01` (`params.rs:200-226`) |
 | Slurry | water: `density_kg_m3 = 1000`, `viscosity_pa_s = 0.001`, `fill_fraction = 0.35`, Newtonian, `wall_no_slip = ball_no_slip = 1`, `wettability = 0.6`, `surface_tension_n_m = 0.072` (`params.rs:350-373`) |
 | Lifters | `count = 0` (smooth wall); if enabled: height 0.020 m, base width 0.030 m, top width 0.020 m (`params.rs:417-427`) |
 | Simulation | `resolution = 40`, `substeps = 8` (requested), `pbf_iterations = 3`, `dem_iterations = 2`, `max_balls = 600`, `coarse_graining_mode = Off`, `coarse_graining_k = 1.0`, `time_scale = 1`, `frame_budget_ms = 12`, `seed = 1` (`params.rs:484-498`) |
@@ -260,7 +260,7 @@ Balls are seeded from an *effective* media population (`Params::effective_media`
   conventional "J" ball-filling fraction) is the charge footprint *including voids*;
   `packing_fraction_2d` (default `0.82`, valid range `[0.5, 0.907]`) converts that footprint into a
   solid disc count — random close packing of equal discs is ~0.82, `pi / (2*sqrt(3)) ~= 0.907` is
-  the hexagonal upper bound. At the defaults `N_true = 0.30 * 0.82 * 0.0315^2 / 0.001^2 ~ 244`.
+  the hexagonal upper bound. At the defaults `N_true = 0.50 * 0.82 * 0.0315^2 / 0.001^2 ~ 407`.
 - **Mode** (`CoarseGrainingMode`, `params.rs:35`; `simulation.coarse_graining_mode`):
   - `Off` (**default**): `k = 1`, `N_sim = N_true` regardless of `max_balls`;
   - `Auto`: `k = sqrt(N_true / max_balls)` if `N_true > max_balls`, else `k = 1`;
@@ -1856,7 +1856,7 @@ these statistics must not be used (`stress.rs:19`-`stress.rs:21`; ss9, ss3.2).
   investigation; configurations are those of that date, not today's defaults).**
   A user report of media balls "flying" unphysically out of a cascading charge was reproduced at a
   specific configuration: Realtime quality preset, `max_balls = 150`, `simulation.resolution = 15`,
-  `media.fill_fraction = 0.10` (well below this project's default `0.30`). Root operating-envelope
+  `media.fill_fraction = 0.10` (well below this project's default `0.50`). Root operating-envelope
   mismatch: at low `media.fill_fraction`, coarse-graining (ss3) weakens, so the effective simulated
   ball diameter (`d_eff`) shrinks toward or below the fluid lattice spacing `dx = drum_radius_m /
   resolution` — the params panel's "Fluid spacing vs ball diameter" (`dx/d_eff`) warning

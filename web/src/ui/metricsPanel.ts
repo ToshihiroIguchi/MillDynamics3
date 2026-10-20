@@ -184,8 +184,8 @@ const WARN_THRESHOLDS = new Map<string, number>([
 ]);
 
 // Report window inputs are in drum revolutions (converted to sim seconds at the current rpm):
-// >= 4 warm-up revolutions for steady state (same as the Batch default), then whole revolutions.
-const DEFAULT_REPORT_WARMUP_REV = 4;
+// >= 8 warm-up revolutions for steady state (same as the Batch default), then whole revolutions.
+const DEFAULT_REPORT_WARMUP_REV = 8;
 const DEFAULT_REPORT_MEASURE_REV = 8;
 const GENERATE_LABEL = "Generate report now";
 
@@ -195,7 +195,12 @@ const GROUPS_STORAGE_KEY = "milldynamics.metricsGroups";
 // that matter at a glance (see specs.ts's `KEY_METRIC_IDS`), so everything else is opt-in detail.
 // Mirrors ui/paramsPanel.ts's per-group open/closed persistence pattern one-for-one, under its own
 // storage key (paramsPanel.ts's is "milldynamics.paramsGroups", a separate panel/preference).
-const DEFAULT_GROUP_OPEN: Record<MetricGroupName, boolean> = {
+// The Report and Repeat-runs sections are collapsible too and share the same pref blob.
+const REPORT_GROUP_KEY = "Report";
+const BATCH_GROUP_KEY = "Repeat runs";
+const DEFAULT_GROUP_OPEN: Record<string, boolean> = {
+  [REPORT_GROUP_KEY]: false,
+  [BATCH_GROUP_KEY]: false,
   Drum: false,
   Media: false,
   Grinding: false,
@@ -259,9 +264,14 @@ export function createMetricsPanel(
   // arms an auto-pause-and-download, plus a manual "Generate report now" that always works off
   // whatever the aggregator has collected so far. See docs on `onAutoReportPause` above and
   // `reportArmed`/`reportEndTimeS` below for the arm/disarm rules.
-  const reportSection = document.createElement("section");
-  reportSection.className = "metrics-report";
-  const reportHeading = document.createElement("h3");
+  const reportSection = document.createElement("details");
+  reportSection.className = "metrics-group metrics-report";
+  reportSection.open = groupOpenPrefs[REPORT_GROUP_KEY] ?? false;
+  reportSection.addEventListener("toggle", () => {
+    groupOpenPrefs[REPORT_GROUP_KEY] = reportSection.open;
+    writeGroupOpenPrefs(groupOpenPrefs);
+  });
+  const reportHeading = document.createElement("summary");
   reportHeading.textContent = "Report";
   reportSection.appendChild(reportHeading);
 
@@ -314,9 +324,13 @@ export function createMetricsPanel(
   reportNote.className = "metrics-note";
   const reportNoteText =
     "PDF summary (stats, time series, snapshot, impact spectrum) over the window [warm-up, warm-up + measure] " +
-    "in drum revolutions at the current speed. Use >= 4 warm-up revolutions for steady state and measure " +
+    "in drum revolutions at the current speed. Use >= 8 warm-up revolutions for steady state and measure " +
     "whole revolutions (4-8): the motion repeats per revolution. Samples outside the window are ignored. " +
-    "Generating before the end uses [warm-up, now]. Measure = 0 or empty disables the end.";
+    "Generating before the end uses [warm-up, now]. Measure = 0 or empty disables the end. " +
+    "Why 8 warm-up revolutions: power and torque are smoothed over about 1 s of simulated time and the " +
+    "charge needs roughly 4 s to settle, so a shorter warm-up leaves a drift of several percent per " +
+    "revolution in the averages. Cumulative rows report the increase over the window; toe and shoulder " +
+    "angles use circular averages.";
   reportNote.textContent = reportNoteText;
   const reportAbout = document.createElement("details");
   reportAbout.className = "note-details";
@@ -607,7 +621,13 @@ export function createMetricsPanel(
           lastRenderMs = -Infinity;
         },
       });
-      details.appendChild(batchSection.element);
+      const batchEl = batchSection.element as HTMLDetailsElement;
+      batchEl.open = groupOpenPrefs[BATCH_GROUP_KEY] ?? false;
+      batchEl.addEventListener("toggle", () => {
+        groupOpenPrefs[BATCH_GROUP_KEY] = batchEl.open;
+        writeGroupOpenPrefs(groupOpenPrefs);
+      });
+      details.appendChild(batchEl);
     }
 
     if (group === "Grinding") {
@@ -696,6 +716,11 @@ export function createMetricsPanel(
     exportButton.disabled = history.length === 0;
     latestState = state;
 
+    // Apply the report window (rpm-dependent) BEFORE feeding the aggregator, so an early sample
+    // (e.g. t = 0, before the drum speed is known) is not accepted under a stale window.
+    latestRpm = mill ? rpmOf(mill) : null;
+    if (latestRpm !== windowRpm) applyWindowInputs(); // drum speed changed: recompute the window
+
     // Feed the report aggregator once per *new* metrics object (worker.ts throttles how often
     // `state.metrics` actually gets a fresh value, well below render rate -- see FrameMessage's
     // doc comment on `metrics`/`fluidSurface`), not once per render frame, so a metrics snapshot
@@ -707,8 +732,6 @@ export function createMetricsPanel(
 
     // Window end: the first time sim time passes the end, mark the window complete; with the
     // auto checkbox on, also pause + generate + download once (re-armed by reset()/window edits).
-    latestRpm = mill ? rpmOf(mill) : null;
-    if (latestRpm !== windowRpm) applyWindowInputs(); // drum speed changed: recompute the window
     if (reportArmed && reportEndTimeS > 0 && reportAggregator.isPastEnd(state.simTime)) {
       reportArmed = false;
       windowComplete = true;

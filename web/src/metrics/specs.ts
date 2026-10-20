@@ -66,11 +66,16 @@ export interface MetricSpec {
   /** Show a "x ref" ratio (current / stored reference) next to the value (Grinding proxy rows
    * only; not meaningful for cumulative quantities, which just grow with time). */
   refRatio?: boolean;
-  /** Which 2D-to-3D basis the value is on (docs/METRICS.md "Units and the 2D-to-3D basis"):
+  /** Which 2D-to-3D basis the value is on (see `BASIS_LEGEND`):
    * `per_depth` = extensive, per metre of drum length; `intensive` = dimensionless or per-mass/
    * per-ball-per-impact (needs no depth); `per_ball_slab` = per-ball absolute value from wall power
    * on a one-ball-thick slab. Omitted for solver/diagnostic rows. */
   basis?: MetricBasis;
+  /** How the PDF report aggregates this metric (report/pdf.ts, report/aggregator.ts):
+   * `cumulative` = monotone running total, reported as the window increase (last - first);
+   * `angle` = angle in degrees, aggregated with circular statistics (wraps at 360);
+   * `wallclock` = browser/solver speed diagnostic, omitted from the report's results table. */
+  report?: "cumulative" | "angle" | "wallclock";
 }
 
 export type MetricBasis = "per_depth" | "intensive" | "per_ball_slab";
@@ -98,7 +103,7 @@ export const KEY_METRIC_IDS = [
 ] as const;
 
 /** `unavailable` reason for any metric that scales directly with the coarse-graining factor `k`
- * (impact counts as `1/k^2`, per-impact energies as `k^2`, docs/PHYSICS.md §9) and is therefore
+ * (impact counts as `1/k^2`, per-impact energies as `k^2`) and is therefore
  * not comparable to a real mill whenever coarse-graining is active. `k` is exactly `1.0` when
  * inactive, so `> 1` needs no epsilon. */
 export function coarseGrainingReason(ctx: MetricContext): string | null {
@@ -190,6 +195,7 @@ function cumulativeEffectiveSpecs(): MetricSpec[] {
   for (let i = 0; i < THRESHOLD_COUNT; i++) {
     out.push({
       id: `proxy_cum_eff_energy_${i}`,
+      report: "cumulative",
       help: `Cumulative stress energy per ball carried by impacts above this threshold since the simulation started. The time two conditions need to reach the same value is a relative grinding-time proxy.${PROXY_NOTE}`,
       ...PROXY_BASE,
       label: `Cum. eff. energy, SE > ${THRESHOLDS_REL[i]} m·g·d`,
@@ -236,23 +242,24 @@ const BASIS_BY_ID: Record<string, MetricBasis> = {
 
 const RAW_METRIC_SPECS: MetricSpec[] = [
   // --- Drum -------------------------------------------------------------------------------
-  { id: "sim_time", help: "Simulated (physical) time elapsed since the last reset.", group: "Drum", label: "Sim time", unit: "s", value: (ctx) => ctx.simTime, format: fixed(1), csv: true },
-  { id: "fps", help: "Rendered frames per second of the browser display loop.", group: "Drum", label: "FPS", value: (ctx) => ctx.fps, format: fixed(0) },
-  { id: "achieved_speed", help: "Simulated time per wall-clock time actually achieved. Below the requested Time scale means the computer cannot keep up.", group: "Drum", label: "Achieved speed", unit: "x", value: (ctx) => ctx.achievedTimeScale, format: fixed(2), csv: true },
-  { id: "substeps_achieved_per_s", help: "Solver sub-steps actually computed per wall-clock second.", group: "Drum", label: "Sub-steps/s (achieved)", value: (ctx) => ctx.subStepsPerSecondAchieved, format: fixed(0), csv: true },
-  { id: "substeps_required_per_s", help: "Sub-steps per second needed to run at the requested Time scale (1x means real time).", group: "Drum", label: "Sub-steps/s (required for 1x)", value: (ctx) => ctx.subStepsPerSecondRequired, format: fixed(0), csv: true },
+  { id: "sim_time", report: "wallclock", help: "Simulated (physical) time elapsed since the last reset.", group: "Drum", label: "Sim time", unit: "s", value: (ctx) => ctx.simTime, format: fixed(1), csv: true },
+  { id: "fps", report: "wallclock", help: "Rendered frames per second of the browser display loop.", group: "Drum", label: "FPS", value: (ctx) => ctx.fps, format: fixed(0) },
+  { id: "achieved_speed", report: "wallclock", help: "Simulated time per wall-clock time actually achieved. Below the requested Time scale means the computer cannot keep up.", group: "Drum", label: "Achieved speed", unit: "x", value: (ctx) => ctx.achievedTimeScale, format: fixed(2), csv: true },
+  { id: "substeps_achieved_per_s", report: "wallclock", help: "Solver sub-steps actually computed per wall-clock second.", group: "Drum", label: "Sub-steps/s (achieved)", value: (ctx) => ctx.subStepsPerSecondAchieved, format: fixed(0), csv: true },
+  { id: "substeps_required_per_s", report: "wallclock", help: "Sub-steps per second needed to run at the requested Time scale (1x means real time).", group: "Drum", label: "Sub-steps/s (required for 1x)", value: (ctx) => ctx.subStepsPerSecondRequired, format: fixed(0), csv: true },
   { id: "rpm", help: "Current drum rotation speed in revolutions per minute.", group: "Drum", label: "Speed", unit: "rpm", value: (ctx) => ctx.rpm, format: fixed(1), csv: true },
   { id: "percent_critical", help: "Current drum speed as a percentage of the critical speed Nc.", group: "Drum", label: "Speed", unit: "% Nc", value: (ctx) => ctx.percentCritical, format: fixed(0), csv: true },
-  { id: "critical_speed_rpm", help: "Critical speed Nc: the speed at which a ball at the wall just stops falling and centrifuges, from the drum diameter.", group: "Drum", label: "Critical speed", unit: "rpm", value: (ctx) => ctx.criticalSpeedRpm, format: fixed(1) },
+  { id: "critical_speed_rpm", help: "Critical speed Nc: the speed at which a ball at the wall just stops falling and centrifuges. Nc = 42.3 / sqrt(D) rpm with D the drum diameter in metres; it ignores the ball diameter.", group: "Drum", label: "Critical speed", unit: "rpm", value: (ctx) => ctx.criticalSpeedRpm, format: fixed(1) },
   { id: "drum_omega", help: "Drum angular velocity in radians per second (signed by rotation direction).", group: "Drum", label: "Angular velocity", unit: "rad/s", value: m("drum_omega_rad_s"), format: fixed(2) },
 
   // --- Media (charge geometry) --------------------------------------------------------------
-  { id: "true_ball_count", help: "Number of balls a real mill with these settings would hold (from Fill fraction, packing fraction and Ball diameter).", group: "Media", label: "True ball count", value: m("true_ball_count"), format: fixed(0), csv: true },
+  { id: "true_ball_count", help: "Number of balls a real mill with these settings would hold, counted as a 2D area-based disc count (charge area from Fill fraction and packing fraction, divided by one ball's disc area).", group: "Media", label: "True ball count", value: m("true_ball_count"), format: fixed(0), csv: true },
   { id: "simulated_ball_count", help: "Number of balls actually simulated. Lower than the true count when coarse-graining is active.", group: "Media", label: "Simulated balls", value: m("simulated_ball_count"), format: fixed(0), csv: true },
   { id: "coarse_graining_factor", help: "Ball-size scale factor k. 1 means true-size balls; above 1 balls are enlarged so total charge mass and footprint are preserved.", group: "Media", label: "Coarse-graining (k)", value: m("coarse_graining_factor"), format: fixed(2), csv: true },
   { id: "effective_ball_diameter_mm", help: "Diameter of the balls actually simulated (true diameter multiplied by k).", group: "Media", label: "Effective diameter", unit: "mm", value: (ctx) => (ctx.metrics ? ctx.metrics.effective_ball_diameter_m * 1000 : null), format: fixed(2) },
   {
     id: "toe_angle_deg",
+    report: "angle",
 
     help: "Angle of the charge toe, where balls rejoin the bed at the bottom, measured from vertical. Not defined when the charge centrifuges.",
     group: "Media",
@@ -275,7 +282,7 @@ const RAW_METRIC_SPECS: MetricSpec[] = [
   },
   {
     id: "shoulder_angle_deg",
-
+    report: "angle",
     help: "Angle of the charge shoulder, where balls leave the bed at the top, measured from vertical. Not defined when the charge centrifuges.",
     group: "Media",
     label: "Shoulder angle",
@@ -312,8 +319,7 @@ const RAW_METRIC_SPECS: MetricSpec[] = [
     value: m("collision_rate_per_s"),
     format: fixed(1),
     csv: true,
-    // Impact count scales as 1/k^2 relative to the true (uncoarsened) population (docs/PHYSICS.md
-    // §9), so this reading cannot be compared to a real mill while coarse-graining is active --
+    // Impact count scales as 1/k^2 relative to the true (uncoarsened) population, so this reading cannot be compared to a real mill while coarse-graining is active --
     // hide the row entirely rather than show a number that would be misread as physical.
     unavailable: (_value, ctx) => coarseGrainingReason(ctx),
     hideWhenUnavailable: true,
@@ -332,7 +338,7 @@ const RAW_METRIC_SPECS: MetricSpec[] = [
   { id: "proxy_mean_se_shear", help: `Mean scaled stress energy SE/(m*g*d) of shear-type impacts (ball-ball and ball-wall).${PROXY_NOTE}`, ...PROXY_BASE, label: "Mean SE/(m·g·d), shear", value: proxy("mean_se_scaled_shear"), format: sig(3), refRatio: true },
   { id: "proxy_stress_intensity", help: `Mean scaled stress energy over all impacts (a Kwade-type stress intensity).${PROXY_NOTE}`, ...PROXY_BASE, label: "Stress intensity, mean SE/(m·g·d)", value: proxy("stress_intensity_scaled"), format: sig(3), sparkline: true, refRatio: true },
   ...effectivePowerSpecs(),
-  { id: "proxy_cum_specific_energy", help: `Wall work per kilogram of media since the simulation started (J/kg). Take differences between two times for a window.${PROXY_NOTE}`, ...PROXY_BASE, label: "Cumulative specific energy", unit: "J/kg", value: proxy("cumulative_specific_energy_j_per_kg"), format: sig(3) },
+  { id: "proxy_cum_specific_energy", report: "cumulative", help: `Wall work per kilogram of media since the simulation started (J/kg). Take differences between two times for a window.${PROXY_NOTE}`, ...PROXY_BASE, label: "Cumulative specific energy", unit: "J/kg", value: proxy("cumulative_specific_energy_j_per_kg"), format: sig(3) },
   ...cumulativeEffectiveSpecs(),
 
   // --- Slurry -------------------------------------------------------------------------------
@@ -350,13 +356,13 @@ const RAW_METRIC_SPECS: MetricSpec[] = [
         : null,
     format: fixed(0),
   },
-  { id: "free_surface_angle", help: "Tilt of the slurry free surface relative to horizontal.", group: "Slurry", label: "Free-surface angle", unit: "°", value: (ctx) => (ctx.metrics?.free_surface_angle_rad != null ? (ctx.metrics.free_surface_angle_rad * 180) / Math.PI : null), format: fixed(1) },
-  { id: "free_surface_offset", help: "Vertical offset of the slurry free surface from the drum centre.", group: "Slurry", label: "Free-surface offset", unit: "m", value: m("free_surface_offset_m"), format: fixed(3) },
+  { id: "free_surface_angle", help: "Tilt, relative to horizontal, of the principal axis of a line fitted to the whole slurry pool (all fluid particles not pinned against the wall). It describes the pool's bulk shape, not the actual surface contour.", group: "Slurry", label: "Pool principal-axis angle", unit: "°", value: (ctx) => (ctx.metrics?.free_surface_angle_rad != null ? (ctx.metrics.free_surface_angle_rad * 180) / Math.PI : null), format: fixed(1) },
+  { id: "free_surface_offset", help: "Perpendicular distance from the drum centre to the line fitted to the whole slurry pool (the same bulk-blob fit as the principal-axis angle). It is not a measurement of the actual surface.", group: "Slurry", label: "Pool principal-axis offset", unit: "m", value: m("free_surface_offset_m"), format: fixed(3) },
   { id: "pool_depth", help: "Depth of the slurry pool measured at the bottom of the drum.", group: "Slurry", label: "Pool depth (bottom)", unit: "m", value: m("pool_depth_m"), format: fixed(3), csv: true },
   {
     id: "mixing_index",
 
-    help: "Lacey mixing index of the dye tracer: 0 is fully segregated, 1 is fully mixed. Hidden when slurry is off.",
+    help: "Lacey mixing index of the dye tracer: 0 is fully segregated, 1 is fully mixed. Hidden when slurry is off or when there is no dye pattern to mix.",
     group: "Slurry",
     label: "Mixing index",
     value: m("mixing_index"),
@@ -366,7 +372,14 @@ const RAW_METRIC_SPECS: MetricSpec[] = [
     key: true,
     // Promoted to the key-results block (it's the only Slurry-group metric with direct process
     // meaning), so it needs its own reason rather than a bare "-" when there is no slurry to mix.
-    unavailable: (_value, ctx) => (ctx.slurryEnabled === false ? "Slurry off" : null),
+    // A null reading with slurry on means there is no dye variance (no dye pattern), so there is
+    // nothing to mix -- hide the row rather than show a misleading 1.0 or a bare "-".
+    unavailable: (value, ctx) =>
+      ctx.slurryEnabled === false
+        ? "Slurry off"
+        : ctx.slurryEnabled === true && value === null
+          ? "No dye pattern"
+          : null,
     hideWhenUnavailable: true,
   },
   { id: "max_compression_error", help: "Worst over-compression of any fluid particle (density above rest density) as a fraction. A solver-convergence indicator; it warns above 5%.", group: "Slurry", label: "Max compression error", value: m("max_fluid_compression_error_fraction"), format: percentOf1(2), sparkline: true, csv: true },

@@ -14,6 +14,19 @@ export interface MetricStats {
   std: number;
   min: number;
   max: number;
+  /** First and last finite sample in the window (the window increase of a cumulative metric is
+   * `last - first`). */
+  first: number;
+  last: number;
+}
+
+/** Metric ids aggregated with circular statistics by default (angles in degrees that wrap at 360). */
+export const DEFAULT_ANGLE_IDS: readonly string[] = ["toe_angle_deg", "shoulder_angle_deg"];
+
+/** Circular mean of angles in degrees, in [0, 360). */
+export function circularMeanDeg(sumSin: number, sumCos: number): number {
+  const deg = (Math.atan2(sumSin, sumCos) * 180) / Math.PI;
+  return ((deg % 360) + 360) % 360;
 }
 
 /** One decimated time-series sample. */
@@ -44,6 +57,10 @@ interface Accumulator {
   m2: number;
   min: number;
   max: number;
+  first: number;
+  last: number;
+  sumSin: number;
+  sumCos: number;
 }
 
 /**
@@ -64,6 +81,12 @@ export class ReportAggregator {
   private histLastCounts: number[] | null = null;
   private histDuration = 0;
   private lastAcceptedTime: number | null = null;
+  private angleIds: Set<string>;
+
+  /** `angleIds`: metric ids (degrees) aggregated with circular statistics; defaults to toe/shoulder. */
+  constructor(angleIds: Iterable<string> = DEFAULT_ANGLE_IDS) {
+    this.angleIds = new Set(angleIds);
+  }
 
   /** Sets the sample window. Samples outside `[warmupS, endS]` are ignored by `add`. Does not
    * clear already-collected data. */
@@ -102,7 +125,7 @@ export class ReportAggregator {
       if (value === null || value === undefined || !Number.isFinite(value)) continue;
       let acc = this.accumulators.get(id);
       if (!acc) {
-        acc = { count: 0, mean: 0, m2: 0, min: value, max: value };
+        acc = { count: 0, mean: 0, m2: 0, min: value, max: value, first: value, last: value, sumSin: 0, sumCos: 0 };
         this.accumulators.set(id, acc);
       }
       acc.count += 1;
@@ -112,6 +135,12 @@ export class ReportAggregator {
       acc.m2 += delta * delta2;
       acc.min = Math.min(acc.min, value);
       acc.max = Math.max(acc.max, value);
+      acc.last = value;
+      if (this.angleIds.has(id)) {
+        const rad = (value * Math.PI) / 180;
+        acc.sumSin += Math.sin(rad);
+        acc.sumCos += Math.cos(rad);
+      }
       this.pushSeries(id, simTime, value);
     }
   }
@@ -184,8 +213,15 @@ export class ReportAggregator {
   statsFor(id: string): MetricStats | null {
     const acc = this.accumulators.get(id);
     if (!acc || acc.count === 0) return null;
+    const base = { count: acc.count, min: acc.min, max: acc.max, first: acc.first, last: acc.last };
+    if (this.angleIds.has(id)) {
+      // Circular mean via the mean resultant vector; circular std = sqrt(-2 ln R) (radians -> deg).
+      const r = Math.min(1, Math.hypot(acc.sumSin, acc.sumCos) / acc.count);
+      const std = r > 0 ? (Math.sqrt(-2 * Math.log(r)) * 180) / Math.PI : 180;
+      return { ...base, mean: circularMeanDeg(acc.sumSin, acc.sumCos), std: Math.abs(std) };
+    }
     const variance = acc.count > 1 ? acc.m2 / (acc.count - 1) : 0;
-    return { count: acc.count, mean: acc.mean, std: Math.sqrt(variance), min: acc.min, max: acc.max };
+    return { ...base, mean: acc.mean, std: Math.sqrt(variance) };
   }
 
   /** Every metric id that has received at least one finite value so far. */
