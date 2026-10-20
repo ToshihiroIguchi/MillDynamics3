@@ -48,8 +48,8 @@ cataracts back down. Balls and slurry push on each other (buoyancy, drag, displa
 
 `Simulation::step_fixed` advances one fixed sub-step `dt = 1/(60 * effective_substeps)` s
 (`Simulation::fixed_sub_dt`, `lib.rs:426`). The requested `simulation.substeps` defaults to 8
-(`params.rs:488`); `Params::effective_substeps` (§3.3) raises it when the media are small, to 16 at
-the shipped 63 mm drum / 2 mm ball defaults, i.e. `dt = 1/960 s`. (`FIXED_DT = 1/240 s`,
+(`params.rs:488`); `Params::effective_substeps` (§3.3) raises it when the media are small, to 24 at
+the shipped 63 mm drum / 2 mm ball / J = 0.50 defaults, i.e. `dt = 1/1440 s` (16 at J <= 0.30). (`FIXED_DT = 1/240 s`,
 `lib.rs:41`, is used only by the benches.) One sub-step runs `coupling::step_recorded`
 (`coupling.rs:71`):
 
@@ -309,13 +309,13 @@ Two derived quantities are raised automatically (never silently: the parameters 
   (`params.rs:692`, half the `< 1` criterion) gives
 
   ```
-  n_min = ceil( v_ref / (60 * 0.5 * d_eff) ),   n_s = max( substeps, min(n_min, 16) )
+  n_min = ceil( v_ref / (60 * 0.5 * d_eff) ),   n_s = max( substeps, min(n_min, cap) )   with n_min and cap scaled by f = clamp(1 + 2.5 (J - 0.30), 1, 2), cap = ceil(16 f)
   ```
 
-  The auto-raise stops at 16; an explicit request above 16 (the validated range is 1–64) is honoured
-  as is (`params.rs:702`). At the defaults `v_ref = sqrt(2 * 9.81 * 0.063) = 1.11 m/s`,
-  `n_min = 19`, so `n_s = 16` and `dt = 1/960 s`. The legacy 1 m drum with a 63 mm ball needs no
-  raise (`effective_substeps_matches_requested_for_the_legacy_1m_drum`). Clamping at 16 means a
+  The auto-raise stops at `cap` (16 at J <= 0.30, 20 at J = 0.40, 24 at J = 0.50, at most 32); an explicit request above the cap (the validated range is 1–64) is honoured
+  as is. The density factor was added 2026-10-20: at the J = 0.50 default, 16 sub-steps left `max_ball_overlap_fraction` at mean 42 % / max 114 % over 10 s (21 % of frames above 50 %; slurry off: mean 36 %, max 108 %); 20 gave mean 27 % / max 70 %, 24 gave mean 20 % / max 38 % / 0 frames above 50 % (slurry off: 18 % / 39 %), 28 gave 16 % / 30 %, 32 gave 12.5 % / 26 %. J = 0.40: 16 gave 31 % / 95 %, 20 gave 22 % / 50 % / 0 frames above 50 %. J = 0.30 at 16 is unchanged (21 % / 41 %). Cost is about 1.4-1.5x per frame at J = 0.50 (24 vs 16 sub-steps; same-session timings were noisy). At the defaults `v_ref = sqrt(2 * 9.81 * 0.063) = 1.11 m/s`,
+  `n_min = 19 * 1.5 = 28`, so `n_s = min(28, 24) = 24` and `dt = 1/1440 s`. The legacy 1 m drum with a 63 mm ball needs no
+  raise (`effective_substeps_matches_requested_for_the_legacy_1m_drum`). Clamping at the cap means a
   pathological combination (a very small ball with `max_balls` far above `N_true`) cannot make a
   frame unboundedly expensive; in that residual regime the displacement ratio may still approach or
   exceed 1, a disclosed limit of the auto-raise (§9).

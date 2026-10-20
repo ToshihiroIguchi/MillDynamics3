@@ -161,7 +161,7 @@ describe("effectiveSubsteps", () => {
     expect(result).toBeLessThanOrEqual(16);
   });
 
-  it("is capped at 16 for a pathological tiny-ball-diameter config", () => {
+  it("is capped for a pathological tiny-ball-diameter config", () => {
     // A pathological combination (max_balls far above N_true, i.e. no coarse-graining, with a
     // tiny ball diameter) would otherwise demand an unboundedly high sub-step rate; the cap keeps
     // this function's output always within SimulationParams::validate's own validated range.
@@ -170,7 +170,17 @@ describe("effectiveSubsteps", () => {
     expect(result).toBeLessThanOrEqual(16);
   });
 
-  it("keeps an explicit request above 16 (auto-raise stops at 16, explicit up to 64 wins)", () => {
+  it("scales the auto-raise with charge density (J 0.30 -> 16, 0.40 -> 20, 0.50 -> 24, cap 32)", () => {
+    const shipped: MillLike = { diameter_m: 0.063, speed_mode: "rpm", speed_value: 100 };
+    const at = (j: number) => effectiveSubsteps(shipped, { ...media, ball_diameter_m: 0.002, fill_fraction: j }, 600, 8);
+    expect(at(0.1)).toBe(16);
+    expect(at(0.3)).toBe(16);
+    expect(at(0.4)).toBe(20);
+    expect(at(0.5)).toBe(24);
+    expect(at(0.9)).toBe(32);
+  });
+
+  it("keeps an explicit request above 16 (auto-raise stops at the cap, explicit up to 64 wins)", () => {
     expect(effectiveSubsteps(mill, media, 300, 32)).toBe(32);
   });
 });

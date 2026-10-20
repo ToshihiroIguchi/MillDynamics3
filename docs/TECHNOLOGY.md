@@ -287,10 +287,10 @@ $$
 **Automatic sub-step count** (`Params::effective_substeps`, `params.rs:690`). The XPBD tunnelling criterion is $\max|v|\Delta t/(2r) < 1$, which worsens as $d_\text{eff}$ shrinks. Using a generous free-fall reference speed across the drum diameter $D$, $v_\text{ref}=\sqrt{2gD}$, and requiring $v_\text{ref}\Delta t\le \texttt{TARGET\_RATIO}\cdot d_\text{eff}$ with $\Delta t=1/(60 n_s)$ and `TARGET_RATIO = 0.5` (`params.rs:692`):
 
 $$
-n_{s,\min}=\Bigl\lceil \frac{v_\text{ref}}{60\cdot0.5\cdot d_\text{eff}}\Bigr\rceil,\qquad n_s=\max\bigl(\texttt{substeps},\ \min(n_{s,\min},16)\bigr).
+n_{s,\min}=\Bigl\lceil \frac{v_\text{ref}}{60\cdot0.5\cdot d_\text{eff}}\Bigr\rceil,\qquad n_s=\max\bigl(\texttt{substeps},\ \min(n_{s,\min},\lceil 16 f\rceil)\bigr).
 $$
 
-An explicit request above 16 (up to 64) is honoured as is (`params.rs:702`). At the defaults, $v_\text{ref}=1.11$ m/s, $n_{s,\min}=19$, so $n_s=16$.
+Here $f=\mathrm{clamp}(1+2.5(J-0.30),1,2)$ is a charge-density factor that also multiplies $n_{s,\min}$ (it keeps ball-ball overlap healthy in a dense bed). An explicit request above the cap (up to 64) is honoured as is. At the defaults, $v_\text{ref}=1.11$ m/s, $J=0.50$, $f=1.5$, $n_{s,\min}=28$, so $n_s=24$.
 
 **Tunnelling diagnostic.** `max_substep_displacement_over_diameter` $=\max_i|v_i|\Delta t/(2r)$ per sub-step (`dem.rs:591`) is reported as a metric; the maximum over a frame is kept by `Simulation` (`lib.rs:562`). Values approaching 1 indicate that a ball moves about its own diameter in one sub-step.
 

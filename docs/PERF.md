@@ -1,8 +1,9 @@
 # Performance baseline
 
 **Current state (2026-10-20):** the defaults are now `simulation.substeps = 8` (requested), auto-raised
-by `Params::effective_substeps` to 16 at the shipped 63 mm / 2 mm-ball / 100 rpm configuration, so the
-sub-step is `dt = 1 / (60 * effective_substeps) = 1/960 s`. The M6 solver pass (2026-09-27) and the M7
+by `Params::effective_substeps` to 24 at the shipped 63 mm / 2 mm-ball / 100 rpm / J = 0.50 configuration (16 until 2026-10-20;
+the density-aware auto-raise costs roughly 1.4-1.5x per frame, so the ms/frame figures below pre-date it),
+so the sub-step is `dt = 1 / (60 * effective_substeps) = 1/1440 s`. The M6 solver pass (2026-09-27) and the M7
 speed-up (2026-10-18) have both landed. Every section below this paragraph is a dated historical
 record, measured with the defaults and sub-step size of its day (for example `FIXED_DT = 1/240 s`,
 `substeps = 4`, a 1 m drum); do not compare those absolute numbers with a fresh run, and read the

@@ -109,17 +109,17 @@ export function effectiveFluidResolution(
 }
 
 /**
- * Mirrors `Params::effective_substeps` (params.rs:568-579). `mill.diameter_m` is the mill's drum
- * diameter. Auto-raises `substeps` (capped at 16, `SimulationParams::validate`'s own validated
- * maximum) so the XPBD stability criterion `max_substep_displacement_over_diameter < 1`
- * (docs/METRICS.md) stays clear of 1 even when coarse-graining (`effectiveMedia` above) shrinks
- * the effective ball diameter `d_eff`. Reuses `effectiveMedia` rather than re-deriving the
- * coarse-graining math, exactly like `effectiveFluidResolution` above. See `effective_substeps`'s
- * doc comment in params.rs for the full derivation (`v_ref = sqrt(2 * g * D)` as a generous upper
- * bound on cataracting impact speed, `TARGET_RATIO = 0.5`); at `Params::default()` and every
- * `web/src/params/presets.ts` quality preset at the default 0.50 fill fraction this returns the
- * requested `substeps` unchanged, and raises 8 -> 12 at `max_balls = 1500` with the Realtime
- * preset's `resolution = 15` (docs/PHYSICS.md §9's 2026-09-27 follow-up).
+ * Mirrors `Params::effective_substeps` (params.rs). `mill.diameter_m` is the mill's drum
+ * diameter. Auto-raises `substeps` so the XPBD stability criterion
+ * `max_substep_displacement_over_diameter < 1` (docs/METRICS.md) stays clear of 1 even when
+ * coarse-graining (`effectiveMedia` above) shrinks the effective ball diameter `d_eff`, and so a
+ * dense ball bed keeps its ball-ball overlap healthy. Reuses `effectiveMedia` rather than
+ * re-deriving the coarse-graining math, exactly like `effectiveFluidResolution` above.
+ * `v_ref = sqrt(2 * g * D)` is a generous upper bound on cataracting impact speed and
+ * `TARGET_RATIO = 0.5`; both the required count and the cap are multiplied by
+ * `densityFactor = clamp(1 + 2.5 * (J - 0.30), 1, 2)` (`J = media.fill_fraction`), so the cap is
+ * `ceil(16 * densityFactor)`: 16 at J <= 0.30, 20 at J = 0.40, 24 at J = 0.50 (the shipped
+ * default), at most 32. See `effective_substeps`'s doc comment in params.rs for the measurements.
  */
 export function effectiveSubsteps(
   mill: MillLike,
@@ -131,14 +131,19 @@ export function effectiveSubsteps(
 ): number {
   const GRAVITY_MAG = 9.81;
   const TARGET_RATIO = 0.5;
+  const BASE_CAP = 16;
+  const DENSE_J_REF = 0.3;
+  const DENSE_J_SLOPE = 2.5;
   const diameterM = mill.diameter_m;
   const eff = effectiveMedia(diameterM, media, maxBalls, mode, manualK);
   const dEff = eff.diameterM;
   if (!(dEff > 0) || !(diameterM > 0)) return substeps;
+  const densityFactor = Math.min(2, Math.max(1, 1 + DENSE_J_SLOPE * (media.fill_fraction - DENSE_J_REF)));
   const vRef = Math.sqrt(2 * GRAVITY_MAG * diameterM);
-  const minSubsteps = Math.max(1, Math.ceil(vRef / (60 * TARGET_RATIO * dEff)));
-  // Matches Rust: the auto-raise stops at 16, but an explicit request above that (up to 64) wins.
-  return Math.max(substeps, Math.min(16, minSubsteps));
+  const minSubsteps = Math.max(1, Math.ceil((vRef * densityFactor) / (60 * TARGET_RATIO * dEff)));
+  const cap = Math.ceil(BASE_CAP * densityFactor);
+  // Matches Rust: the auto-raise stops at `cap`, but an explicit request above that (up to 64) wins.
+  return Math.max(substeps, Math.min(cap, minSubsteps));
 }
 
 /**

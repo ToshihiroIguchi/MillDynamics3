@@ -24,7 +24,8 @@
 // 2 mm ball in a 63 mm drum `N_true` (~244) is small anyway, so only `resolution` (fluid
 // particle count) differs between tiers. The
 // notes below give native (not browser) ms/frame from `examples/perf_probe` with the water default
-// (2026-10-08) and the power error from `examples/coarse_graining_probe --reference`; the older
+// (2026-10-08, when the shipped J = 0.50 charge ran 16 sub-steps; it now runs 24, so expect roughly
+// 1.4-1.5x these figures -- not re-measured per tier) and the power error from `examples/coarse_graining_probe --reference`; the older
 // "achieved speed" browser figures in docs/PERF.md pre-date that default.
 export interface QualityPreset {
   id: string;
@@ -117,6 +118,6 @@ export const QUALITY_PRESETS: QualityPreset[] = [
     substeps: 32,
     demIterations: 12,
     coarseGrainingMode: "off",
-    note: "About 4x the sub-steps of the default (32 vs 8, plus 12 ball-solver iterations), so the simulation runs several times slower than real time. The Grinding proxy impact statistics are only reasonably converged this way: impact counts still drift roughly +5 % per doubling of sub-steps and mean stress energies move 3-5 %, so compare runs only with identical settings. Coarse-graining is off (true-size balls), so the ball count can be large for small balls (the panel warns above 3000 and blocks Apply above 30000 true balls).",
+    note: "About 1.3x the sub-steps of the default (32 vs the default's 24, plus 12 ball-solver iterations), so the simulation runs several times slower than real time. The Grinding proxy impact statistics are only reasonably converged this way: impact counts still drift roughly +5 % per doubling of sub-steps and mean stress energies move 3-5 %, so compare runs only with identical settings. Coarse-graining is off (true-size balls), so the ball count can be large for small balls (the panel warns above 3000 and blocks Apply above 30000 true balls).",
   },
 ];

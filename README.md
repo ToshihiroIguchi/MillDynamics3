@@ -17,8 +17,8 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the full design and milestone plan, and
 
 ## How it works (short version)
 
-Each fixed sub-step (`dt = 1 / (60 * effective_substeps)`; 1/960 s at the defaults, where the requested 8
-sub-steps are auto-raised to 16 by `Params::effective_substeps`) advances the slurry and then the balls:
+Each fixed sub-step (`dt = 1 / (60 * effective_substeps)`; 1/1440 s at the defaults, where the requested 8
+sub-steps are auto-raised to 24 by `Params::effective_substeps`) advances the slurry and then the balls:
 
 - **Slurry**: Position Based Fluids. Particles are predicted under gravity, then a density
   constraint is iterated to keep the fluid incompressible; Akinci cohesion/adhesion give surface

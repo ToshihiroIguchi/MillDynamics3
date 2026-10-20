@@ -36,13 +36,13 @@ pub use params::{EffectiveMedia, Params};
 use pbf::FluidParticles;
 
 /// Reference sub-step of 1/240 s, used only by the benches; the solver itself steps by
-/// `1 / (60 * effective_substeps)` ([`Simulation::fixed_sub_dt`], 1/960 s at the 63 mm / 2 mm
+/// `1 / (60 * effective_substeps)` ([`Simulation::fixed_sub_dt`], 1/1440 s at the 63 mm / 2 mm
 /// defaults). Sub-steps are taken per nominal 60 Hz frame at 1x time scale (docs/PLAN.md ss3.2/3.3).
 pub const FIXED_DT: f32 = 1.0 / 240.0;
 
 /// Time constant (s) for the exponential moving average [`Simulation`] applies to the per-sub-step
 /// grinding diagnostics (power draw, torque, collision rate, dissipated power, impact-energy
-/// histogram, docs/PLAN.md ss3.5). A single sub-step (1/960 s by default) is far too short/noisy to read
+/// histogram, docs/PLAN.md ss3.5). A single sub-step (1/1440 s by default) is far too short/noisy to read
 /// directly; ~1 s smooths that out while still tracking a real change (e.g. a speed change)
 /// within about a second.
 const GRINDING_STATS_EMA_TAU_S: f32 = 1.0;
@@ -414,9 +414,9 @@ impl Simulation {
     /// The fixed sub-step size (s) this simulation's *effective* sub-step rate
     /// ([`crate::params::Params::effective_substeps`]) implies at the project's nominal 60 Hz
     /// target frame rate: `1 / (60 * effective_substeps())`. [`FIXED_DT`] is this value only at
-    /// `effective_substeps = 4`; the requested default is `substeps = 8`, auto-raised to 16 at the
+    /// `effective_substeps = 4`; the requested default is `substeps = 8`, auto-raised to 24 at the
     /// 63 mm / 2 mm defaults, so `FIXED_DT` (used only by `benches/step.rs`, never by the solver)
-    /// is `1/240 s` while this method's default-params value is `1/960 s`. This method gives
+    /// is `1/240 s` while this method's default-params value is `1/1440 s`. This method gives
     /// the correct value for whatever `substeps` this instance's params currently specify, auto-
     /// raised the same way `effective_substeps` is (never silently -- the parameters panel surfaces
     /// the raised value alongside effective resolution). A caller driving a fixed-sub-step
@@ -580,8 +580,10 @@ mod tests {
     #[test]
     fn fixed_sub_dt_matches_60hz_over_substeps() {
         let mut params = Params::default();
-        // Legacy 1 m drum: at the shipped 2 mm / 63 mm default `effective_substeps` raises to 16.
+        // Legacy 1 m drum at J = 0.30 (no density scaling); the shipped 2 mm / 63 mm default
+        // raises `effective_substeps` to 24 at J = 0.50.
         params.mill.diameter_m = 1.0;
+        params.media.fill_fraction = 0.30;
         params.simulation.substeps = 8;
         // 2 mm balls in a 1 m drum are ~61 500 discs: this test needs the coarse-grained population.
         params.simulation.coarse_graining_mode = crate::params::CoarseGrainingMode::Auto;

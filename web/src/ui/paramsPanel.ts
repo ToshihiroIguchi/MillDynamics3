@@ -750,7 +750,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
         "Effective sub-steps",
         `${effectiveSubstepCount}`,
         effectiveSubstepCount > substeps,
-        "Sub-steps per frame actually used. The solver raises it above your setting (up to 16) when the balls are small enough that they would otherwise move too far per sub-step; this includes the default 2 mm balls (8 to 16).",
+        "Sub-steps per frame actually used. The solver raises it above your setting (up to 16, or up to 32 for a dense charge: the cap grows with the ball fill fraction above 0.30) when the balls are small, or the charge dense, enough that they would otherwise move too far or overlap too much per sub-step; this includes the default 2 mm balls at 0.50 fill (8 to 24).",
       ],
       [
         "Sub-step displacement / diameter",

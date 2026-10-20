@@ -853,9 +853,10 @@ pub mod harness {
         p.simulation.substeps = substeps;
         p.simulation.seed = seed;
         // Large media so `effective_substeps()` (which auto-raises the rate for small, coarse-
-        // grained balls -- at the default 2 mm media it is 16 for every request) equals the
-        // requested `substeps`; otherwise the comparison would be vacuous.
-        p.media.ball_diameter_m = 0.01;
+        // grained balls -- at the default 2 mm media it is 24 for every request) equals the
+        // requested `substeps` (smallest request 4; the J = 0.50 density factor 1.5 needs a ball
+        // of at least ~15 mm for that); otherwise the comparison would be vacuous.
+        p.media.ball_diameter_m = 0.015;
         p.media.fill_fraction = 0.5;
         percent_critical(&mut p, 60.0);
         let eff = p.effective_substeps();

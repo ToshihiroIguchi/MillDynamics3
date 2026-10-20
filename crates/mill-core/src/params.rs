@@ -684,24 +684,45 @@ impl Params {
     /// by their own settings; `Params::default()` itself is raised from 8 to 16 here (63 mm drum,
     /// 2 mm balls), and `max_balls = 1500` at the Realtime preset's resolution raises 8 to 12.
     ///
-    /// The auto-raise is capped at 16 (below the validated maximum of 64) for the same reason
-    /// `effective_fluid_resolution` clamps at 200: a pathological combination (`max_balls` far above
-    /// `N_true` with a very small `media.ball_diameter_m`) must not make a frame's DEM/PBF cost
-    /// unboundedly large. In that residual regime the ratio may still approach or exceed 1; this is
-    /// a real, disclosed limit of the auto-raise, not a bug (see docs/PHYSICS.md §9).
+    /// Charge density. A denser ball bed (media fill fraction `J` above 0.30)
+    /// has more simultaneous ball-ball contacts per sub-step, so the XPBD contact solve leaves a
+    /// larger residual overlap at the same `dt` (measured on the shipped 2 mm / 63 mm / 100 rpm
+    /// default with slurry on, 10 s: `max_ball_overlap_fraction` mean 21 % / max 41 % at J = 0.30
+    /// with 16 sub-steps, but mean 42 % / max 114 % with 128 of 600 frames above 50 % at J = 0.50;
+    /// J = 0.50 needs 24 sub-steps for mean 20 % / max 38 % / 0 frames above 50 %, and J = 0.40
+    /// needs 20 for mean 22 % / 0 frames above 50 %). Both the required count and the cap are
+    /// therefore multiplied by `density_factor = clamp(1 + 2.5 * (J - 0.30), 1, 2)`, which is
+    /// exactly 1 at and below J = 0.30 (16 at the shipped default there, unchanged), 1.25 at
+    /// J = 0.40 (20) and 1.5 at J = 0.50 (24), reaching its limit of 2 (32) at J = 0.70.
+    ///
+    /// The auto-raise is capped at `ceil(16 * density_factor)` (at most 32, below the validated
+    /// maximum of 64) for the same reason `effective_fluid_resolution` clamps at 200: a pathological
+    /// combination (`max_balls` far above `N_true` with a very small `media.ball_diameter_m`) must
+    /// not make a frame's DEM/PBF cost unboundedly large. In that residual regime the ratio may
+    /// still approach or exceed 1; this is a real, disclosed limit of the auto-raise, not a bug (see
+    /// docs/PHYSICS.md §9). The cost of the denser rule is roughly linear in the sub-step count
+    /// (J = 0.50: 24 vs 16 sub-steps, about 1.5x per frame).
     pub fn effective_substeps(&self) -> u32 {
         const GRAVITY_MAG: f32 = 9.81;
         const TARGET_RATIO: f32 = 0.5;
+        const BASE_CAP: f32 = 16.0;
+        const DENSE_J_REF: f32 = 0.30;
+        const DENSE_J_SLOPE: f32 = 2.5;
         let d_eff = self.effective_media().diameter_m;
         let diameter_m = self.mill.diameter_m;
         if !(d_eff > 0.0 && diameter_m > 0.0) {
             return self.simulation.substeps;
         }
+        let density_factor =
+            (1.0 + DENSE_J_SLOPE * (self.media.fill_fraction - DENSE_J_REF)).clamp(1.0, 2.0);
         let v_ref = (2.0 * GRAVITY_MAG * diameter_m).sqrt();
-        let min_substeps = (v_ref / (60.0 * TARGET_RATIO * d_eff)).ceil().max(1.0) as u32;
-        // The auto-raise stops at 16; an explicit request above that (up to the validated 64, used
-        // by the accuracy benchmarks) is honoured as is.
-        self.simulation.substeps.max(min_substeps.min(16))
+        let min_substeps = (v_ref * density_factor / (60.0 * TARGET_RATIO * d_eff))
+            .ceil()
+            .max(1.0) as u32;
+        let cap = (BASE_CAP * density_factor).ceil() as u32;
+        // The auto-raise stops at `cap`; an explicit request above that (up to the validated 64,
+        // used by the accuracy benchmarks) is honoured as is.
+        self.simulation.substeps.max(min_substeps.min(cap))
     }
 }
 
@@ -961,23 +982,22 @@ mod tests {
         // N_true ~= 407, under `Params::default()`'s own max_balls (600) and the Accuracy tier.
         // It exceeds the 300 tiers of web/src/params/presets.ts, which only matters if the user
         // switches coarse-graining to Auto (the default is Off, so N_sim = N_true regardless).
-        for max_balls in [600u32] {
-            let mut params = Params::default();
-            params.simulation.max_balls = max_balls;
-            params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
-            let n_true = params.true_ball_count();
-            assert!(
-                n_true <= max_balls as f32,
-                "N_true={n_true} should not exceed max_balls={max_balls} at the shipped default \
-                 2 mm ball / 63 mm drum"
-            );
-            let eff = params.effective_media();
-            assert_eq!(
-                eff.scale_factor, 1.0,
-                "expected no coarse-graining at max_balls={max_balls}, got scale_factor={}",
-                eff.scale_factor
-            );
-        }
+        let max_balls = 600u32;
+        let mut params = Params::default();
+        params.simulation.max_balls = max_balls;
+        params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
+        let n_true = params.true_ball_count();
+        assert!(
+            n_true <= max_balls as f32,
+            "N_true={n_true} should not exceed max_balls={max_balls} at the shipped default \
+             2 mm ball / 63 mm drum"
+        );
+        let eff = params.effective_media();
+        assert_eq!(
+            eff.scale_factor, 1.0,
+            "expected no coarse-graining at max_balls={max_balls}, got scale_factor={}",
+            eff.scale_factor
+        );
     }
 
     #[test]
@@ -1094,18 +1114,34 @@ mod tests {
     #[test]
     fn effective_substeps_is_capped_at_every_quality_preset_at_the_shipped_default() {
         // The shipped 2 mm ball in a 63 mm drum has D / d = 31.5 (the old 63 mm ball in a 1 m drum
-        // had 15.9), so `v_ref * dt <= 0.5 * d_eff` needs ~19 sub-steps: every quality tier runs
-        // at the validated cap (16), independent of `max_balls` because none coarse-grains.
+        // had 15.9), so `v_ref * dt <= 0.5 * d_eff` needs ~19 sub-steps (x1.5 at the default
+        // J = 0.50): every quality tier runs at the density-scaled cap (24), independent of
+        // `max_balls` because none coarse-grains.
         for max_balls in [300u32, 600] {
             let mut params = Params::default();
             params.simulation.max_balls = max_balls;
             params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
             assert_eq!(
                 params.effective_substeps(),
-                16,
+                24,
                 "unexpected sub-step count at max_balls={max_balls}"
             );
         }
+    }
+
+    #[test]
+    fn effective_substeps_scales_with_charge_density() {
+        // Measured (docs/PHYSICS.md): J = 0.30 -> 16, J = 0.40 -> 20, J = 0.50 -> 24, capped at 32.
+        let at = |j: f32| {
+            let mut params = Params::default();
+            params.media.fill_fraction = j;
+            params.effective_substeps()
+        };
+        assert_eq!(at(0.10), 16);
+        assert_eq!(at(0.30), 16);
+        assert_eq!(at(0.40), 20);
+        assert_eq!(at(0.50), 24);
+        assert_eq!(at(0.90), 32);
     }
 
     #[test]
@@ -1161,6 +1197,7 @@ mod tests {
         params.simulation.coarse_graining_mode = CoarseGrainingMode::Auto;
 
         let substeps = params.effective_substeps();
-        assert!(substeps <= 16);
+        // J = 0.50 (default) -> density-scaled cap of 24.
+        assert_eq!(substeps, 24);
     }
 }
