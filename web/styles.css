@@ -476,7 +476,7 @@ body.params-collapsed .params-panel {
 /* Collapsed "Advanced" sub-section nested inside a .params-group (ui/paramsPanel.ts). */
 .params-subgroup {
   margin: 8px 0 2px;
-  padding: 0 !important;
+  padding: 0 10px;
   border-top: 1px dashed #3a4048;
 }
 
@@ -489,10 +489,6 @@ body.params-collapsed .params-panel {
   font-size: 11px;
   color: #8a93a0;
   cursor: pointer;
-}
-
-.params-subgroup > :not(summary) {
-  margin-left: 8px;
 }
 
 .params-row {

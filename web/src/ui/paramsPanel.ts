@@ -38,12 +38,12 @@ import {
 const GROUPS_STORAGE_KEY = "milldynamics.paramsGroups";
 
 const DEFAULT_GROUP_OPEN: Record<string, boolean> = {
-  Mill: true,
-  Media: true,
+  Mill: false,
+  Media: false,
   Lifters: false,
   Slurry: false,
   "Numerical accuracy": false,
-  Derived: true,
+  Derived: false,
   // Collapsed "Advanced" sub-sections, keyed `${group}/Advanced` (readGroupOpenPrefs only keeps
   // keys listed here).
   "Media/Advanced": false,
@@ -52,24 +52,12 @@ const DEFAULT_GROUP_OPEN: Record<string, boolean> = {
   "Numerical accuracy/Advanced": false,
 };
 
+/**
+ * Every group starts collapsed on each page load: stored open/closed prefs are deliberately
+ * ignored at startup (toggling still works within the session and is still written back).
+ */
 function readGroupOpenPrefs(): Record<string, boolean> {
-  try {
-    const raw = localStorage.getItem(GROUPS_STORAGE_KEY);
-    if (raw === null) return { ...DEFAULT_GROUP_OPEN };
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const result: Record<string, boolean> = { ...DEFAULT_GROUP_OPEN };
-    for (const key of Object.keys(result)) {
-      if (typeof parsed[key] === "boolean") result[key] = parsed[key] as boolean;
-    }
-    // "Numerical accuracy" was called "Simulation" in earlier versions: honour the old stored key
-    // when the new one is absent, so a user's open/closed choice survives the rename.
-    if (typeof parsed["Numerical accuracy"] !== "boolean" && typeof parsed.Simulation === "boolean") {
-      result["Numerical accuracy"] = parsed.Simulation;
-    }
-    return result;
-  } catch {
-    return { ...DEFAULT_GROUP_OPEN };
-  }
+  return { ...DEFAULT_GROUP_OPEN };
 }
 
 function writeGroupOpenPrefs(prefs: Record<string, boolean>): void {
@@ -501,7 +489,7 @@ export function createParamsPanel(container: HTMLElement, onApply: (params: Para
 
   const derivedDetails = document.createElement("details");
   derivedDetails.className = "params-group";
-  derivedDetails.open = groupOpenPrefs.Derived ?? true;
+  derivedDetails.open = groupOpenPrefs.Derived ?? false;
   derivedDetails.addEventListener("toggle", () => {
     groupOpenPrefs.Derived = derivedDetails.open;
     writeGroupOpenPrefs(groupOpenPrefs);

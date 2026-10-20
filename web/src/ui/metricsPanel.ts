@@ -209,19 +209,9 @@ const DEFAULT_GROUP_OPEN: Record<string, boolean> = {
   Solver: false,
 };
 
+/** All groups start collapsed on every page load: stored prefs are ignored at startup. */
 function readGroupOpenPrefs(): Record<string, boolean> {
-  try {
-    const raw = localStorage.getItem(GROUPS_STORAGE_KEY);
-    if (raw === null) return { ...DEFAULT_GROUP_OPEN };
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const result: Record<string, boolean> = { ...DEFAULT_GROUP_OPEN };
-    for (const key of Object.keys(result)) {
-      if (typeof parsed[key] === "boolean") result[key] = parsed[key] as boolean;
-    }
-    return result;
-  } catch {
-    return { ...DEFAULT_GROUP_OPEN };
-  }
+  return { ...DEFAULT_GROUP_OPEN };
 }
 
 function writeGroupOpenPrefs(prefs: Record<string, boolean>): void {
